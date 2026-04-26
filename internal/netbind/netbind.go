@@ -53,6 +53,14 @@ func SelectBindAddrs(ifaces []net.Interface, cfg BindConfig) ([]string, error) {
 	addrs := []string{"127.0.0.1"}
 
 	for _, iface := range ifaces {
+		// Skip interfaces that are administratively or operationally down —
+		// Windows commonly reports unconfigured adapters with APIPA
+		// (169.254.x.x) addresses that look fine on paper but error with
+		// "address not valid in its context" when bound. The loopback iface
+		// is also skipped because 127.0.0.1 is added directly above.
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
 		ifAddrs, err := ifaceAddrs(iface)
 		if err != nil {
 			slog.Warn("netbind: failed to read interface addrs",

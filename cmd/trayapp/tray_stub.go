@@ -14,7 +14,7 @@ import (
 // satisfies the build-tag pattern documented in docs/development.md and
 // blocks until the supplied context is cancelled so the calling goroutine
 // has a stable lifetime regardless of platform.
-func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle() }) {
-	slog.Info("tray UI not available on this platform; running headless")
+func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle() }, dashboardURL string) {
+	slog.Info("tray UI not available on this platform; running headless", "dashboard", dashboardURL)
 	<-ctx.Done()
 }

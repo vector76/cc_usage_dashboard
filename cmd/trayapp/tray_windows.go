@@ -3,22 +3,35 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	_ "embed"
+	"encoding/binary"
+	"fmt"
+	"image/png"
 	"log/slog"
+	"os/exec"
 
 	"fyne.io/systray"
 
 	"github.com/vector76/cc_usage_dashboard/internal/server"
 )
 
+//go:embed claude_clock.png
+var iconPNG []byte
+
 // StartTray runs the Windows systray UI. It blocks until ctx is cancelled
 // or the user picks Quit, at which point it tears down the tray and
-// returns. The skeleton wires the documented v1 menu (Open dashboard,
-// Status, Pause slack signal, About, Quit) — handler bodies are TODOs so
-// that the cross-compiled binary builds and exposes the correct menu
-// surface while the real behaviors are filled in later.
-func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle() }) {
+// returns. dashboardURL is the http://host:port the "Open dashboard" item
+// should launch in the user's default browser.
+func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle() }, dashboardURL string) {
 	onReady := func() {
+		icon, err := buildTrayIcon(iconPNG)
+		if err != nil {
+			slog.Warn("tray: icon build failed; tray will appear without an icon", "err", err)
+		} else {
+			systray.SetIcon(icon)
+		}
 		systray.SetTitle("Claude Usage")
 		systray.SetTooltip("Claude Usage Dashboard")
 
@@ -38,8 +51,9 @@ func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle
 					systray.Quit()
 					return
 				case <-mOpen.ClickedCh:
-					// TODO: open http://localhost:<port> via browser.
-					slog.Info("tray: open dashboard clicked")
+					if err := openURL(dashboardURL); err != nil {
+						slog.Error("tray: open dashboard failed", "url", dashboardURL, "err", err)
+					}
 				case <-mPause.ClickedCh:
 					if paused != nil {
 						paused.Toggle()
@@ -67,4 +81,47 @@ func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle
 	}
 
 	systray.Run(onReady, onExit)
+}
+
+// openURL launches the user's default browser at url. rundll32 keeps the
+// trayapp's windowsgui mode console-free (cmd /c start would briefly flash
+// a console window even with -H=windowsgui).
+func openURL(url string) error {
+	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+}
+
+// buildTrayIcon wraps the embedded PNG in a single-image Windows ICO
+// container. Vista and later accept PNG-in-ICO directly, so we don't
+// have to decode and re-encode as a BMP. We still call png.DecodeConfig
+// to discover the source dimensions: ICONDIRENTRY width/height fields
+// are 8-bit (0 means "256 or larger").
+func buildTrayIcon(pngBytes []byte) ([]byte, error) {
+	if len(pngBytes) == 0 {
+		return nil, fmt.Errorf("icon PNG is empty")
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(pngBytes))
+	if err != nil {
+		return nil, fmt.Errorf("decode PNG config: %w", err)
+	}
+
+	widthByte := byte(cfg.Width)
+	if cfg.Width >= 256 {
+		widthByte = 0
+	}
+	heightByte := byte(cfg.Height)
+	if cfg.Height >= 256 {
+		heightByte = 0
+	}
+
+	var buf bytes.Buffer
+	// ICONDIR: reserved=0, type=1 (icon), count=1
+	buf.Write([]byte{0, 0, 1, 0, 1, 0})
+	// ICONDIRENTRY
+	binary.Write(&buf, binary.LittleEndian, struct {
+		Width, Height, Colors, Reserved byte
+		Planes, BitCount                uint16
+		BytesInRes, ImageOffset         uint32
+	}{widthByte, heightByte, 0, 0, 1, 32, uint32(len(pngBytes)), 22})
+	buf.Write(pngBytes)
+	return buf.Bytes(), nil
 }

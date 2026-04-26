@@ -114,9 +114,10 @@ func main() {
 	// process if the user quits via the tray menu.
 	trayCtx, cancelTray := context.WithCancel(context.Background())
 	defer cancelTray()
+	dashboardURL := fmt.Sprintf("http://127.0.0.1:%d", cfg.HTTP.Port)
 	trayDone := make(chan struct{})
 	go func() {
-		StartTray(trayCtx, srv, pauseToggle{c: srv.SlackCalculator()})
+		StartTray(trayCtx, srv, pauseToggle{c: srv.SlackCalculator()}, dashboardURL)
 		close(trayDone)
 	}()
 
@@ -139,8 +140,9 @@ func main() {
 
 	for _, host := range bindAddrs {
 		addr := fmt.Sprintf("%s:%d", host, cfg.HTTP.Port)
+		// srv.ListenAndServe logs "starting HTTP server" itself; don't log
+		// again here or every address shows up twice in the log.
 		go func(a string) {
-			slog.Info("starting HTTP server", "addr", a)
 			serverErr <- srv.ListenAndServe(a)
 		}(addr)
 	}

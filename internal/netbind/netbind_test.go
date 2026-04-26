@@ -142,7 +142,11 @@ func TestSelectBindAddrs(t *testing.T) {
 			ifaces := make([]net.Interface, 0, len(tc.ifaces))
 			for i, d := range tc.ifaces {
 				synthetic[d.name] = d.addrs
-				ifaces = append(ifaces, net.Interface{Index: i + 1, Name: d.name})
+				ifaces = append(ifaces, net.Interface{
+					Index: i + 1,
+					Name:  d.name,
+					Flags: net.FlagUp, // SelectBindAddrs filters on FlagUp; tests model healthy adapters by default
+				})
 			}
 
 			old := ifaceAddrs
@@ -161,10 +165,34 @@ func TestSelectBindAddrs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
+				if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSelectBindAddrsSkipsDownInterfaces verifies that interfaces without
+// FlagUp are skipped — Windows often reports unconfigured adapters with
+// APIPA addresses that look fine on paper but fail to bind.
+func TestSelectBindAddrsSkipsDownInterfaces(t *testing.T) {
+	addr := &net.IPNet{IP: net.ParseIP("172.17.0.1"), Mask: net.CIDRMask(16, 32)}
+	old := ifaceAddrs
+	t.Cleanup(func() { ifaceAddrs = old })
+	ifaceAddrs = func(iface net.Interface) ([]net.Addr, error) {
+		return []net.Addr{addr}, nil
+	}
+
+	ifaces := []net.Interface{
+		{Index: 1, Name: "down0", Flags: 0},                  // no FlagUp - should be skipped
+		{Index: 2, Name: "lo0", Flags: net.FlagUp | net.FlagLoopback}, // loopback - should be skipped
+	}
+	got, err := SelectBindAddrs(ifaces, BindConfig{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"127.0.0.1"}) {
+		t.Errorf("expected only loopback, got %v", got)
 	}
 }
 
