@@ -4,10 +4,10 @@
 .raymond/
 /.bm
 
-# Build artifacts
-clusage-cli
-trayapp
-trayapp.exe
+# Build artifacts (anchored to repo root so they don't clobber source dirs)
+/clusage-cli
+/trayapp
+/trayapp.exe
 *.o
 *.a
 *.so
