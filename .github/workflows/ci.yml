@@ -14,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: '1.23'
 
@@ -31,13 +31,13 @@ jobs:
         run: make build-trayapp
 
       - name: Upload CLI artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: clusage-cli
           path: clusage-cli
 
       - name: Upload trayapp artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: trayapp
           path: trayapp
