@@ -1,6 +1,7 @@
 package discount
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -255,6 +256,81 @@ func TestCalculate_BucketsAreMutuallyExclusive(t *testing.T) {
 	}
 	if res.EventsWithReportedCost != 0 {
 		t.Errorf("EventsWithReportedCost: got %d, want 0 (cost was NULL)", res.EventsWithReportedCost)
+	}
+}
+
+// TestCalculate_WorkedExampleFromDocs reproduces the worked example in
+// docs/discount-calculation.md: $200/mo subscription, last 24h, $42.10
+// consumed → value_ratio ~6.31, discount_pct ~84.2%, savings ~$35.43.
+func TestCalculate_WorkedExampleFromDocs(t *testing.T) {
+	now := time.Date(2026, 4, 25, 17, 32, 14, 0, time.UTC)
+	c, s := newCalc(t, 200.0, 30, now)
+	defer s.Close()
+
+	// Three reported-cost events within the last 24h summing to exactly 42.10.
+	insertEvent(t, s, now.Add(-1*time.Hour), ptr(15.00), "reported")
+	insertEvent(t, s, now.Add(-6*time.Hour), ptr(20.10), "reported")
+	insertEvent(t, s, now.Add(-12*time.Hour), ptr(7.00), "reported")
+
+	res, err := c.Calculate("24h")
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+
+	if !floatNear(res.ConsumedUSDEquivalent, 42.10, 1e-6) {
+		t.Errorf("ConsumedUSDEquivalent: got %v, want 42.10", res.ConsumedUSDEquivalent)
+	}
+	if res.ValueRatio == nil {
+		t.Fatal("ValueRatio: got nil, want ~6.31")
+	}
+	// Doc rounds prorated subscription to $6.67/day; tolerance must cover
+	// both that rounded value and the exact 200/30 used by the calculator.
+	if math.Abs(*res.ValueRatio-6.31) > 0.01 {
+		t.Errorf("ValueRatio: got %v, want ~6.31 (±0.01)", *res.ValueRatio)
+	}
+	if res.DiscountPct == nil {
+		t.Fatal("DiscountPct: got nil, want ~84.2")
+	}
+	if math.Abs(*res.DiscountPct-84.2) > 0.1 {
+		t.Errorf("DiscountPct: got %v, want ~84.2 (±0.1)", *res.DiscountPct)
+	}
+	if math.Abs(res.SavingsUSD-35.43) > 0.01 {
+		t.Errorf("SavingsUSD: got %v, want ~35.43 (±0.01)", res.SavingsUSD)
+	}
+}
+
+// TestParsePeriod_AcceptedFormats verifies the period strings the docs
+// promise (24h, 7d, 30d) all parse to the expected duration, and that
+// invalid strings return an error.
+func TestParsePeriod_AcceptedFormats(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"24h", 24 * time.Hour, false},
+		{"7d", 7 * 24 * time.Hour, false},
+		{"30d", 30 * 24 * time.Hour, false},
+		{"banana", 0, true},
+		{"7days", 0, true},
+		{"", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := parsePeriod(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("parsePeriod(%q) = %v, want error", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parsePeriod(%q) unexpected error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("parsePeriod(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 
