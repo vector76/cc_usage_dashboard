@@ -36,7 +36,7 @@ When a container does not bind-mount `~/.claude` from the host, the host tailer 
 see its activity. Instead, a Stop hook installed in the container runs `clusage-cli log
 --from-hook` after each turn, reading Claude Code's hook payload from stdin, opening
 the transcript file referenced therein, and POSTing each new assistant message's usage
-block to the host server. See `docs/components/cli.md` for the wiring.
+block to the host server. See `docs/container-cli.md` for the wiring.
 
 This path is **also passive in the sense that matters**: it observes work the user
 chose to do, never makes a request to provoke a measurement, and never starts a new
@@ -86,7 +86,7 @@ The parser should:
 **Status: secondary, used for baseline anchoring.**
 
 A Tampermonkey/Violentmonkey userscript on `claude.ai/*` reads the dashboard's displayed
-quota numbers and POSTs them to the local server. See `docs/components/userscript.md` for
+quota numbers and POSTs them to the local server. See `docs/userscript.md` for
 the implementation plan.
 
 ### Pros

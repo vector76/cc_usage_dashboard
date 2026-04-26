@@ -54,7 +54,7 @@ A single Go executable. Responsibilities:
 - Tails session JSONL files in `~/.claude/projects/` and ingests them into the DB.
 - Renders the local dashboard from the same process (static HTML+JS, served over HTTP).
 - Tray icon with status tooltip and menu items: "Open dashboard", "Pause slack signal",
-  "Quit", "About". (See `docs/components/tray-app.md` for the rationale on pause.)
+  "Quit", "About". (See `docs/tray-app.md` for the rationale on pause.)
 - Autostart via Task Scheduler "at logon" or `shell:startup` shortcut.
 
 Why a single binary: simplifies install, eliminates IPC, keeps the SQLite writer
@@ -116,7 +116,7 @@ failure means that turn is lost. See the failure-modes table below.
 1. User opens claude.ai dashboard in the host browser.
 2. Userscript reads the visible quota numbers (5-hour remaining, weekly remaining).
 3. Userscript POSTs `/snapshot` with the full payload defined in
-   `docs/components/userscript.md` (remaining + total + window-end + raw DOM text).
+   `docs/userscript.md` (remaining + total + window-end + raw DOM text).
 4. Trayapp inserts into `quota_snapshots` and uses it to set or correct the baseline for
    the current 5-hour and weekly windows.
 5. If snapshot disagrees with derived state by more than the drift threshold, an alert

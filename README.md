@@ -91,10 +91,9 @@ The session log tailer is a goroutine inside the tray app, not a separate binary
 │   ├── slack-indicator.md
 │   ├── discount-calculation.md
 │   ├── roadmap.md
-│   └── components/
-│       ├── tray-app.md
-│       ├── cli.md
-│       └── userscript.md
+│   ├── tray-app.md
+│   ├── container-cli.md
+│   └── userscript.md
 ├── cmd/
 │   ├── trayapp/                  # Windows tray + server binary
 │   └── cli/                      # Linux container CLI
