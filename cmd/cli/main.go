@@ -132,9 +132,41 @@ func cmdSlack() {
 	format := fs.String("format", "json", "output format: json|release-bool|fraction")
 	fs.Parse(os.Args[2:])
 
-	// Placeholder: will implement in Phase 5
-	fmt.Printf("Placeholder: slack --format %s subcommand\n", *format)
-	os.Exit(2)
+	timeout := parseTimeout()
+	client := &http.Client{Timeout: timeout}
+
+	resp, err := client.Get(fmt.Sprintf("http://%s:%s/slack", host, port))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		os.Exit(3)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
+		os.Exit(5)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to parse response\n")
+		os.Exit(5)
+	}
+
+	switch *format {
+	case "json":
+		json.NewEncoder(os.Stdout).Encode(result)
+	case "release-bool":
+		if release, ok := result["release_recommended"].(bool); ok {
+			fmt.Println(release)
+		}
+	case "fraction":
+		if fraction, ok := result["slack_combined_fraction"].(float64); ok {
+			fmt.Printf("%.4f\n", fraction)
+		}
+	}
+
+	os.Exit(0)
 }
 
 func postEvent(payload map[string]interface{}) {
