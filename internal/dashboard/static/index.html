@@ -54,14 +54,18 @@ function fmt(x, d) {
   return Number(x).toFixed(d == null ? 2 : d);
 }
 function fmtTime(s) { return s ? new Date(s).toLocaleString() : "—"; }
-// fmtAxisTime renders a short time label for the burn-down X axis. For
-// short windows (session, ≤24h) we show "HH:MM" in local time; for longer
-// windows (weekly) we prefix the weekday so "Thu 23:00" is unambiguous.
+// fmtAxisTime renders a short 12-hour AM/PM label for the burn-down X
+// axis. Short windows (session, ≤24h) get "h:mm AM/PM" in local time;
+// longer windows (weekly) get the weekday prefix so "Thu 11:00 PM" is
+// unambiguous when the chart spans a week.
 function fmtAxisTime(ms, durationMs) {
   const d = new Date(ms);
-  const hh = String(d.getHours()).padStart(2, "0");
+  let h = d.getHours();
   const mm = String(d.getMinutes()).padStart(2, "0");
-  const time = `${hh}:${mm}`;
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  const time = `${h}:${mm} ${ampm}`;
   if (durationMs > 24 * 60 * 60 * 1000) {
     const day = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
     return `${day} ${time}`;
