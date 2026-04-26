@@ -85,7 +85,10 @@ func main() {
 
 	srv := server.New(db, cfg)
 
-	priceTable := ingest.LoadPriceTable(cfg.Pricing.TablePath)
+	priceTable, err := ingest.LoadPriceTable(cfg.Pricing.TablePath)
+	if err != nil {
+		slog.Warn("price table load failed; cost computation disabled", "err", err)
+	}
 
 	tailer := ingest.NewTailer(cfg.Claude.ProjectsDir, db, priceTable)
 	tailer.Start()

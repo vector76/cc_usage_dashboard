@@ -47,11 +47,15 @@ type Server struct {
 
 // New creates a new HTTP server.
 func New(s *store.Store, cfg *config.Config) *Server {
+	priceTable, err := ingest.LoadPriceTable(cfg.Pricing.TablePath)
+	if err != nil {
+		slog.Warn("price table load failed; cost computation disabled", "err", err)
+	}
 	srv := &Server{
 		mux:        http.NewServeMux(),
 		store:      s,
 		cfg:        cfg,
-		priceTable: ingest.LoadPriceTable(cfg.Pricing.TablePath),
+		priceTable: priceTable,
 		metrics:    NewMetrics(),
 		slackCalc: slack.NewCalculator(s.DB(), slack.Config{
 			QuietPeriodSeconds:     cfg.Slack.QuietPeriodSeconds,
