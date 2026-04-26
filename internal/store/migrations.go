@@ -49,11 +49,9 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
 	observed_at TIMESTAMP NOT NULL,
 	received_at TIMESTAMP NOT NULL,
 	source TEXT NOT NULL,
-	five_hour_remaining REAL,
-	five_hour_total REAL,
-	five_hour_window_ends TIMESTAMP,
-	weekly_remaining REAL,
-	weekly_total REAL,
+	session_used REAL,
+	session_window_ends TIMESTAMP,
+	weekly_used REAL,
 	weekly_window_ends TIMESTAMP,
 	raw_json TEXT NOT NULL
 );

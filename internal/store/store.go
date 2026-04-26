@@ -119,25 +119,26 @@ func (s *Store) InsertUsageEvent(
 }
 
 // InsertQuotaSnapshot inserts a quota snapshot and returns its ID.
+// session_used and weekly_used are 0–100 percentages.
 func (s *Store) InsertQuotaSnapshot(
 	observedAt, receivedAt time.Time,
 	source string,
-	fiveHourRemaining, fiveHourTotal *float64,
-	fiveHourWindowEnds *time.Time,
-	weeklyRemaining, weeklyTotal *float64,
+	sessionUsed *float64,
+	sessionWindowEnds *time.Time,
+	weeklyUsed *float64,
 	weeklyWindowEnds *time.Time,
 	rawJSON string,
 ) (int64, error) {
 	result, err := s.db.Exec(`
 		INSERT INTO quota_snapshots (
 			observed_at, received_at, source,
-			five_hour_remaining, five_hour_total, five_hour_window_ends,
-			weekly_remaining, weekly_total, weekly_window_ends,
+			session_used, session_window_ends,
+			weekly_used, weekly_window_ends,
 			raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, FormatTime(observedAt), FormatTime(receivedAt), source,
-		fiveHourRemaining, fiveHourTotal, FormatTimePtr(fiveHourWindowEnds),
-		weeklyRemaining, weeklyTotal, FormatTimePtr(weeklyWindowEnds),
+		sessionUsed, FormatTimePtr(sessionWindowEnds),
+		weeklyUsed, FormatTimePtr(weeklyWindowEnds),
 		rawJSON)
 
 	if err != nil {

@@ -45,7 +45,7 @@ kill $SERVER_PID
   `consumed_usd_equivalent`, `events_with_reported_cost`,
   `events_with_computed_cost`, `events_without_cost`, `cost_coverage_pct`,
   `savings_usd`
-- /slack returns documented top-level keys (`now`, `five_hour`, `weekly`,
+- /slack returns documented top-level keys (`now`, `session`, `weekly`,
   `slack_combined_fraction`, `priority_quiet_for_seconds`, `paused`,
   `release_recommended`, `gates`) with the four documented gate keys
 
@@ -91,11 +91,9 @@ curl -X POST http://localhost:27812/snapshot \
   -d '{
     "observed_at": "2026-04-26T10:00:00Z",
     "source": "userscript",
-    "five_hour_remaining": 80.0,
-    "five_hour_total": 100.0,
-    "five_hour_window_ends": "2026-04-26T15:00:00Z",
-    "weekly_remaining": 1500.0,
-    "weekly_total": 2000.0,
+    "session_used": 6.0,
+    "session_window_ends": "2026-04-26T15:00:00Z",
+    "weekly_used": 23.0,
     "weekly_window_ends": "2026-04-28T00:00:00Z"
   }'
 
@@ -108,9 +106,9 @@ kill $SERVER_PID
 
 **Expected:**
 - Snapshot stored successfully
-- Windows created for both 5-hour and weekly
-- 5-hour window has `baseline_total = five_hour_total`
-- Weekly window has `baseline_total = weekly_total` (set by the in-window
+- Windows created for both `session` and `weekly`
+- session window has `baseline_total = session_used`
+- Weekly window has `baseline_total = weekly_used` (set by the in-window
   baseline correction pass)
 
 ## Scenario 4: Cost resolution
@@ -154,15 +152,14 @@ Go test: `TestE2E_SlackReleaseFlow`
 SERVER_PID=$!
 sleep 1
 
-# Establish an active 5-hour window (snapshot, or seeded directly in tests)
+# Establish an active session window (snapshot, or seeded directly in tests)
 curl -X POST http://localhost:27812/snapshot \
   -H "Content-Type: application/json" \
   -d '{
     "observed_at": "2026-04-26T10:00:00Z",
     "source": "userscript",
-    "five_hour_remaining": 50.0,
-    "five_hour_total": 100.0,
-    "five_hour_window_ends": "2026-04-26T15:00:00Z"
+    "session_used": 12.0,
+    "session_window_ends": "2026-04-26T15:00:00Z"
   }'
 
 # Post some consumption
@@ -179,7 +176,7 @@ curl -X POST http://localhost:27812/slack/release \
     "job_tag": "batch-job-1",
     "estimated_cost": 0.02,
     "slack_at_release": 0.49,
-    "window_kind": "five_hour"
+    "window_kind": "session"
   }'
 
 # Verify release recorded
@@ -194,7 +191,7 @@ kill $SERVER_PID
 - /slack/release returns 200
 - `slack_releases` row contains `job_tag='batch-job-1'`,
   `estimated_cost=0.02`, `slack_at_release=0.49`, and `window_id` referring
-  to the active 5-hour window
+  to the active session window
 
 ## Scenario 6: Parse error recording
 

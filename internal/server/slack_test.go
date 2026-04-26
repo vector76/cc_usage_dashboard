@@ -49,7 +49,7 @@ func TestHandleSlackQueryShape(t *testing.T) {
 	}
 
 	wantTopKeys := []string{
-		"now", "five_hour", "weekly",
+		"now", "session", "weekly",
 		"slack_combined_fraction", "priority_quiet_for_seconds",
 		"paused", "release_recommended", "gates",
 	}
@@ -78,7 +78,7 @@ func TestHandleSlackQueryWindowFields(t *testing.T) {
 	defer testStore.Close()
 
 	now := time.Now().UTC()
-	insertWindow(t, testStore.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0)
+	insertWindow(t, testStore.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0)
 
 	req := httptest.NewRequest("GET", "/slack", nil)
 	w := httptest.NewRecorder()
@@ -89,19 +89,19 @@ func TestHandleSlackQueryWindowFields(t *testing.T) {
 	}
 
 	var raw struct {
-		FiveHour map[string]json.RawMessage `json:"five_hour"`
+		Session map[string]json.RawMessage `json:"session"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if raw.FiveHour == nil {
-		t.Fatalf("expected five_hour block, got null")
+	if raw.Session == nil {
+		t.Fatalf("expected session block, got null")
 	}
 
 	wantKeys := []string{"window_start", "window_end", "quota_total", "consumed", "expected", "slack", "slack_fraction"}
 	for _, k := range wantKeys {
-		if _, ok := raw.FiveHour[k]; !ok {
-			t.Errorf("missing five_hour field %q: %s", k, w.Body.String())
+		if _, ok := raw.Session[k]; !ok {
+			t.Errorf("missing session field %q: %s", k, w.Body.String())
 		}
 	}
 }
@@ -158,14 +158,14 @@ func TestHandleSlackReleaseNoActiveWindow(t *testing.T) {
 }
 
 // TestHandleSlackReleaseWindowKindWeekly verifies window_kind="weekly" picks
-// the weekly window (and a five_hour-only DB returns 409 for weekly).
+// the weekly window (and a session-only DB returns 409 for weekly).
 func TestHandleSlackReleaseWindowKindWeekly(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()
 
 	now := time.Now().UTC()
 	weeklyID := insertWindow(t, testStore.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 5000.0)
-	insertWindow(t, testStore.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0)
+	insertWindow(t, testStore.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0)
 
 	body, _ := json.Marshal(map[string]any{
 		"released_at": now.Format(time.RFC3339Nano),
@@ -206,13 +206,13 @@ func TestHandleSlackReleaseWindowKindNoMatch(t *testing.T) {
 	defer testStore.Close()
 
 	now := time.Now().UTC()
-	// Only weekly exists; request five_hour.
+	// Only weekly exists; request session.
 	insertWindow(t, testStore.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 5000.0)
 
 	body, _ := json.Marshal(map[string]any{
 		"released_at": now.Format(time.RFC3339Nano),
-		"job_tag":     "five-hour-job",
-		"window_kind": "five_hour",
+		"job_tag":     "session-job",
+		"window_kind": "session",
 	})
 	req := httptest.NewRequest("POST", "/slack/release", bytes.NewReader(body))
 	w := httptest.NewRecorder()

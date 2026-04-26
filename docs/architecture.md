@@ -113,20 +113,23 @@ failure means that turn is lost. See the failure-modes table below.
 
 ### Snapshot recalibration
 
-1. User opens claude.ai dashboard in the host browser.
-2. Userscript reads the visible quota numbers (5-hour remaining, weekly remaining).
-3. Userscript POSTs `/snapshot` with the full payload defined in
-   `docs/userscript.md` (remaining + total + window-end + raw DOM text).
-4. Trayapp inserts into `quota_snapshots` and uses it to set or correct the baseline for
-   the current 5-hour and weekly windows.
-5. If snapshot disagrees with derived state by more than the drift threshold, an alert
-   bit is set and surfaced in the tray UI.
+1. User opens `https://claude.ai/settings/usage` in the host browser.
+2. Userscript reads the two structured progressbars Anthropic exposes:
+   "Current session" and "All models". Each has an `aria-valuenow` attribute
+   (0–100) and a row label `<p>` we match against. Other rows ("Sonnet only",
+   "Claude Design", routine runs, extra usage) are intentionally ignored.
+3. Userscript POSTs `/snapshot` with `session_used` and/or `weekly_used`
+   percentages — see `docs/userscript.md`.
+4. Trayapp inserts into `quota_snapshots` and uses the value to set or correct
+   the `baseline_total` for the current session and weekly windows.
+5. If snapshot disagrees with derived state by more than the drift threshold,
+   an alert bit is set and surfaced in the tray UI.
 
 ### Slack consumption
 
 1. External queue process polls `GET /slack` periodically.
 2. Trayapp computes slack per `docs/slack-indicator.md` (clamped uniform-burn expected
-   consumption, applied independently to the 5-hour and weekly windows, combined via
+   consumption, applied independently to the session and weekly windows, combined via
    `min`).
 3. Returns slack absolute and as a fraction of quota, plus gate states.
 4. The queue decides whether to release a job. The trayapp does not run jobs.

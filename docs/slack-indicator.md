@@ -8,11 +8,18 @@ to release low-priority work that is only worth running for free.
 
 Let:
 
-- `Q` = total quota for the current window (5-hour or weekly).
+- `Q` = total quota for the current window (session or weekly). Now derived from
+  `windows.baseline_total`, which since the v0.2 schema rewrite stores a
+  percentage anchor (0–100) rather than a dollar amount. Math below is unitless
+  in `Q`'s own units, but the dashboard / queue should treat the figures as
+  unanchored to dollars until cross-source reconciliation lands.
 - `t0` = window start.
 - `t1` = window end.
 - `t` = now.
-- `U(t)` = cumulative consumption since `t0`.
+- `U(t)` = cumulative consumption since `t0`. Currently sourced from
+  `usage_events.cost_usd_equivalent` (in dollars). The unit mismatch between
+  `Q` and `U` is known follow-up debt — the previous formulation assumed both
+  were dollars, but Anthropic stopped exposing a per-window dollar quota.
 
 Define expected consumption as a uniform burn, clamped to the window:
 
@@ -25,7 +32,7 @@ slack_fraction(t) = slack(t) / Q
 
 The clamp matters at the boundaries:
 
-- **Before window starts** (`t < t0`): a 5-hour window only begins on first use. If no
+- **Before window starts** (`t < t0`): a session window only begins on first use. If no
   events have occurred yet, the window is undefined; the API returns
   `release_recommended=false` and a null `slack_fraction` rather than computing.
 - **After window ends** (`t > t1`): `progress=1`, `E=Q`. Slack is just `Q - U`, but at
@@ -38,13 +45,14 @@ exhausting the quota before the user's real work completes.
 
 ## Two windows, one signal
 
-There are two simultaneously active windows: 5-hour and weekly. The slack indicator must
-not release work that fits the 5-hour pace but blows the weekly budget, or vice versa.
+There are two simultaneously active windows: session (5-hour) and weekly. The slack
+indicator must not release work that fits the session pace but blows the weekly
+budget, or vice versa.
 
 The combined signal is:
 
 ```
-slack_combined = min(slack_fraction_5h, slack_fraction_weekly)
+slack_combined = min(slack_fraction_session, slack_fraction_weekly)
 ```
 
 A job is releasable only when both windows show slack. The `min` is conservative on
@@ -95,7 +103,7 @@ Response:
 ```json
 {
   "now": "2026-04-25T17:32:14Z",
-  "five_hour": {
+  "session": {
     "window_start": "2026-04-25T14:02:11Z",
     "window_end":   "2026-04-25T19:02:11Z",
     "quota_total":  100.0,
@@ -131,10 +139,15 @@ fractions and apply its own logic.
 
 ## Baseline freshness gate
 
-If the most recent snapshot is older than `baseline_max_age` (suggested 48 hours) **and**
-passive consumption since then exceeds `baseline_drift_threshold` (suggested 25% of
-quota), the freshness gate fails. Rationale: we have low confidence in `Q` and might be
-over-releasing into a near-exhausted window.
+The gate passes iff a snapshot exists and is no older than `baseline_max_age`
+(suggested 48 hours). Missing snapshot fails the gate.
+
+The previous formulation also had a "drift since stale snapshot" leg comparing
+dollar consumption against a dollar-denominated quota_total. With the v0.2 switch
+to percent-used snapshots there is no per-window dollar quota to compare against,
+so the drift leg has been retired. `BaselineDriftThreshold` config remains in
+place because the dashboard's `drift_alert` still uses it; the slack endpoint no
+longer does.
 
 ## Why uniform burn for `E(t)`
 
@@ -156,7 +169,7 @@ Request body:
   "job_tag":          "nightly-lint",
   "estimated_cost":   1.20,
   "slack_at_release": 8.40,
-  "window_kind":      "five_hour"
+  "window_kind":      "session"
 }
 ```
 
@@ -167,8 +180,8 @@ Request body:
   the per-job budget cap retrospectively.
 - `slack_at_release`: the absolute slack value the queue saw on the preceding `GET
   /slack`. Detects races where slack changed between the query and the release.
-- `window_kind`: which window the queue was sizing against (`five_hour` | `weekly`).
-  Optional; defaults to `five_hour` since that's the binding window most of the time.
+- `window_kind`: which window the queue was sizing against (`session` | `weekly`).
+  Optional; defaults to `session` since that's the binding window most of the time.
   The trayapp resolves this to a `windows` row at insert time, picking the window of
   the requested `kind` that contains `released_at`. If the window rolled over between
   `GET /slack` and `POST /slack/release` (rare but possible), the FK will point at
@@ -186,7 +199,7 @@ v1 just records the release decision.
 | `GET /slack`: no baseline snapshot ever recorded   | `release_recommended=false`. Show alert.|
 | `GET /slack`: window has not started (no events)   | `slack_fraction = null`, `release_recommended=false`. |
 | `GET /slack`: negative slack on either window      | `release_recommended=false`.            |
-| `GET /slack`: baseline drift detected              | Freshness gate fails.                   |
+| `GET /slack`: snapshot older than `baseline_max_age` | Freshness gate fails.                 |
 | Either endpoint: trayapp restart mid-window        | Recovers from `windows` table state.    |
 | `POST /slack/release`: no window of requested kind | HTTP 409. Queue should not have called `/release` if the corresponding `GET /slack` reported `release_recommended=false`; this catches the misuse. |
 | `POST /slack/release`: required field missing      | HTTP 400.                               |

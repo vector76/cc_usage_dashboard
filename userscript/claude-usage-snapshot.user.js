@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.1.0
-// @description  Reads quota numbers from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
+// @version      0.2.0
+// @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
 // @grant        GM.xmlHttpRequest
@@ -19,10 +19,17 @@
     const ENDPOINT_SNAPSHOT = 'http://localhost:27812/snapshot';
     const ENDPOINT_PARSE_ERROR = 'http://localhost:27812/parse_error';
 
+    const USAGE_PATH = '/settings/usage';
     const POST_INTERVAL_MS = 60 * 1000;          // debounce snapshots to once per minute
     const DOM_WAIT_TIMEOUT_MS = 30 * 1000;       // how long to wait for quota nodes to appear
     const DOM_MISSING_REPORT_MS = 5 * 60 * 1000; // report parse_error after 5min of missing DOM
     const PARSE_ERROR_REPORT_COOLDOWN_MS = 60 * 60 * 1000; // don't spam parse_error more than 1/hr
+
+    // Exact label strings shown in the Claude usage page row labels. Anything
+    // else ("Sonnet only", "Claude Design", "Daily included routine runs", …)
+    // is intentionally ignored.
+    const LABEL_SESSION = 'Current session';
+    const LABEL_WEEKLY = 'All models';
 
     let lastPayloadHash = null;
     let lastParseErrorAt = 0;
@@ -68,74 +75,61 @@
 
     // ---------- DOM extraction ----------
 
-    // Word-boundary checks so unrelated text like "25h" or "weekday" doesn't
-    // trip the quota-page heuristic.
-    const FIVE_HOUR_RE = /(?:^|\W)(?:5-hour|5\s*hour|five-hour|5h)\b/i;
-    const WEEKLY_RE = /(?:^|\W)week(?:ly|s)?\b/i;
-
-    // True iff the page text looks like it *should* expose quota numbers.
-    // Used to gate parse_error reporting so we don't flag chat threads (which
-    // never show quota) and don't ship private chat HTML to the trayapp.
-    function pageLooksLikeQuotaView(text) {
-        if (!/remaining/i.test(text)) return false;
-        return FIVE_HOUR_RE.test(text) || WEEKLY_RE.test(text);
+    // True iff we're on the page that actually exposes quota numbers. Gating
+    // by URL keeps us from posting parse_error payloads that contain private
+    // chat HTML when the user is on /chat/* or other routes.
+    function onUsagePage() {
+        return location.pathname === USAGE_PATH;
     }
 
-    // Look up to LABEL_VALUE_LOOKAHEAD chars after a label for the next "N%".
-    // Used by the cross-line fallback when the SPA renders the label and
-    // percentage on separate lines (e.g. stacked typography).
-    const LABEL_VALUE_LOOKAHEAD = 120;
-
-    function findPercentNear(text, labelRe) {
-        const m = labelRe.exec(text);
-        if (!m) return null;
-        const start = m.index + m[0].length;
-        const lookahead = text.slice(start, start + LABEL_VALUE_LOOKAHEAD);
-        const pm = lookahead.match(/(\d+(?:\.\d+)?)\s*%/);
-        if (!pm) return null;
-        const v = parseFloat(pm[1]);
-        return Number.isNaN(v) ? null : v;
+    // Walk up from a progressbar node to the row container that holds the
+    // label <p>. Layout (as of 2026-04): each row is a flex-row with a
+    // [w-13rem] label column on the left and the bar+percent on the right.
+    // We find the nearest ancestor that contains both a <p> sibling and the
+    // bar — concretely, any ancestor whose textContent contains the label
+    // strings we care about.
+    function findRowLabel(progressbar) {
+        let node = progressbar.parentElement;
+        // Bound the climb so we don't scan the whole document if the layout shifts.
+        for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
+            // Look for a <p> child with one of our exact label strings. We
+            // restrict to <p> to avoid matching "Current session" embedded in
+            // arbitrary helper text.
+            const ps = node.querySelectorAll(':scope p');
+            for (const p of ps) {
+                const text = (p.textContent || '').trim();
+                if (text === LABEL_SESSION || text === LABEL_WEEKLY) {
+                    return text;
+                }
+            }
+        }
+        return null;
     }
 
-    function extractQuota(text) {
-        if (!text) return null;
+    // Returns { sessionUsed, weeklyUsed } where each is a 0–100 number or null.
+    // Reads structured progressbar nodes rather than text-scraping, so it's
+    // robust to copy changes that don't touch the row labels.
+    function extractQuota() {
+        const bars = document.querySelectorAll('[role="progressbar"][aria-label="Usage"]');
+        let sessionUsed = null;
+        let weeklyUsed = null;
 
-        // Pass 1 — line-based: classify each percentage line by labels in the
-        // same line. Cheapest and most precise when the UI renders
-        // "5-hour usage: 64% remaining" as a single line.
-        // Note: we deliberately do NOT try to parse "resets in 3d 4h" into a
-        // window_ends timestamp here. The server expects RFC3339 in
-        // *_window_ends and will reject the whole payload if we send anything
-        // else. raw_dom_text preserves the original phrasing for later use.
-        let fiveHour = null;
-        let weekly = null;
-        const lines = text.split(/\r?\n/);
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            const pctMatch = line.match(/(\d+(?:\.\d+)?)\s*%/);
-            if (!pctMatch) continue;
-            const pct = parseFloat(pctMatch[1]);
-            if (Number.isNaN(pct)) continue;
-
-            if (FIVE_HOUR_RE.test(line) && fiveHour === null) {
-                fiveHour = pct;
-            } else if (WEEKLY_RE.test(line) && weekly === null) {
-                weekly = pct;
+        for (const bar of bars) {
+            const label = findRowLabel(bar);
+            if (!label) continue;
+            const valueStr = bar.getAttribute('aria-valuenow');
+            if (valueStr == null) continue;
+            const value = parseFloat(valueStr);
+            if (Number.isNaN(value)) continue;
+            if (label === LABEL_SESSION && sessionUsed === null) {
+                sessionUsed = value;
+            } else if (label === LABEL_WEEKLY && weeklyUsed === null) {
+                weeklyUsed = value;
             }
         }
 
-        // Pass 2 — cross-line fallback: if Pass 1 missed a value, look at
-        // text that follows the label by up to LABEL_VALUE_LOOKAHEAD chars.
-        if (fiveHour === null) fiveHour = findPercentNear(text, FIVE_HOUR_RE);
-        if (weekly === null) weekly = findPercentNear(text, WEEKLY_RE);
-
-        if (fiveHour === null && weekly === null) return null;
-
-        return {
-            fiveHourRemaining: fiveHour,
-            weeklyRemaining: weekly,
-            rawDomText: text.slice(0, 8192), // bound the payload size
-        };
+        if (sessionUsed === null && weeklyUsed === null) return null;
+        return { sessionUsed, weeklyUsed };
     }
 
     // ---------- snapshot dispatch ----------
@@ -144,34 +138,29 @@
         const body = {
             observed_at: new Date().toISOString(),
             source: 'userscript',
-            raw_dom_text: extracted.rawDomText,
         };
-        if (extracted.fiveHourRemaining !== null) {
-            body.five_hour_remaining = extracted.fiveHourRemaining;
-            body.five_hour_total = 100.0;
+        if (extracted.sessionUsed !== null) {
+            body.session_used = extracted.sessionUsed;
         }
-        if (extracted.weeklyRemaining !== null) {
-            body.weekly_remaining = extracted.weeklyRemaining;
-            body.weekly_total = 100.0;
+        if (extracted.weeklyUsed !== null) {
+            body.weekly_used = extracted.weeklyUsed;
         }
         return body;
     }
 
     function tryDispatch() {
-        const text = (document.body && document.body.innerText) || '';
-
-        // If this isn't a quota-bearing page (e.g. a chat thread), don't
-        // count it as "DOM missing" — that would leak private chat HTML
-        // to the trayapp via the parse_error path.
-        if (!pageLooksLikeQuotaView(text)) {
+        // Skip everything when not on the usage page — chat threads, project
+        // pages etc. never expose these progressbars and we don't want to
+        // accidentally ship private DOM via parse_error.
+        if (!onUsagePage()) {
             domFirstMissingAt = null;
             return;
         }
 
-        const extracted = extractQuota(text);
+        const extracted = extractQuota();
         if (!extracted) {
-            // Page looks like it should have quota but we couldn't parse it.
-            // This is a real parse error worth reporting after a sustained miss.
+            // We're on the usage page but couldn't find either bar. Sustained
+            // misses indicate the DOM has shifted in a way we don't recognize.
             if (domFirstMissingAt === null) domFirstMissingAt = Date.now();
             const missingFor = Date.now() - domFirstMissingAt;
             if (missingFor > DOM_MISSING_REPORT_MS &&
@@ -179,7 +168,7 @@
                 lastParseErrorAt = Date.now();
                 postJSON(ENDPOINT_PARSE_ERROR, {
                     source: 'userscript',
-                    reason: 'quota DOM nodes missing for >5 minutes',
+                    reason: 'usage progressbars missing for >5 minutes',
                     payload: (document.body && document.body.outerHTML) ?
                         document.body.outerHTML.slice(0, 65536) : '',
                 });
@@ -192,11 +181,11 @@
 
         const body = buildSnapshotBody(extracted);
 
-        // Hash the meaningful fields (exclude observed_at and raw_dom_text so
-        // that DOM whitespace churn doesn't defeat de-dup).
+        // Hash the meaningful fields (exclude observed_at) so DOM whitespace
+        // churn doesn't defeat de-dup.
         const hashKey = JSON.stringify({
-            f: body.five_hour_remaining,
-            w: body.weekly_remaining,
+            s: body.session_used,
+            w: body.weekly_used,
         });
         const h = hashString(hashKey);
         if (h === lastPayloadHash) return;
@@ -206,9 +195,10 @@
 
     // ---------- DOM readiness ----------
 
-    // Wait up to DOM_WAIT_TIMEOUT_MS for the page to contain text matching our
-    // heuristic, then start the periodic poller. The MutationObserver lets us
-    // react quickly when the SPA renders the quota panel after navigation.
+    // Wait up to DOM_WAIT_TIMEOUT_MS for the SPA to render at least one
+    // [role=progressbar][aria-label=Usage] node, then start the periodic
+    // poller. The MutationObserver lets us react quickly when the SPA
+    // navigates to /settings/usage after initial load.
     function waitForQuotaDOM(onReady) {
         let fired = false;
         const fire = () => {
@@ -218,8 +208,7 @@
         };
 
         const check = () => {
-            const t = (document.body && document.body.innerText) || '';
-            return /\d+(?:\.\d+)?\s*%/.test(t) || /remaining/i.test(t);
+            return document.querySelector('[role="progressbar"][aria-label="Usage"]') !== null;
         };
 
         if (check()) { fire(); return; }
@@ -233,14 +222,14 @@
                 }
             });
             observer.observe(document.documentElement, {
-                childList: true, subtree: true, characterData: true,
+                childList: true, subtree: true,
             });
         } catch (e) {
             warn('MutationObserver setup failed', e);
         }
 
-        // Hard ceiling: start the poller anyway after the timeout.
-        // tryDispatch will handle the "DOM missing" reporting path.
+        // Hard ceiling: start the poller anyway after the timeout so SPA
+        // navigations to the usage page after this load still get sampled.
         setTimeout(() => {
             if (observer) {
                 try { observer.disconnect(); } catch (_) { /* ignore */ }
@@ -253,9 +242,10 @@
 
     function start() {
         // First attempt immediately; then debounce to once per minute. The
-        // 60s interval catches SPA navigations to new views within the same
-        // window; we deliberately don't reset dedup state on URL change since
-        // identical values across views shouldn't generate duplicate snapshots.
+        // 60s interval catches SPA navigations to /settings/usage within the
+        // same tab; we deliberately don't reset dedup state on URL change
+        // since identical values across re-visits shouldn't generate
+        // duplicate snapshots.
         tryDispatch();
         setInterval(tryDispatch, POST_INTERVAL_MS);
     }

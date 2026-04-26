@@ -75,7 +75,7 @@ func TestDashboardStateJSONShape(t *testing.T) {
 
 	for _, key := range []string{
 		"now",
-		"five_hour",
+		"session",
 		"weekly",
 		"last_snapshot_age_seconds",
 		"parse_errors_24h",

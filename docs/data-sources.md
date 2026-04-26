@@ -10,7 +10,7 @@ where the cheaper tiers fall short.
 ## Tier 1 — Passive observation
 
 **Status: primary.** Two paths, same tier. Both ride on activity the user is already
-performing, so neither perturbs the 5-hour window or the weekly quota.
+performing, so neither perturbs the session (5-hour) window or the weekly quota.
 
 ### 1a. Session JSONL tailing (host)
 
@@ -68,8 +68,9 @@ workflow is whichever requires less change to existing images.
 
 - **Assumes file format stability.** The JSONL schema is not a public contract. The
   tailer must be defensive and log parse failures loudly.
-- **Quota baseline is not in the JSONL.** The files give us *consumption*, not *remaining*.
-  We need a snapshot from somewhere else to anchor the baseline.
+- **Quota baseline is not in the JSONL.** The files give us *dollar consumption per
+  message*, not the *plan-limit % used* number Anthropic shows in the UI. We need a
+  snapshot from somewhere else to anchor the baseline.
 - **Container path coverage.** See above; the unshared-container case is common enough
   that it shapes the install flow, not just an edge case.
 
@@ -142,15 +143,15 @@ right now and is willing to start a window to get it.
 
 ## Cross-source reconciliation
 
-Because Tier 1 measures consumption and Tier 2 measures remaining, the two should agree:
+Tier 1 measures dollar consumption per message; Tier 2 measures the plan-limit
+percentage Anthropic chose to display. They are in different units (dollars vs.
+percent) and Anthropic does not publish the exchange rate (the per-window dollar
+quota that backs the % bar). Reconciling the two is therefore an open problem:
+we can detect *direction* (more dollars in Tier 1 → expect higher % in Tier 2)
+but not absolute magnitude.
 
-```
-quota_total - sum(tier1_events_in_window) ≈ tier2_remaining_at(now)
-```
-
-The trayapp computes both sides on each new snapshot and records the discrepancy. If
-discrepancy exceeds a threshold (suggested: 5% of quota or $X dollar-equivalent), the
-tray icon shows a warning state and the dashboard highlights the divergence. The user
-can then decide whether to trust the snapshot (overwrite baseline) or investigate.
+For now the system stores both and surfaces them side-by-side. Closing the loop —
+inferring the dollar-per-percent rate from observed pairs over time, then alerting
+on divergence — is follow-up work.
 
 The system never silently averages or "splits the difference." Disagreement is data.

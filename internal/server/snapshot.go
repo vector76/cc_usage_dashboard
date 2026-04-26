@@ -8,16 +8,16 @@ import (
 )
 
 // SnapshotRequest represents the POST /snapshot payload.
+// SessionUsed and WeeklyUsed are 0–100 percentages scraped from the
+// claude.ai usage page (the "Current session" and "All models" rows).
 type SnapshotRequest struct {
-	ObservedAt           time.Time  `json:"observed_at"`
-	Source               string     `json:"source"`
-	FiveHourRemaining    *float64   `json:"five_hour_remaining"`
-	FiveHourTotal        *float64   `json:"five_hour_total"`
-	FiveHourWindowEnds   *time.Time `json:"five_hour_window_ends"`
-	WeeklyRemaining      *float64   `json:"weekly_remaining"`
-	WeeklyTotal          *float64   `json:"weekly_total"`
-	WeeklyWindowEnds     *time.Time `json:"weekly_window_ends"`
-	RawDOMText           string     `json:"raw_dom_text,omitempty"`
+	ObservedAt        time.Time  `json:"observed_at"`
+	Source            string     `json:"source"`
+	SessionUsed       *float64   `json:"session_used"`
+	SessionWindowEnds *time.Time `json:"session_window_ends"`
+	WeeklyUsed        *float64   `json:"weekly_used"`
+	WeeklyWindowEnds  *time.Time `json:"weekly_window_ends"`
+	RawDOMText        string     `json:"raw_dom_text,omitempty"`
 }
 
 // handleSnapshot processes POST /snapshot requests.
@@ -43,11 +43,9 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		req.ObservedAt,
 		time.Now(),
 		req.Source,
-		req.FiveHourRemaining,
-		req.FiveHourTotal,
-		req.FiveHourWindowEnds,
-		req.WeeklyRemaining,
-		req.WeeklyTotal,
+		req.SessionUsed,
+		req.SessionWindowEnds,
+		req.WeeklyUsed,
 		req.WeeklyWindowEnds,
 		string(rawJSON),
 	)

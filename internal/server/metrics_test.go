@@ -153,11 +153,11 @@ func TestMetricsSlackReleaseIncrements(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()
 
-	// A release needs an active 5-hour window covering the release time.
+	// A release needs an active session window covering the release time.
 	now := time.Now().UTC()
 	_, err := testStore.DB().Exec(
 		`INSERT INTO windows (kind, started_at, ends_at) VALUES (?, ?, ?)`,
-		"five_hour", store.FormatTime(now.Add(-time.Hour)), store.FormatTime(now.Add(time.Hour)),
+		"session", store.FormatTime(now.Add(-time.Hour)), store.FormatTime(now.Add(time.Hour)),
 	)
 	if err != nil {
 		t.Fatalf("failed to seed window: %v", err)

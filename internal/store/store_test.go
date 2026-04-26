@@ -151,9 +151,9 @@ func TestInsertQuotaSnapshot(t *testing.T) {
 	id, err := store.InsertQuotaSnapshot(
 		observedAt, receivedAt,
 		"userscript",
-		floatPtr(75.0), floatPtr(100.0), timePtr(time.Now().Add(5*time.Hour)),
-		floatPtr(1200.0), floatPtr(2000.0), timePtr(time.Now().Add(7*24*time.Hour)),
-		`{"five_hour_remaining": 75.0}`,
+		floatPtr(25.0), timePtr(time.Now().Add(5*time.Hour)),
+		floatPtr(40.0), timePtr(time.Now().Add(7*24*time.Hour)),
+		`{"session_used": 25.0}`,
 	)
 
 	if err != nil {
@@ -164,15 +164,15 @@ func TestInsertQuotaSnapshot(t *testing.T) {
 	}
 
 	// Verify insertion
-	var fiveHourRemaining float64
+	var sessionUsed float64
 	err = store.db.QueryRow(`
-		SELECT five_hour_remaining FROM quota_snapshots WHERE id = ?
-	`, id).Scan(&fiveHourRemaining)
+		SELECT session_used FROM quota_snapshots WHERE id = ?
+	`, id).Scan(&sessionUsed)
 	if err != nil {
 		t.Fatalf("failed to retrieve snapshot: %v", err)
 	}
-	if fiveHourRemaining != 75.0 {
-		t.Errorf("expected 75.0, got %f", fiveHourRemaining)
+	if sessionUsed != 25.0 {
+		t.Errorf("expected 25.0, got %f", sessionUsed)
 	}
 }
 
@@ -256,7 +256,7 @@ func TestPruneSlackSamples(t *testing.T) {
 	// Create a window to reference
 	result, err := store.db.Exec(`
 		INSERT INTO windows (kind, started_at, ends_at) VALUES (?, ?, ?)
-	`, "five_hour", FormatTime(now), FormatTime(now.Add(5*time.Hour)))
+	`, "session", FormatTime(now), FormatTime(now.Add(5*time.Hour)))
 	if err != nil {
 		t.Fatalf("failed to create window: %v", err)
 	}

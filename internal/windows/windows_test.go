@@ -19,7 +19,7 @@ func createTestEngine(t *testing.T) (*Engine, *store.Store) {
 	return engine, s
 }
 
-func TestFirstEventCreates5HourWindow(t *testing.T) {
+func TestFirstEventCreatesSessionWindow(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()
 
@@ -40,20 +40,20 @@ func TestFirstEventCreates5HourWindow(t *testing.T) {
 		t.Fatalf("UpdateWindows failed: %v", err)
 	}
 
-	// Check that a 5-hour window was created
+	// Check that a session window was created
 	var count int
-	row := s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&count); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
 
 	if count != 1 {
-		t.Fatalf("expected 1 five_hour window, got %d", count)
+		t.Fatalf("expected 1 session window, got %d", count)
 	}
 
 	// Check window times
 	var startedAt, endsAt time.Time
-	row = s.DB().QueryRow(`SELECT started_at, ends_at FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row = s.DB().QueryRow(`SELECT started_at, ends_at FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&startedAt, &endsAt); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -113,8 +113,8 @@ func TestWeeklyWindowEndsFromSnapshot(t *testing.T) {
 	weeklyEnds := time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)
 	_, err := s.InsertQuotaSnapshot(
 		now.Add(-time.Hour), now.Add(-time.Hour), "test",
-		nil, nil, nil,
-		nil, nil, &weeklyEnds,
+		nil, nil,
+		nil, &weeklyEnds,
 		"{}",
 	)
 	if err != nil {
@@ -189,15 +189,15 @@ func TestMultipleEventsInSameWindow(t *testing.T) {
 		t.Fatalf("UpdateWindows failed: %v", err)
 	}
 
-	// Should still have only 1 five-hour window
+	// Should still have only 1 session window
 	var count int
-	row := s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&count); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
 
 	if count != 1 {
-		t.Fatalf("expected 1 five_hour window, got %d", count)
+		t.Fatalf("expected 1 session window, got %d", count)
 	}
 }
 
@@ -242,7 +242,7 @@ func TestWindowExpiry(t *testing.T) {
 
 	// Check that the old window is closed
 	var closedCount int
-	row := s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'five_hour' AND closed = 1`)
+	row := s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'session' AND closed = 1`)
 	if err := row.Scan(&closedCount); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestWindowExpiry(t *testing.T) {
 
 	// Check that a new window exists.
 	var openCount int
-	row = s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row = s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&openCount); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestWindowExpiry(t *testing.T) {
 	// And that it starts at the post-gap event (not just at `now`) — i.e.
 	// findFirstEventAfterGap picked up the event.
 	var newStart time.Time
-	row = s.DB().QueryRow(`SELECT started_at FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row = s.DB().QueryRow(`SELECT started_at FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&newStart); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -281,22 +281,22 @@ func TestBaselineFromSnapshot(t *testing.T) {
 	engine.SetNow(func() time.Time { return now })
 
 	// Two prior snapshots; the engine should pick the most recent one
-	// at-or-before the window start.
-	older := 100.0
+	// at-or-before the window start. Values are session_used percentages.
+	older := 12.0
 	if _, err := s.InsertQuotaSnapshot(
 		now.Add(-2*time.Hour), now.Add(-2*time.Hour), "test",
-		nil, &older, nil,
-		nil, nil, nil,
+		&older, nil,
+		nil, nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("failed to insert older snapshot: %v", err)
 	}
 
-	newer := 250.0
+	newer := 28.0
 	if _, err := s.InsertQuotaSnapshot(
 		now.Add(-1*time.Minute), now.Add(-1*time.Minute), "test",
-		nil, &newer, nil,
-		nil, nil, nil,
+		&newer, nil,
+		nil, nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("failed to insert newer snapshot: %v", err)
@@ -318,7 +318,7 @@ func TestBaselineFromSnapshot(t *testing.T) {
 	// Baseline should reflect the most recent prior snapshot.
 	var baseline sql.NullFloat64
 	var source string
-	row := s.DB().QueryRow(`SELECT baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT baseline_total, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&baseline, &source); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -355,7 +355,7 @@ func TestBaselineCorrection(t *testing.T) {
 	var windowID int64
 	var initialBaseline sql.NullFloat64
 	var initialSource string
-	row := s.DB().QueryRow(`SELECT id, baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT id, baseline_total, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&windowID, &initialBaseline, &initialSource); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -370,11 +370,11 @@ func TestBaselineCorrection(t *testing.T) {
 	laterTime := now.Add(1 * time.Minute)
 	engine.SetNow(func() time.Time { return laterTime })
 
-	newBaseline := 200.0
+	newBaseline := 18.0
 	snapshotID, err := s.InsertQuotaSnapshot(
 		laterTime, laterTime, "test",
-		nil, &newBaseline, nil,
-		nil, nil, nil,
+		&newBaseline, nil,
+		nil, nil,
 		"{}",
 	)
 	if err != nil {
@@ -388,7 +388,7 @@ func TestBaselineCorrection(t *testing.T) {
 	var correctedID int64
 	var baseline sql.NullFloat64
 	var baselineSource string
-	row = s.DB().QueryRow(`SELECT id, baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row = s.DB().QueryRow(`SELECT id, baseline_total, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&correctedID, &baseline, &baselineSource); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -412,12 +412,13 @@ func TestDriftCalculation(t *testing.T) {
 	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
 	engine.SetNow(func() time.Time { return now })
 
-	// Insert a baseline snapshot just before the window
+	// Insert a baseline snapshot just before the window. The baseline is now
+	// a percentage anchor (the session_used value at window start).
 	baseline := 1000.0
 	if _, err := s.InsertQuotaSnapshot(
 		now.Add(-1*time.Minute), now.Add(-1*time.Minute), "test",
-		nil, &baseline, nil,
-		nil, nil, nil,
+		&baseline, nil,
+		nil, nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("failed to insert snapshot: %v", err)
@@ -466,7 +467,7 @@ func TestDriftCalculation(t *testing.T) {
 
 	// Get the active window
 	var windowID int64
-	row := s.DB().QueryRow(`SELECT id FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT id FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&windowID); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -499,7 +500,7 @@ func TestDriftNilBaseline(t *testing.T) {
 	}
 
 	var windowID int64
-	row := s.DB().QueryRow(`SELECT id FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT id FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&windowID); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}

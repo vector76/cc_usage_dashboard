@@ -75,9 +75,9 @@ func (s *Server) handleSlackRelease(w http.ResponseWriter, r *http.Request) {
 
 	windowKind := req.WindowKind
 	if windowKind == "" {
-		windowKind = "five_hour"
+		windowKind = "session"
 	}
-	if windowKind != "five_hour" && windowKind != "weekly" {
+	if windowKind != "session" && windowKind != "weekly" {
 		http.Error(w, `{"error":"invalid window_kind"}`, http.StatusBadRequest)
 		w.Header().Set("Content-Type", "application/json")
 		return

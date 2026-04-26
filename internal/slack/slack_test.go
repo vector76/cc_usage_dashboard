@@ -85,11 +85,11 @@ func TestCombineSlackFractions(t *testing.T) {
 	}
 }
 
-// (b) GetSlack returns null slack_combined_fraction when the 5-hour window
+// (b) GetSlack returns null slack_combined_fraction when the session window
 // has no events yet (per docs/slack-indicator.md: window is undefined until
 // first use). Two sub-cases: the simple "no windows at all" case and the
 // more discriminating case where a weekly window exists with events but no
-// 5-hour window does — combined must still be nil.
+// session window does — combined must still be nil.
 func TestGetSlack_NullCombinedFractionWhenNoEvents(t *testing.T) {
 	t.Run("empty database", func(t *testing.T) {
 		c, s := newCalc(t)
@@ -107,7 +107,7 @@ func TestGetSlack_NullCombinedFractionWhenNoEvents(t *testing.T) {
 		}
 	})
 
-	t.Run("weekly window present, no five_hour window", func(t *testing.T) {
+	t.Run("weekly window present, no session window", func(t *testing.T) {
 		c, s := newCalc(t)
 		defer s.Close()
 
@@ -115,7 +115,7 @@ func TestGetSlack_NullCombinedFractionWhenNoEvents(t *testing.T) {
 		insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 5000.0, "snapshot:1")
 
 		// Event inside the weekly window — gives weekly a non-nil
-		// SlackFraction. The 5-hour window does not exist.
+		// SlackFraction. The session window does not exist.
 		cost := 5.0
 		if _, err := s.InsertUsageEvent(
 			now.Add(-1*time.Hour), "api",
@@ -131,15 +131,15 @@ func TestGetSlack_NullCombinedFractionWhenNoEvents(t *testing.T) {
 			t.Fatalf("GetSlack: %v", err)
 		}
 		if resp.SlackCombinedFraction != nil {
-			t.Errorf("expected nil slack_combined_fraction when 5-hour absent, got %v", *resp.SlackCombinedFraction)
+			t.Errorf("expected nil slack_combined_fraction when session absent, got %v", *resp.SlackCombinedFraction)
 		}
 		if resp.ReleaseRecommended {
-			t.Error("expected release_recommended=false when 5-hour window absent")
+			t.Error("expected release_recommended=false when session window absent")
 		}
 	})
 }
 
-// (c) RecordRelease writes a row whose window_id resolves to the 5-hour
+// (c) RecordRelease writes a row whose window_id resolves to the session
 // window containing released_at.
 func TestRecordRelease_ResolvesWindowID(t *testing.T) {
 	c, s := newCalc(t)
@@ -148,15 +148,15 @@ func TestRecordRelease_ResolvesWindowID(t *testing.T) {
 	now := time.Now().UTC()
 	startedAt := now.Add(-1 * time.Hour)
 	endsAt := now.Add(4 * time.Hour)
-	wantID := insertWindow(t, s.DB(), "five_hour", startedAt, endsAt, 1000.0, "snapshot:1")
+	wantID := insertWindow(t, s.DB(), "session", startedAt, endsAt, 1000.0, "snapshot:1")
 
-	// Also insert a non-overlapping older five_hour window to ensure the
+	// Also insert a non-overlapping older session window to ensure the
 	// resolver picks the one bracketing released_at, not just the latest.
-	insertWindow(t, s.DB(), "five_hour", now.Add(-10*time.Hour), now.Add(-5*time.Hour), 800.0, "snapshot:0")
+	insertWindow(t, s.DB(), "session", now.Add(-10*time.Hour), now.Add(-5*time.Hour), 800.0, "snapshot:0")
 
 	cost := 1.20
 	slackVal := 8.40
-	releaseID, err := c.RecordRelease(now, "nightly-lint", &cost, &slackVal, "five_hour")
+	releaseID, err := c.RecordRelease(now, "nightly-lint", &cost, &slackVal, "session")
 	if err != nil {
 		t.Fatalf("RecordRelease: %v", err)
 	}
@@ -171,19 +171,19 @@ func TestRecordRelease_ResolvesWindowID(t *testing.T) {
 	}
 }
 
-// (d) RecordRelease returns an error when no matching 5-hour window
+// (d) RecordRelease returns an error when no matching session window
 // contains released_at.
 func TestRecordRelease_ErrorWhenNoWindow(t *testing.T) {
 	c, s := newCalc(t)
 	defer s.Close()
 
 	now := time.Now().UTC()
-	// Insert a weekly window that contains released_at, but no five_hour
+	// Insert a weekly window that contains released_at, but no session
 	// window — RecordRelease must still error.
 	insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 5000.0, "snapshot:1")
 
-	if _, err := c.RecordRelease(now, "nightly-lint", nil, nil, "five_hour"); err == nil {
-		t.Error("expected error when no five_hour window matches released_at")
+	if _, err := c.RecordRelease(now, "nightly-lint", nil, nil, "session"); err == nil {
+		t.Error("expected error when no session window matches released_at")
 	}
 }
 
@@ -206,7 +206,7 @@ func TestPriorityQuietGate_NotInverted(t *testing.T) {
 			defer s.Close()
 
 			now := time.Now().UTC()
-			insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+			insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
 
 			cost := 1.0
 			if _, err := s.InsertUsageEvent(
@@ -239,7 +239,7 @@ func TestSetPaused_ForcesReleaseRecommendedFalse(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now().UTC()
-	insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+	insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
 	insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 5000.0, "snapshot:1")
 
 	// Small consumption keeps slack positive on both windows.
@@ -253,12 +253,12 @@ func TestSetPaused_ForcesReleaseRecommendedFalse(t *testing.T) {
 		t.Fatalf("insert event: %v", err)
 	}
 
-	// Fresh quota snapshot satisfies any freshness gate.
-	rem, total := 950.0, 1000.0
+	// Fresh quota snapshot satisfies the freshness gate.
+	used := 5.0
 	if _, err := s.InsertQuotaSnapshot(
 		now, now, "userscript",
-		&rem, &total, nil,
-		&rem, &total, nil,
+		&used, nil,
+		&used, nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -303,8 +303,8 @@ func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 
 	now := time.Now().UTC()
 	startedAt := now.Add(-1 * time.Hour)
-	endsAt := now.Add(4 * time.Hour) // 5-hour window total
-	insertWindow(t, s.DB(), "five_hour", startedAt, endsAt, baseline, "snapshot:1")
+	endsAt := now.Add(4 * time.Hour) // session window total
+	insertWindow(t, s.DB(), "session", startedAt, endsAt, baseline, "snapshot:1")
 
 	cost := consumed
 	if _, err := s.InsertUsageEvent(
@@ -320,9 +320,9 @@ func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSlack: %v", err)
 	}
-	m := resp.FiveHour
+	m := resp.Session
 	if m == nil {
-		t.Fatal("expected FiveHour metrics, got nil")
+		t.Fatal("expected Session metrics, got nil")
 	}
 
 	// Recompute the expected values relative to a "now" sampled inside
@@ -363,15 +363,14 @@ func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 	}
 }
 
-// seedFreshSnapshot inserts a quota snapshot at receivedAt with a fixed
-// five-hour total (=quotaTotal). Returns nothing; used by gate-boundary tests.
-func seedFreshSnapshot(t *testing.T, s *store.Store, receivedAt time.Time, quotaTotal float64) {
+// seedFreshSnapshot inserts a quota snapshot at receivedAt with the given
+// session-used percentage. Used by gate-boundary tests.
+func seedFreshSnapshot(t *testing.T, s *store.Store, receivedAt time.Time, sessionUsed float64) {
 	t.Helper()
-	rem := quotaTotal
 	if _, err := s.InsertQuotaSnapshot(
 		receivedAt, receivedAt, "userscript",
-		&rem, &quotaTotal, nil,
-		&rem, &quotaTotal, nil,
+		&sessionUsed, nil,
+		&sessionUsed, nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -405,7 +404,7 @@ func TestHeadroomGate_ReleaseThresholdBoundary(t *testing.T) {
 			defer s.Close()
 
 			now := time.Now().UTC()
-			insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+			insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
 			insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 10000.0, "snapshot:1")
 
 			cost := tt.consumed
@@ -418,7 +417,7 @@ func TestHeadroomGate_ReleaseThresholdBoundary(t *testing.T) {
 				t.Fatalf("insert event: %v", err)
 			}
 			// Fresh snapshot so freshness gate doesn't interfere.
-			seedFreshSnapshot(t, s, now, 1000.0)
+			seedFreshSnapshot(t, s, now, 5.0)
 
 			resp, err := c.GetSlack()
 			if err != nil {
@@ -435,54 +434,18 @@ func TestHeadroomGate_ReleaseThresholdBoundary(t *testing.T) {
 	}
 }
 
-// (h) Baseline freshness gate boundary on BaselineMaxAgeHours: a snapshot
-// within max age passes regardless of drift (the AND-gate short-circuits on
-// the age leg). The complementary "stale + small drift" case is covered by
-// the drift-threshold-boundary test below.
-func TestBaselineFreshness_MaxAgeBoundary(t *testing.T) {
-	c, s := newCalc(t)
-	defer s.Close()
-
-	now := time.Now().UTC()
-	insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
-	insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 10000.0, "snapshot:1")
-
-	// Snapshot well inside max age (47h < 48h) — gate must pass even though
-	// drift is huge (50% of quota), because the age leg of the AND is false.
-	receivedAt := now.Add(-47 * time.Hour)
-	seedFreshSnapshot(t, s, receivedAt, 1000.0)
-
-	hugeCost := 500.0 // 50% of quota — would trip drift if age check engaged
-	if _, err := s.InsertUsageEvent(
-		receivedAt.Add(1*time.Hour), "api",
-		"sess-d", "msg-d", "", "claude-3-5-sonnet-20241022",
-		1, 1, 0, 0,
-		&hugeCost, "reported", "{}",
-	); err != nil {
-		t.Fatalf("insert event: %v", err)
-	}
-
-	resp, err := c.GetSlack()
-	if err != nil {
-		t.Fatalf("GetSlack: %v", err)
-	}
-	if !resp.Gates["baseline_freshness"] {
-		t.Errorf("baseline_freshness gate: got false, want true (age < max_age, drift must be ignored)")
-	}
-}
-
-// (i) Baseline freshness gate boundary on BaselineDriftThreshold once the
-// snapshot is older than max age. Threshold = 25% of quota_total = 250.
-func TestBaselineFreshness_DriftThresholdBoundary(t *testing.T) {
+// (h) Baseline freshness gate is purely an age check now: passes iff a
+// snapshot exists and is no older than BaselineMaxAgeHours. The pre-rewrite
+// "drift threshold once stale" leg has been retired alongside the dollar-
+// denominated quota_total — there is no per-window dollar quota anymore.
+func TestBaselineFreshness_AgeBoundary(t *testing.T) {
 	tests := []struct {
 		name     string
-		drift    float64 // consumption since stale snapshot
+		ageHours int
 		wantPass bool
 	}{
-		// drift exactly at threshold — gate passes (we use <=).
-		{"drift at threshold", 250.0, true},
-		// drift just over threshold — gate fails.
-		{"drift just over threshold", 250.01, false},
+		{"snapshot well inside max age", 47, true},
+		{"snapshot just past max age", 49, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -490,30 +453,16 @@ func TestBaselineFreshness_DriftThresholdBoundary(t *testing.T) {
 			defer s.Close()
 
 			now := time.Now().UTC()
-			insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
-			insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 10000.0, "snapshot:1")
-
-			// Snapshot 49 hours ago — older than max_age=48h, so drift gate engages.
-			receivedAt := now.Add(-49 * time.Hour)
-			seedFreshSnapshot(t, s, receivedAt, 1000.0)
-
-			cost := tt.drift
-			if _, err := s.InsertUsageEvent(
-				receivedAt.Add(1*time.Hour), "api",
-				"sess-d", "msg-d", "", "claude-3-5-sonnet-20241022",
-				1, 1, 0, 0,
-				&cost, "reported", "{}",
-			); err != nil {
-				t.Fatalf("insert event: %v", err)
-			}
+			receivedAt := now.Add(-time.Duration(tt.ageHours) * time.Hour)
+			seedFreshSnapshot(t, s, receivedAt, 5.0)
 
 			resp, err := c.GetSlack()
 			if err != nil {
 				t.Fatalf("GetSlack: %v", err)
 			}
 			if got := resp.Gates["baseline_freshness"]; got != tt.wantPass {
-				t.Errorf("baseline_freshness gate: got %v, want %v (drift=%v)",
-					got, tt.wantPass, tt.drift)
+				t.Errorf("baseline_freshness gate: got %v, want %v (age=%dh)",
+					got, tt.wantPass, tt.ageHours)
 			}
 		})
 	}
@@ -526,7 +475,7 @@ func TestBaselineFreshness_NoSnapshot(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now().UTC()
-	insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+	insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
 
 	resp, err := c.GetSlack()
 	if err != nil {

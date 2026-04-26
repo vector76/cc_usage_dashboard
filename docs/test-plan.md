@@ -34,7 +34,7 @@ development; run the full suite before declaring done.
 | Cost resolution                     | `go test ./internal/ingest/...`                    | Reported vs. computed cost, cache token rates, unknown-model fallthrough         |
 | Transcript parser                   | `go test ./internal/ingest/...`                    | Valid/invalid JSONL, missing fields, timestamp parsing, parse-error capture     |
 | Tailer                              | `go test ./internal/ingest/...`                    | `.jsonl` matching, offset persistence, advance past skipped lines                |
-| Windows engine                      | `go test ./internal/windows/...`                   | 5-hour and weekly derivation, baseline assignment, drift, clock injection        |
+| Windows engine                      | `go test ./internal/windows/...`                   | session and weekly derivation, baseline assignment, drift, clock injection       |
 | Slack calculator                    | `go test ./internal/slack/...`                     | Combined fraction, gates (headroom, priority quiet, freshness, not-paused), pause |
 | Discount calculator                 | `go test ./internal/discount/...`                  | Documented field names (`savings_usd`, `value_ratio`, `consumed_usd_equivalent`) |
 | HTTP server (handlers + dashboard)  | `go test ./internal/server/...`                    | `/log`, `/parse_error`, `/snapshot`, `/slack`, `/slack/release`, `/discount`     |
@@ -132,7 +132,7 @@ click instead of taking action.
       ship an icon image at all.
 - [ ] **Open dashboard** opens `http://localhost:<port>` in the default
       browser (currently logs only).
-- [ ] **Status** submenu populates with current 5-hour and weekly burn
+- [ ] **Status** submenu populates with current session and weekly burn
       (currently a flat menu item with no children and no handler).
 - [ ] **About** shows the version string baked into the build (currently
       logs only).
@@ -177,14 +177,16 @@ page's DevTools Network tab depending on the manager. Verify success at
 the database, which is authoritative.
 
 - [ ] Install `userscript/claude-usage-snapshot.user.js` per the README.
-- [ ] Open `https://claude.ai/` on a quota-bearing view. Within ~30 s of
-      the quota DOM appearing, at least one row appears in
+- [ ] Open `https://claude.ai/settings/usage`. Within ~30 s of the
+      progressbars rendering, at least one row appears in
       `quota_snapshots` with `source='userscript'`
       (`sqlite3 usage.db "SELECT COUNT(*) FROM quota_snapshots WHERE source='userscript';"`).
+- [ ] Navigating to any other route (e.g. `/chat/...`) does **not** add
+      new `quota_snapshots` rows — the userscript no-ops off the usage page.
 - [ ] After running some Claude Code activity that moves the displayed
-      quota numbers, a follow-up row appears within ~1 minute. (The
-      userscript dedupes on `(five_hour_remaining, weekly_remaining)`,
-      so identical-value snapshots are intentionally skipped.)
+      percentages, a follow-up row appears within ~1 minute. (The
+      userscript dedupes on `(session_used, weekly_used)`, so identical-
+      value snapshots are intentionally skipped.)
 - [ ] The page console has no `[claude-usage-snapshot]` warnings during
       a healthy run.
 - [ ] If the DOM changes and the script can't find quota nodes for >5

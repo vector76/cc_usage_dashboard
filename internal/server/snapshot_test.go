@@ -17,13 +17,11 @@ func TestSnapshotCreatesWindow(t *testing.T) {
 	fixed := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	srv.windowsEngine.SetNow(func() time.Time { return fixed })
 
-	total := 100.0
-	remaining := 80.0
+	used := 20.0
 	payload := SnapshotRequest{
-		ObservedAt:        fixed,
-		Source:            "userscript",
-		FiveHourRemaining: &remaining,
-		FiveHourTotal:     &total,
+		ObservedAt:  fixed,
+		Source:      "userscript",
+		SessionUsed: &used,
 	}
 
 	body, _ := json.Marshal(payload)
@@ -37,11 +35,11 @@ func TestSnapshotCreatesWindow(t *testing.T) {
 
 	var count int
 	if err := testStore.DB().QueryRow(
-		`SELECT COUNT(*) FROM windows WHERE kind = 'five_hour'`).Scan(&count); err != nil {
+		`SELECT COUNT(*) FROM windows WHERE kind = 'session'`).Scan(&count); err != nil {
 		t.Fatalf("failed to count windows: %v", err)
 	}
 	if count == 0 {
-		t.Fatal("expected at least one five_hour window after snapshot, got 0")
+		t.Fatal("expected at least one session window after snapshot, got 0")
 	}
 }
 
@@ -54,11 +52,11 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 
 	// First snapshot: establishes the active window. Observed at the same
 	// instant as the engine's now() so that it falls within [startedAt, endsAt).
-	first := 100.0
+	first := 5.0
 	firstPayload := SnapshotRequest{
-		ObservedAt:    fixed,
-		Source:        "userscript",
-		FiveHourTotal: &first,
+		ObservedAt:  fixed,
+		Source:      "userscript",
+		SessionUsed: &first,
 	}
 	body, _ := json.Marshal(firstPayload)
 	req := httptest.NewRequest("POST", "/snapshot", bytes.NewReader(body))
@@ -70,17 +68,17 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 
 	var windowID int64
 	if err := testStore.DB().QueryRow(
-		`SELECT id FROM windows WHERE kind = 'five_hour' AND closed = 0`,
+		`SELECT id FROM windows WHERE kind = 'session' AND closed = 0`,
 	).Scan(&windowID); err != nil {
 		t.Fatalf("failed to read window: %v", err)
 	}
 
-	// Second snapshot: still inside the window, with a smaller total.
-	second := 75.0
+	// Second snapshot: still inside the window, with higher % used.
+	second := 12.0
 	secondPayload := SnapshotRequest{
-		ObservedAt:    fixed.Add(1 * time.Minute),
-		Source:        "userscript",
-		FiveHourTotal: &second,
+		ObservedAt:  fixed.Add(1 * time.Minute),
+		Source:      "userscript",
+		SessionUsed: &second,
 	}
 	body, _ = json.Marshal(secondPayload)
 	req = httptest.NewRequest("POST", "/snapshot", bytes.NewReader(body))
@@ -107,10 +105,10 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 
 	var count int
 	if err := testStore.DB().QueryRow(
-		`SELECT COUNT(*) FROM windows WHERE kind = 'five_hour'`).Scan(&count); err != nil {
+		`SELECT COUNT(*) FROM windows WHERE kind = 'session'`).Scan(&count); err != nil {
 		t.Fatalf("failed to count windows: %v", err)
 	}
 	if count != 1 {
-		t.Errorf("expected exactly 1 five_hour window, got %d", count)
+		t.Errorf("expected exactly 1 session window, got %d", count)
 	}
 }

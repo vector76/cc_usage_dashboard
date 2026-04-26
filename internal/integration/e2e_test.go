@@ -156,7 +156,7 @@ func TestE2E_CLIModeA_DiscountAndSlack(t *testing.T) {
 		t.Fatalf("decode /slack: %v", err)
 	}
 	for _, k := range []string{
-		"now", "five_hour", "weekly", "slack_combined_fraction",
+		"now", "session", "weekly", "slack_combined_fraction",
 		"priority_quiet_for_seconds", "paused", "release_recommended", "gates",
 	} {
 		if _, ok := slackResp[k]; !ok {
@@ -207,24 +207,22 @@ func TestE2E_DuplicateDetection(t *testing.T) {
 	}
 }
 
-// Scenario 3: a snapshot creates 5-hour and weekly windows whose
-// baseline_total reflects the snapshot's totals.
+// Scenario 3: a snapshot creates session and weekly windows whose
+// baseline_total reflects the snapshot's reported "% used" values.
 func TestE2E_SnapshotAndWindowDerivation(t *testing.T) {
 	env := newTestEnv(t, "")
 
 	now := time.Now().UTC()
-	const fiveHourTotal = 100.0
-	const weeklyTotal = 2000.0
+	const sessionUsed = 6.0
+	const weeklyUsed = 23.0
 
 	snap := map[string]any{
-		"observed_at":           now.Format(time.RFC3339Nano),
-		"source":                "userscript",
-		"five_hour_remaining":   80.0,
-		"five_hour_total":       fiveHourTotal,
-		"five_hour_window_ends": now.Add(5 * time.Hour).Format(time.RFC3339Nano),
-		"weekly_remaining":      1500.0,
-		"weekly_total":          weeklyTotal,
-		"weekly_window_ends":    now.Add(48 * time.Hour).Format(time.RFC3339Nano),
+		"observed_at":         now.Format(time.RFC3339Nano),
+		"source":              "userscript",
+		"session_used":        sessionUsed,
+		"session_window_ends": now.Add(5 * time.Hour).Format(time.RFC3339Nano),
+		"weekly_used":         weeklyUsed,
+		"weekly_window_ends":  now.Add(48 * time.Hour).Format(time.RFC3339Nano),
 	}
 	w := env.do(t, "POST", "/snapshot", snap)
 	if w.Code != http.StatusOK {
@@ -250,22 +248,22 @@ func TestE2E_SnapshotAndWindowDerivation(t *testing.T) {
 		t.Fatalf("rows: %v", err)
 	}
 
-	fh, ok := got["five_hour"]
+	sess, ok := got["session"]
 	if !ok {
-		t.Fatalf("expected a five_hour window, got rows for kinds=%v", got)
+		t.Fatalf("expected a session window, got rows for kinds=%v", got)
 	}
-	if !fh.Valid || fh.Float64 != fiveHourTotal {
-		t.Errorf("five_hour baseline_total=%v, want %v", fh, fiveHourTotal)
+	if !sess.Valid || sess.Float64 != sessionUsed {
+		t.Errorf("session baseline_total=%v, want %v", sess, sessionUsed)
 	}
 
 	wk, ok := got["weekly"]
 	if !ok {
 		t.Fatalf("expected a weekly window, got rows for kinds=%v", got)
 	}
-	// The weekly window picks the snapshot's weekly_total via the in-window
+	// The weekly window picks the snapshot's weekly_used via the in-window
 	// baseline correction pass; this is the post-correction value.
-	if !wk.Valid || wk.Float64 != weeklyTotal {
-		t.Errorf("weekly baseline_total=%v, want %v", wk, weeklyTotal)
+	if !wk.Valid || wk.Float64 != weeklyUsed {
+		t.Errorf("weekly baseline_total=%v, want %v", wk, weeklyUsed)
 	}
 }
 
@@ -371,11 +369,10 @@ func TestE2E_SlackReleaseFlow(t *testing.T) {
 
 	now := time.Now().UTC()
 	snap := map[string]any{
-		"observed_at":           now.Format(time.RFC3339Nano),
-		"source":                "userscript",
-		"five_hour_remaining":   50.0,
-		"five_hour_total":       100.0,
-		"five_hour_window_ends": now.Add(5 * time.Hour).Format(time.RFC3339Nano),
+		"observed_at":         now.Format(time.RFC3339Nano),
+		"source":              "userscript",
+		"session_used":        12.0,
+		"session_window_ends": now.Add(5 * time.Hour).Format(time.RFC3339Nano),
 	}
 	if w := env.do(t, "POST", "/snapshot", snap); w.Code != http.StatusOK {
 		t.Fatalf("POST /snapshot: status=%d body=%s", w.Code, w.Body.String())
@@ -383,7 +380,7 @@ func TestE2E_SlackReleaseFlow(t *testing.T) {
 
 	var wantWindowID int64
 	if err := env.store.DB().QueryRow(
-		`SELECT id FROM windows WHERE kind = 'five_hour' AND closed = 0`,
+		`SELECT id FROM windows WHERE kind = 'session' AND closed = 0`,
 	).Scan(&wantWindowID); err != nil {
 		t.Fatalf("find seeded window: %v", err)
 	}
@@ -417,7 +414,7 @@ func TestE2E_SlackReleaseFlow(t *testing.T) {
 		"job_tag":          "batch-job-1",
 		"estimated_cost":   estimatedCost,
 		"slack_at_release": slackAt,
-		"window_kind":      "five_hour",
+		"window_kind":      "session",
 	}
 	w = env.do(t, "POST", "/slack/release", rel)
 	if w.Code != http.StatusOK {
@@ -450,8 +447,8 @@ func TestE2E_SlackReleaseFlow(t *testing.T) {
 	if !dbSlackAt.Valid || dbSlackAt.Float64 != slackAt {
 		t.Errorf("slack_at_release=%v, want %v", dbSlackAt, slackAt)
 	}
-	if windowKind != "five_hour" {
-		t.Errorf("release window kind=%q, want five_hour", windowKind)
+	if windowKind != "session" {
+		t.Errorf("release window kind=%q, want session", windowKind)
 	}
 	if windowID != wantWindowID {
 		t.Errorf("release window_id=%d, want %d (snapshot-created window)", windowID, wantWindowID)

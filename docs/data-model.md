@@ -48,26 +48,28 @@ later, headless scrape).
 | observed_at           | TIMESTAMP    | When the snapshot was read by the source.      |
 | received_at           | TIMESTAMP    | When the trayapp received the POST.            |
 | source                | TEXT         | `userscript` \| `headless` \| `manual`.        |
-| five_hour_remaining   | REAL         | Dollar-equivalent or fraction; see units note. |
-| five_hour_total       | REAL         | If the dashboard exposes the total.            |
-| five_hour_window_ends | TIMESTAMP    | If exposed.                                    |
-| weekly_remaining      | REAL         |                                                |
-| weekly_total          | REAL         |                                                |
-| weekly_window_ends    | TIMESTAMP    |                                                |
+| session_used          | REAL         | "Current session" % used (0–100). Nullable.    |
+| session_window_ends   | TIMESTAMP    | When the current 5-hour session resets.        |
+| weekly_used           | REAL         | "All models" weekly % used (0–100). Nullable.  |
+| weekly_window_ends    | TIMESTAMP    | When the weekly window resets.                 |
 | raw_json              | TEXT         | Full payload for replay.                       |
 
 ### `windows`
 
-Derived/cached state for the current and recent 5-hour and weekly windows. Maintained by
+Derived/cached state for the current and recent session and weekly windows. Maintained by
 the trayapp from `usage_events` + `quota_snapshots`.
 
 | Column          | Type      | Notes                                                |
 |-----------------|-----------|------------------------------------------------------|
 | id              | INTEGER PK|                                                      |
-| kind            | TEXT      | `five_hour` \| `weekly`.                             |
-| started_at      | TIMESTAMP | First-use timestamp (5-hour) or week boundary.       |
+| kind            | TEXT      | `session` \| `weekly`. (`session` = the rolling      |
+|                 |           | 5-hour "Current session" window in the Claude UI.)   |
+| started_at      | TIMESTAMP | First-use timestamp (session) or week boundary.      |
 | ends_at         | TIMESTAMP | Computed.                                            |
-| baseline_total  | REAL      | Quota at window start, from latest snapshot.         |
+| baseline_total  | REAL      | "% used" anchor at the most-recent in-window         |
+|                 |           | snapshot. Column name is legacy from the dollar-     |
+|                 |           | denominated era and may be renamed; values are now   |
+|                 |           | percentages (0–100).                                 |
 | baseline_source | TEXT      | Snapshot ID or `default` if assumed.                 |
 | closed          | INTEGER   | 0 while active, 1 once expired.                      |
 
@@ -117,11 +119,14 @@ without losing data.
 
 ## Units note
 
-Anthropic's dashboard mixes percentages, dollar-equivalents, and token counts depending
-on the view. The trayapp normalizes everything to a single canonical unit internally —
-suggested: **dollar-equivalent quota cost**, since that is what enables the discount
-calculation. The schema stores raw values from each source; conversion happens at query
-time so we can change the canonical choice later without rewriting history.
+`usage_events.cost_usd_equivalent` is in dollars (raw or computed from token × price
+table) — that's what enables the discount calculation.
+
+`quota_snapshots.session_used` and `quota_snapshots.weekly_used` are **percentages**
+(0–100) scraped from the `claude.ai/settings/usage` page, since that's the only
+quota figure Anthropic actually exposes there ("6% used", "23% used"). The dashboard
+no longer carries dollar-denominated quota totals, because there is no such number
+in the source UI to anchor against.
 
 ## Cost source
 

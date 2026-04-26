@@ -17,8 +17,10 @@ Access) and the snapshot payload schema.
 3. Confirm the install and grant `GM.xmlHttpRequest` plus `@connect localhost` /
    `@connect 127.0.0.1` when prompted.
 4. Make sure the trayapp is running locally on port `27812`.
-5. Open `https://claude.ai/` in any tab. Within ~30 seconds the script will detect
-   the quota nodes and start sending one snapshot per minute.
+5. Open `https://claude.ai/settings/usage` in any tab. Within ~30 seconds the
+   script will detect the "Current session" and "All models" progressbars and
+   start sending one snapshot per minute. The script no-ops on every other
+   route (chat threads, projects, etc.) so it never touches private DOM.
 
 ## Updating
 

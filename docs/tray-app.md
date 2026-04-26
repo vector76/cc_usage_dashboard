@@ -30,7 +30,7 @@ The `-H=windowsgui` flag suppresses the console window.
 ## Tray menu (v1)
 
 - **Open dashboard** — opens `http://localhost:PORT` in the default browser.
-- **Status** — submenu showing 5h burn %, weekly burn %, slack fraction, last snapshot age.
+- **Status** — submenu showing session burn %, weekly burn %, slack fraction, last snapshot age.
 - **Pause slack signal** — sets `release_recommended=false` on the slack endpoint and
   flips the tray icon to a paused state. Logging continues so no data is lost; only the
   release recommendation is suppressed. Use this when starting a heavy interactive

@@ -14,7 +14,7 @@ import (
 // docs/slack-indicator.md.
 type SlackResponse struct {
 	Now                     time.Time       `json:"now"`
-	FiveHour                *WindowMetrics  `json:"five_hour"`
+	Session                *WindowMetrics  `json:"session"`
 	Weekly                  *WindowMetrics  `json:"weekly"`
 	SlackCombinedFraction   *float64        `json:"slack_combined_fraction"`
 	PriorityQuietForSeconds int             `json:"priority_quiet_for_seconds"`
@@ -83,7 +83,7 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 	paused := c.paused
 	c.mu.RUnlock()
 
-	fiveHourWindow, err := c.getActiveWindow("five_hour")
+	sessionWindow, err := c.getActiveWindow("session")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get 5-hour window: %w", err)
 	}
@@ -99,12 +99,12 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 		Gates:  make(map[string]bool),
 	}
 
-	if fiveHourWindow != nil {
-		metrics, err := c.computeMetrics(fiveHourWindow, now)
+	if sessionWindow != nil {
+		metrics, err := c.computeMetrics(sessionWindow, now)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compute five_hour metrics: %w", err)
+			return nil, fmt.Errorf("failed to compute session metrics: %w", err)
 		}
-		resp.FiveHour = metrics
+		resp.Session = metrics
 	}
 
 	if weeklyWindow != nil {
@@ -115,7 +115,7 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 		resp.Weekly = metrics
 	}
 
-	resp.SlackCombinedFraction = c.combineSlackFractions(resp.FiveHour, resp.Weekly)
+	resp.SlackCombinedFraction = c.combineSlackFractions(resp.Session, resp.Weekly)
 
 	quietFor, hasEvent, err := c.quietFor(now)
 	if err != nil {
@@ -240,14 +240,14 @@ func (c *Calculator) computeMetrics(w *activeWindow, now time.Time) (*WindowMetr
 
 // combineSlackFractions returns min(a, b) of the two windows' slack fractions.
 // Per docs: combined is null whenever either window's slack_fraction is null.
-func (c *Calculator) combineSlackFractions(fiveHour, weekly *WindowMetrics) *float64 {
-	if fiveHour == nil || fiveHour.SlackFraction == nil {
+func (c *Calculator) combineSlackFractions(session, weekly *WindowMetrics) *float64 {
+	if session == nil || session.SlackFraction == nil {
 		return nil
 	}
 	if weekly == nil || weekly.SlackFraction == nil {
 		return nil
 	}
-	min := *fiveHour.SlackFraction
+	min := *session.SlackFraction
 	if *weekly.SlackFraction < min {
 		min = *weekly.SlackFraction
 	}
@@ -280,17 +280,18 @@ func (c *Calculator) quietFor(now time.Time) (time.Duration, bool, error) {
 }
 
 // baselineFreshnessOk implements the freshness gate from
-// docs/slack-indicator.md: the gate fails iff *both* the latest snapshot is
-// older than baseline_max_age AND consumption since the snapshot exceeds
-// baseline_drift_threshold * quota_total. Missing-snapshot fails the gate
-// (failure mode "no baseline snapshot ever recorded" → release_recommended=false).
+// docs/slack-indicator.md: the gate passes iff a snapshot exists and is no
+// older than BaselineMaxAgeHours. Missing snapshot fails the gate.
+//
+// The previous formulation also evaluated "drift since stale snapshot" against
+// a dollar-denominated quota. With the switch to percent-used snapshots there
+// is no per-window dollar quota to compare against, so the drift leg is gone.
 func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
 	var receivedAt time.Time
-	var fiveHourTotal sql.NullFloat64
 	err := c.db.QueryRow(`
-		SELECT received_at, five_hour_total FROM quota_snapshots
+		SELECT received_at FROM quota_snapshots
 		ORDER BY received_at DESC LIMIT 1
-	`).Scan(&receivedAt, &fiveHourTotal)
+	`).Scan(&receivedAt)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -300,35 +301,14 @@ func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
 
 	age := now.Sub(receivedAt)
 	maxAge := time.Duration(c.config.BaselineMaxAgeHours) * time.Hour
-	if age <= maxAge {
-		return true, nil
-	}
-
-	if !fiveHourTotal.Valid || fiveHourTotal.Float64 <= 0 {
-		// Snapshot is old and we cannot evaluate drift relative to a quota.
-		// Treat as failed gate: we have no confidence in the baseline.
-		return false, nil
-	}
-
-	var consumedSince float64
-	err = c.db.QueryRow(`
-		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
-		FROM usage_events
-		WHERE occurred_at > ? AND cost_usd_equivalent IS NOT NULL
-	`, store.FormatTime(receivedAt)).Scan(&consumedSince)
-	if err != nil {
-		return false, fmt.Errorf("failed to compute drift: %w", err)
-	}
-
-	driftLimit := c.config.BaselineDriftThreshold * fiveHourTotal.Float64
-	return consumedSince <= driftLimit, nil
+	return age <= maxAge, nil
 }
 
 // RecordRelease records a release event to the database, resolving it to the
 // active window of the requested kind containing releasedAt.
 func (c *Calculator) RecordRelease(releasedAt time.Time, jobTag string, estimatedCost *float64, slackAtRelease *float64, windowKind string) (int64, error) {
 	if windowKind == "" {
-		windowKind = "five_hour"
+		windowKind = "session"
 	}
 
 	var windowID int64
@@ -366,7 +346,7 @@ func (c *Calculator) RecordSample(fraction *float64) (int64, error) {
 	var windowID int64
 	err := c.db.QueryRow(`
 		SELECT id FROM windows
-		WHERE kind = 'five_hour' AND closed = 0
+		WHERE kind = 'session' AND closed = 0
 		LIMIT 1
 	`).Scan(&windowID)
 

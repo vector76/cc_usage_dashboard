@@ -54,7 +54,7 @@ Usage:
   clusage-cli log [--from-hook | --input-tokens N --output-tokens N ...]
   clusage-cli slack [--format json|release-bool|fraction]
   clusage-cli discount [--period 24h] [--format json|summary]
-  clusage-cli release --released-at TS --job-tag TAG --estimated-cost N --slack-at-release N [--window-kind five_hour|weekly]
+  clusage-cli release --released-at TS --job-tag TAG --estimated-cost N --slack-at-release N [--window-kind session|weekly]
 
 `, Version)
 }
@@ -273,7 +273,7 @@ func cmdRelease() {
 	jobTag := fs.String("job-tag", "", "free-form job identifier (required)")
 	estimatedCost := fs.Float64("estimated-cost", 0, "estimated job cost in USD")
 	slackAtRelease := fs.Float64("slack-at-release", 0, "slack value seen at GET /slack")
-	windowKind := fs.String("window-kind", "five_hour", "window_kind: five_hour|weekly")
+	windowKind := fs.String("window-kind", "session", "window_kind: session|weekly")
 	fs.Parse(os.Args[2:])
 
 	if *jobTag == "" {

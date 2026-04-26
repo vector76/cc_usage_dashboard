@@ -41,7 +41,7 @@ type SeriesBucket struct {
 // State is the JSON response for GET /api/dashboard/state.
 type State struct {
 	Now                    time.Time      `json:"now"`
-	FiveHour               *WindowState   `json:"five_hour"`
+	Session                *WindowState   `json:"session"`
 	Weekly                 *WindowState   `json:"weekly"`
 	LastSnapshotAgeSeconds *float64       `json:"last_snapshot_age_seconds"`
 	ParseErrors24h         int64          `json:"parse_errors_24h"`
@@ -127,11 +127,11 @@ func (h *Handler) computeState() (*State, error) {
 		ConsumptionSeries: []SeriesBucket{},
 	}
 
-	fiveHour, err := h.loadActiveWindow(db, "five_hour", now)
+	session, err := h.loadActiveWindow(db, "session", now)
 	if err != nil {
-		return nil, fmt.Errorf("five_hour window: %w", err)
+		return nil, fmt.Errorf("session window: %w", err)
 	}
-	state.FiveHour = fiveHour
+	state.Session = session
 
 	weekly, err := h.loadActiveWindow(db, "weekly", now)
 	if err != nil {
@@ -154,14 +154,14 @@ func (h *Handler) computeState() (*State, error) {
 
 	state.Paused = h.slackCalc.IsPaused()
 
-	if fiveHour != nil {
-		drift, err := h.windowsEngine.Drift(fiveHour.ID)
+	if session != nil {
+		drift, err := h.windowsEngine.Drift(session.ID)
 		if err != nil {
 			return nil, fmt.Errorf("drift: %w", err)
 		}
 		state.Drift = drift
-		if drift != nil && fiveHour.BaselineTotal != nil && *fiveHour.BaselineTotal > 0 {
-			limit := h.baselineDriftThreshold * *fiveHour.BaselineTotal
+		if drift != nil && session.BaselineTotal != nil && *session.BaselineTotal > 0 {
+			limit := h.baselineDriftThreshold * *session.BaselineTotal
 			if math.Abs(*drift) > limit {
 				state.DriftAlert = true
 			}

@@ -62,7 +62,7 @@ rows on the host with no `~/.claude` mount.
 
 - `POST /snapshot` HTTP handler.
 - `quota_snapshots` table.
-- `windows` table population: detect 5-hour window starts from first event after a gap,
+- `windows` table population: detect session window starts from first event after a gap,
   set baselines from the closest snapshot.
 - Userscript v1: read DOM, post snapshot, debounce.
 
@@ -72,7 +72,7 @@ rows; `windows` rows correctly bracket recent activity.
 ## Phase 4 — Dashboard
 
 - Static HTML/JS served from trayapp.
-- Two burn-down charts (5-hour and weekly).
+- Two burn-down charts (session and weekly).
 - `GET /discount` endpoint and the effective-discount widget that consumes it.
 - Health/status panel: last snapshot age, parse error count, drift.
 

@@ -10,13 +10,13 @@ import (
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
-// Window represents a 5-hour or weekly quota window.
+// Window represents a session or weekly quota window.
 type Window struct {
 	ID             int64
-	Kind           string    // "five_hour" or "weekly"
+	Kind           string // "session" or "weekly"
 	StartedAt      time.Time
 	EndsAt         time.Time
-	BaselineTotal  *float64
+	BaselineTotal  *float64 // Percent-used anchor (0–100) from the most-recent in-window snapshot.
 	BaselineSource string
 	Closed         bool
 }
@@ -43,8 +43,8 @@ func (e *Engine) SetNow(fn func() time.Time) {
 // UpdateWindows updates the windows table after an event or snapshot.
 // This should be called after inserting usage events or snapshots.
 func (e *Engine) UpdateWindows() error {
-	// Get or create the 5-hour window
-	if err := e.ensureFiveHourWindow(); err != nil {
+	// Get or create the session window
+	if err := e.ensureSessionWindow(); err != nil {
 		return err
 	}
 
@@ -90,12 +90,12 @@ func (e *Engine) correctBaselineFromSnapshots() error {
 	}
 
 	for _, w := range active {
-		var totalCol string
+		var usedCol string
 		switch w.kind {
-		case "five_hour":
-			totalCol = "five_hour_total"
+		case "session":
+			usedCol = "session_used"
 		case "weekly":
-			totalCol = "weekly_total"
+			usedCol = "weekly_used"
 		default:
 			continue
 		}
@@ -107,7 +107,7 @@ func (e *Engine) correctBaselineFromSnapshots() error {
 			WHERE observed_at >= ? AND observed_at < ? AND %s IS NOT NULL
 			ORDER BY observed_at DESC
 			LIMIT 1
-		`, totalCol, totalCol)
+		`, usedCol, usedCol)
 		err := e.db.QueryRow(query, store.FormatTime(w.startedAt), store.FormatTime(w.endsAt)).Scan(&snapshotID, &baseline)
 
 		if err == sql.ErrNoRows {
@@ -130,16 +130,16 @@ func (e *Engine) correctBaselineFromSnapshots() error {
 	return nil
 }
 
-// ensureFiveHourWindow ensures a 5-hour window exists for the current period.
-func (e *Engine) ensureFiveHourWindow() error {
+// ensureSessionWindow ensures a session (5-hour) window exists for the current period.
+func (e *Engine) ensureSessionWindow() error {
 	now := e.now()
 
-	// Get the most recent active 5-hour window
+	// Get the most recent active session window
 	var window Window
 	err := e.db.QueryRow(`
 		SELECT id, started_at, ends_at, baseline_total, baseline_source
 		FROM windows
-		WHERE kind = 'five_hour' AND closed = 0
+		WHERE kind = 'session' AND closed = 0
 		ORDER BY started_at DESC
 		LIMIT 1
 	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselineTotal, &window.BaselineSource)
@@ -162,7 +162,7 @@ func (e *Engine) ensureFiveHourWindow() error {
 
 	// Create a new window starting from first event after gap
 	// For now, use "first event" detection logic
-	startTime, err := e.findFirstEventAfterGap("five_hour")
+	startTime, err := e.findFirstEventAfterGap("session")
 	if err != nil || startTime.IsZero() {
 		// No events yet, start from now
 		startTime = now
@@ -182,7 +182,7 @@ func (e *Engine) ensureFiveHourWindow() error {
 	_, err = e.db.Exec(`
 		INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
 		VALUES (?, ?, ?, ?, ?, 0)
-	`, "five_hour", store.FormatTime(startTime), store.FormatTime(endsAt), baseline, baselineSource)
+	`, "session", store.FormatTime(startTime), store.FormatTime(endsAt), baseline, baselineSource)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert window: %w", err)
@@ -279,13 +279,14 @@ func (e *Engine) findFirstEventAfterGap(windowKind string) (time.Time, error) {
 	return firstEvent, nil
 }
 
-// findBaseline finds the baseline quota for a given timestamp.
+// findBaseline finds the baseline (latest known % used) at or before t.
+// Used to seed a new window's baseline_total when no in-window snapshot exists yet.
 func (e *Engine) findBaseline(t time.Time) (*float64, string, error) {
 	var baselineTotal sql.NullFloat64
 	err := e.db.QueryRow(`
-		SELECT five_hour_total
+		SELECT session_used
 		FROM quota_snapshots
-		WHERE observed_at <= ?
+		WHERE observed_at <= ? AND session_used IS NOT NULL
 		ORDER BY observed_at DESC
 		LIMIT 1
 	`, store.FormatTime(t)).Scan(&baselineTotal)
