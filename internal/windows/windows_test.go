@@ -2,11 +2,12 @@ package windows
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/anthropics/usage-dashboard/internal/store"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 func createTestEngine(t *testing.T) (*Engine, *store.Store) {
@@ -100,6 +101,71 @@ func TestFirstEventCreatesWeeklyWindow(t *testing.T) {
 	}
 }
 
+func TestWeeklyWindowEndsFromSnapshot(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	// Wednesday April 22 2026 — verifiable Sunday default is April 26 00:00 UTC.
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	// Snapshot supplies an explicit weekly window boundary that differs from
+	// the default Sunday boundary so we can tell which path was taken.
+	weeklyEnds := time.Date(2026, 4, 30, 0, 0, 0, 0, time.UTC)
+	_, err := s.InsertQuotaSnapshot(
+		now.Add(-time.Hour), now.Add(-time.Hour), "test",
+		nil, nil, nil,
+		nil, nil, &weeklyEnds,
+		"{}",
+	)
+	if err != nil {
+		t.Fatalf("failed to insert snapshot: %v", err)
+	}
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var startedAt, endsAt time.Time
+	row := s.DB().QueryRow(`SELECT started_at, ends_at FROM windows WHERE kind = 'weekly' AND closed = 0`)
+	if err := row.Scan(&startedAt, &endsAt); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+
+	if !endsAt.Equal(weeklyEnds) {
+		t.Errorf("weekly ends_at: got %v, want %v (from snapshot)", endsAt, weeklyEnds)
+	}
+	wantStart := weeklyEnds.Add(-7 * 24 * time.Hour)
+	if !startedAt.Equal(wantStart) {
+		t.Errorf("weekly started_at: got %v, want %v", startedAt, wantStart)
+	}
+}
+
+func TestWeeklyWindowDefaultBoundary(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	// Wednesday April 22 2026 12:00 UTC. Default Sunday boundary is the
+	// midnight of the upcoming Monday minus 24h: Sunday April 26 00:00 UTC.
+	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var endsAt time.Time
+	row := s.DB().QueryRow(`SELECT ends_at FROM windows WHERE kind = 'weekly' AND closed = 0`)
+	if err := row.Scan(&endsAt); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+
+	wantEnds := time.Date(2026, 4, 26, 0, 0, 0, 0, time.UTC)
+	if !endsAt.Equal(wantEnds) {
+		t.Errorf("default weekly ends_at: got %v, want %v", endsAt, wantEnds)
+	}
+}
+
 func TestMultipleEventsInSameWindow(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()
@@ -186,15 +252,25 @@ func TestWindowExpiry(t *testing.T) {
 		t.Errorf("expected 1 closed window, got %d", closedCount)
 	}
 
-	// Check that a new window exists
+	// Check that a new window exists.
 	var openCount int
 	row = s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'five_hour' AND closed = 0`)
 	if err := row.Scan(&openCount); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
-
 	if openCount != 1 {
 		t.Errorf("expected 1 open window, got %d", openCount)
+	}
+
+	// And that it starts at the post-gap event (not just at `now`) — i.e.
+	// findFirstEventAfterGap picked up the event.
+	var newStart time.Time
+	row = s.DB().QueryRow(`SELECT started_at FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	if err := row.Scan(&newStart); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if !newStart.Equal(laterTime) {
+		t.Errorf("new window started_at: got %v, want %v (post-gap event)", newStart, laterTime)
 	}
 }
 
@@ -205,25 +281,33 @@ func TestBaselineFromSnapshot(t *testing.T) {
 	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
 	engine.SetNow(func() time.Time { return now })
 
-	// Insert a snapshot BEFORE the window
-	snapshotTime := now.Add(-1 * time.Minute)
-	baselineVal := 100.0
-	_, err := s.InsertQuotaSnapshot(
-		snapshotTime, snapshotTime, "test",
-		nil, &baselineVal, nil,
+	// Two prior snapshots; the engine should pick the most recent one
+	// at-or-before the window start.
+	older := 100.0
+	if _, err := s.InsertQuotaSnapshot(
+		now.Add(-2*time.Hour), now.Add(-2*time.Hour), "test",
+		nil, &older, nil,
 		nil, nil, nil,
 		"{}",
-	)
-	if err != nil {
-		t.Fatalf("failed to insert snapshot: %v", err)
+	); err != nil {
+		t.Fatalf("failed to insert older snapshot: %v", err)
+	}
+
+	newer := 250.0
+	if _, err := s.InsertQuotaSnapshot(
+		now.Add(-1*time.Minute), now.Add(-1*time.Minute), "test",
+		nil, &newer, nil,
+		nil, nil, nil,
+		"{}",
+	); err != nil {
+		t.Fatalf("failed to insert newer snapshot: %v", err)
 	}
 
 	// Insert an event that starts the window
-	_, err = s.InsertUsageEvent(
+	if _, err := s.InsertUsageEvent(
 		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
 		100, 50, 0, 0, nil, "", "{}",
-	)
-	if err != nil {
+	); err != nil {
 		t.Fatalf("failed to insert event: %v", err)
 	}
 
@@ -232,15 +316,19 @@ func TestBaselineFromSnapshot(t *testing.T) {
 		t.Fatalf("UpdateWindows failed: %v", err)
 	}
 
-	// Check that the baseline was set from the snapshot
+	// Baseline should reflect the most recent prior snapshot.
 	var baseline sql.NullFloat64
-	row := s.DB().QueryRow(`SELECT baseline_total FROM windows WHERE kind = 'five_hour' AND closed = 0`)
-	if err := row.Scan(&baseline); err != nil {
+	var source string
+	row := s.DB().QueryRow(`SELECT baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	if err := row.Scan(&baseline, &source); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
 
-	if !baseline.Valid || baseline.Float64 != baselineVal {
-		t.Errorf("expected baseline %f, got %v", baselineVal, baseline)
+	if !baseline.Valid || baseline.Float64 != newer {
+		t.Errorf("expected baseline %f (most recent snapshot), got %v", newer, baseline)
+	}
+	if source != "snapshot" {
+		t.Errorf("expected baseline_source 'snapshot', got %q", source)
 	}
 }
 
@@ -251,26 +339,40 @@ func TestBaselineCorrection(t *testing.T) {
 	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
 	engine.SetNow(func() time.Time { return now })
 
-	// Insert an event to start the window
-	_, err := s.InsertUsageEvent(
+	// Insert an event to start the window with no preceding snapshot.
+	if _, err := s.InsertUsageEvent(
 		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
 		100, 50, 0, 0, nil, "", "{}",
-	)
-	if err != nil {
+	); err != nil {
 		t.Fatalf("failed to insert event: %v", err)
 	}
 
-	// Update windows with initial baseline
 	if err := engine.UpdateWindows(); err != nil {
 		t.Fatalf("UpdateWindows failed: %v", err)
 	}
 
-	// Now insert a snapshot WITHIN the window with a new baseline
+	// Capture the original window id so we can confirm the same row was
+	// updated (not replaced).
+	var windowID int64
+	var initialBaseline sql.NullFloat64
+	var initialSource string
+	row := s.DB().QueryRow(`SELECT id, baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	if err := row.Scan(&windowID, &initialBaseline, &initialSource); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if initialBaseline.Valid {
+		t.Errorf("expected nil baseline initially, got %v", initialBaseline.Float64)
+	}
+	if initialSource != "no_snapshot" {
+		t.Errorf("expected initial source 'no_snapshot', got %q", initialSource)
+	}
+
+	// Snapshot arrives within the window with a new baseline.
 	laterTime := now.Add(1 * time.Minute)
 	engine.SetNow(func() time.Time { return laterTime })
 
 	newBaseline := 200.0
-	_, err = s.InsertQuotaSnapshot(
+	snapshotID, err := s.InsertQuotaSnapshot(
 		laterTime, laterTime, "test",
 		nil, &newBaseline, nil,
 		nil, nil, nil,
@@ -280,92 +382,27 @@ func TestBaselineCorrection(t *testing.T) {
 		t.Fatalf("failed to insert snapshot: %v", err)
 	}
 
-	// Update windows - should correct the baseline
 	if err := engine.UpdateWindows(); err != nil {
 		t.Fatalf("UpdateWindows failed: %v", err)
 	}
 
-	// Check that the baseline was updated
+	var correctedID int64
 	var baseline sql.NullFloat64
 	var baselineSource string
-	row := s.DB().QueryRow(`SELECT baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
-	if err := row.Scan(&baseline, &baselineSource); err != nil {
+	row = s.DB().QueryRow(`SELECT id, baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	if err := row.Scan(&correctedID, &baseline, &baselineSource); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
 
+	if correctedID != windowID {
+		t.Errorf("expected baseline correction to update existing window %d, got new id %d", windowID, correctedID)
+	}
 	if !baseline.Valid || baseline.Float64 != newBaseline {
 		t.Errorf("expected baseline %f, got %v", newBaseline, baseline)
 	}
-
-	if !isValidSnapshotSource(baselineSource) {
-		t.Errorf("expected baseline_source to contain 'snapshot:', got %s", baselineSource)
-	}
-}
-
-func isValidSnapshotSource(s string) bool {
-	// Check if it starts with "snapshot:"
-	return len(s) > 9 && s[:9] == "snapshot:"
-}
-
-func TestBaselineCorrectionDebug(t *testing.T) {
-	engine, s := createTestEngine(t)
-	defer s.Close()
-
-	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
-	engine.SetNow(func() time.Time { return now })
-
-	// Insert an event to start the window
-	_, err := s.InsertUsageEvent(
-		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
-		100, 50, 0, 0, nil, "", "{}",
-	)
-	if err != nil {
-		t.Fatalf("failed to insert event: %v", err)
-	}
-
-	// Update windows
-	if err := engine.UpdateWindows(); err != nil {
-		t.Fatalf("UpdateWindows failed: %v", err)
-	}
-
-	// Insert snapshot WITHIN the window
-	laterTime := now.Add(1 * time.Minute)
-	newBaseline := 200.0
-	_, err = s.InsertQuotaSnapshot(
-		laterTime, laterTime, "test",
-		nil, &newBaseline, nil,
-		nil, nil, nil,
-		"{}",
-	)
-	if err != nil {
-		t.Fatalf("failed to insert snapshot: %v", err)
-	}
-
-	// Verify snapshot was inserted
-	var snapshotCount int
-	row := s.DB().QueryRow(`SELECT COUNT(*) FROM quota_snapshots`)
-	if err := row.Scan(&snapshotCount); err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-	t.Logf("Snapshot count: %d", snapshotCount)
-
-	// Update windows again to trigger baseline correction
-	if err := engine.UpdateWindows(); err != nil {
-		t.Fatalf("second UpdateWindows failed: %v", err)
-	}
-
-	// Check window baseline
-	var windowBaseline sql.NullFloat64
-	var baselineSource string
-	row = s.DB().QueryRow(`SELECT baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
-	if err := row.Scan(&windowBaseline, &baselineSource); err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-
-	t.Logf("Window baseline: %v, source: %s", windowBaseline, baselineSource)
-
-	if !windowBaseline.Valid || windowBaseline.Float64 != newBaseline {
-		t.Errorf("expected baseline %f, got %v (source: %s)", newBaseline, windowBaseline, baselineSource)
+	wantSource := fmt.Sprintf("snapshot:%d", snapshotID)
+	if baselineSource != wantSource {
+		t.Errorf("expected baseline_source %q, got %q", wantSource, baselineSource)
 	}
 }
 
@@ -376,61 +413,103 @@ func TestDriftCalculation(t *testing.T) {
 	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
 	engine.SetNow(func() time.Time { return now })
 
-	// Insert a baseline snapshot
+	// Insert a baseline snapshot just before the window
 	baseline := 1000.0
-	_, err := s.InsertQuotaSnapshot(
+	if _, err := s.InsertQuotaSnapshot(
 		now.Add(-1*time.Minute), now.Add(-1*time.Minute), "test",
 		nil, &baseline, nil,
 		nil, nil, nil,
 		"{}",
-	)
-	if err != nil {
+	); err != nil {
 		t.Fatalf("failed to insert snapshot: %v", err)
 	}
 
-	// Insert events
-	cost1 := 100.0
-	cost2 := 50.0
-
-	_, err = s.InsertUsageEvent(
-		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
-		100, 50, 0, 0, &cost1, "reported", "{}",
-	)
-	if err != nil {
-		t.Fatalf("failed to insert event: %v", err)
-	}
-
-	_, err = s.InsertUsageEvent(
-		now.Add(1*time.Minute), "test", "session-1", "msg-2", "", "claude-3-5-sonnet-20241022",
-		100, 50, 0, 0, &cost2, "reported", "{}",
-	)
-	if err != nil {
-		t.Fatalf("failed to insert event: %v", err)
-	}
-
-	// Update windows
+	// Trigger window creation now so the window starts at `now` and
+	// ends at `now + 5h`.
 	if err := engine.UpdateWindows(); err != nil {
 		t.Fatalf("UpdateWindows failed: %v", err)
 	}
 
+	// Two events within the window plus events outside (before and after)
+	// that must be excluded from the drift calculation.
+	costIn1 := 100.0
+	costIn2 := 50.0
+	costBefore := 999.0
+	costAfter := 999.0
+
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-in-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, &costIn1, "reported", "{}",
+	); err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+
+	if _, err := s.InsertUsageEvent(
+		now.Add(1*time.Minute), "test", "session-1", "msg-in-2", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, &costIn2, "reported", "{}",
+	); err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+
+	if _, err := s.InsertUsageEvent(
+		now.Add(-30*time.Minute), "test", "session-1", "msg-before", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, &costBefore, "reported", "{}",
+	); err != nil {
+		t.Fatalf("failed to insert pre-window event: %v", err)
+	}
+
+	if _, err := s.InsertUsageEvent(
+		now.Add(6*time.Hour), "test", "session-1", "msg-after", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, &costAfter, "reported", "{}",
+	); err != nil {
+		t.Fatalf("failed to insert post-window event: %v", err)
+	}
+
 	// Get the active window
 	var windowID int64
-	var startedAt, endsAt time.Time
-	var baselineTotal sql.NullFloat64
-	row := s.DB().QueryRow(`SELECT id, started_at, ends_at, baseline_total FROM windows WHERE kind = 'five_hour' AND closed = 0`)
-	if err := row.Scan(&windowID, &startedAt, &endsAt, &baselineTotal); err != nil {
+	row := s.DB().QueryRow(`SELECT id FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	if err := row.Scan(&windowID); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
 
-	// Calculate drift
 	drift, err := engine.Drift(windowID)
 	if err != nil {
 		t.Fatalf("Drift failed: %v", err)
 	}
 
-	// Expected: baseline (1000) - consumed (150) = 850
+	// Expected: baseline (1000) - consumed in-window (150) = 850.
+	// Out-of-window events (999 + 999) must not contribute.
 	expectedDrift := 850.0
-	if drift == nil || *drift != expectedDrift {
-		t.Errorf("expected drift %f, got %v", expectedDrift, drift)
+	if drift == nil {
+		t.Fatalf("expected non-nil drift")
+	}
+	if *drift != expectedDrift {
+		t.Errorf("expected drift %f, got %f (out-of-window events leaked?)", expectedDrift, *drift)
+	}
+}
+
+func TestDriftNilBaseline(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var windowID int64
+	row := s.DB().QueryRow(`SELECT id FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	if err := row.Scan(&windowID); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+
+	drift, err := engine.Drift(windowID)
+	if err != nil {
+		t.Fatalf("Drift failed: %v", err)
+	}
+	if drift != nil {
+		t.Errorf("expected nil drift when baseline is nil, got %f", *drift)
 	}
 }
