@@ -40,7 +40,7 @@
 - Both paths share parser for consistency
 - Comprehensive parser tests (14 test cases covering edge cases)
 
-### Phase 4: Snapshots & Windows (Partial) ✅
+### Phase 4: Snapshots & Windows ✅
 - POST /snapshot handler: stores authoritative quota snapshots
 - Records both observed_at and received_at for clock skew analysis
 - Windows engine: derives 5-hour and weekly windows
@@ -58,35 +58,51 @@
 - Optional slack sampling (slack_samples table)
 - CLI slack command with output formats: json, release-bool, fraction
 
-## In Progress / Planned
-
-### Phase 6: Dashboard & Discount
-- Discount calculation (docs/discount-calculation.md schema exists)
+### Phase 6: Dashboard & Discount ✅
+- Discount calculation matching `docs/discount-calculation.md` field names
+  (`savings_usd`, `value_ratio`, `consumed_usd_equivalent`,
+  `events_with_reported_cost`, `events_with_computed_cost`,
+  `events_without_cost`)
 - GET /discount endpoint: cost period analysis with reported/computed split
-- Dashboard JSON endpoints for charts
-- Health/status panel data
-- Metrics endpoint for observability
+- Dashboard JSON endpoint and HTML/JS shell served from the same process
 
-### Phase 7: Tray UI & Config
-- Extended config loader (Windows %APPDATA% path resolution, env placeholders)
-- Network binding strategy (enumerate interfaces, Docker/WSL ranges, fallback)
-- Tray icon color states (green/yellow/red/gray)
-- Tray menu items (Open dashboard, Status, Pause, About, Quit)
-- Graceful shutdown (flush offsets, checkpoint WAL)
-- install.ps1 for Task Scheduler autostart
-- Linux headless build works; Windows build tagged
+### Phase 7: Tray UI & Config ✅
+- Extended config loader (Windows `%APPDATA%` path resolution, env-style
+  placeholder expansion, network-bind block, log-file path,
+  `release_threshold` / `baseline_max_age_hours` /
+  `baseline_drift_threshold` slack fields)
+- Network binding strategy (enumerate interfaces, Docker/WSL ranges,
+  `127.0.0.1` fallback)
+- Tray icon and menu skeleton via `fyne.io/systray` with the documented v1
+  items (Open dashboard, Status, Pause slack signal, About, Quit). Pause
+  and Quit handlers are wired through to `*slack.Calculator` and the
+  graceful-shutdown path; Open dashboard, About, the Status submenu, and
+  the icon color states are TODO stubs (logged on click) pending Windows
+  hands-on time
+- Graceful shutdown phases: HTTP server drain (10s deadline), background
+  goroutines stopped (retention pruner, windows ticker, tailer), WAL
+  checkpoint, DB close. Tailer offsets are persisted on every read so no
+  end-of-run flush is required.
+- Rotating log file (size-based, capped backups) opt-in via
+  `logging.file` in the config; default is stdout
+- `install.ps1` registers a per-user Task Scheduler "at logon" task
+- Build-tag isolation: `tray_windows.go` (`//go:build windows`) is the only
+  file that imports `fyne.io/systray`; `tray_stub.go` (`//go:build
+  !windows`) keeps the Linux build headless and dependency-free
 
-### Phase 8: E2E Validation & Polish
-- End-to-end integration scenarios
-- E2E test 1: CLI Mode A posts → /discount and /slack work
-- E2E test 2: Tailer watches directory → usage_events appear
-- E2E test 3: CLI Mode B with fixture hook payload → same
-- E2E test 4: POST /snapshot → baseline update, drift detection
-- E2E test 5: Release flow → audit row in slack_releases
-- Full test suite passing
-- Windows manual verification checklist
-- README Quick Start accuracy review
-- Userscript auto-update headers
+### Phase 8: E2E Validation & Polish ✅
+- End-to-end Go integration suite in `internal/integration/e2e_test.go`,
+  cross-referenced from `testdata/e2e_test.md`:
+  - `TestE2E_CLIModeA_DiscountAndSlack`
+  - `TestE2E_DuplicateDetection`
+  - `TestE2E_SnapshotAndWindowDerivation`
+  - `TestE2E_CostResolution`
+  - `TestE2E_SlackReleaseFlow`
+  - `TestE2E_ParseErrorRoundTrip`
+- Userscript shipped with auto-update headers
+  (`userscript/claude-usage-snapshot.user.js`)
+- `make test` green; Windows manual verification checklist captured in
+  `docs/test-plan.md`
 
 ## Architecture Highlights
 
@@ -105,17 +121,17 @@
 - ✅ Cost: reported vs computed, cache tokens, unknown models
 - ✅ Parser: valid/invalid JSON, missing fields, timestamps, errors
 - ✅ Server: validation, UNIQUE constraint, handler round-trips
-- ⏳ Windows: derivation, baseline assignment, drift computation
-- ⏳ Slack: gate checks, fraction combination, release recording
-- ⏳ E2E: full integration scenarios
+- ✅ Windows engine: derivation, baseline assignment, drift computation
+- ✅ Slack: gate checks, fraction combination, release recording, pause flag
+- ✅ E2E: full integration scenarios in `internal/integration/e2e_test.go`
 
 ## Known Limitations (v1)
 
+- Slack **pause state is transient** — it lives only in the calculator's
+  in-memory flag and resets to `false` on every trayapp restart. This is
+  intentional; see `docs/design-decisions.md` for the rationale (pause is a
+  session-bounded operator override, not a configuration setting).
 - Tailer uses file walking + stat-based offset tracking (not ideal for huge projects)
-- Windows interface enumeration not yet implemented
-- Headroom gate is currently always true (placeholder)
-- Dashboard UI not yet built (JSON endpoints ready)
-- Userscript is a placeholder
 - No CLI offset file (server dedupes instead)
 - No forecasting (uniform E(t) only)
 - No job runner (exposes signal, doesn't act)
@@ -145,8 +161,8 @@ clusage-cli slack --format fraction
 
 ## Next Steps
 
-- Implement Phase 6 discount calculation and dashboard endpoints
-- Add Phase 7 network binding and graceful shutdown
-- E2E integration tests for Phase 8
-- Windows-specific testing and UI polish
-- Documentation review and README update
+- Run the Windows manual verification checklist in `docs/test-plan.md`
+  against a built `trayapp.exe` (tray UX, autostart, graceful shutdown on
+  logoff).
+- Iterate on dashboard HTML/JS as needed once real usage data accumulates
+  on a Windows host.

@@ -93,7 +93,9 @@ The session log tailer is a goroutine inside the tray app, not a separate binary
 │   ├── roadmap.md
 │   ├── tray-app.md
 │   ├── container-cli.md
-│   └── userscript.md
+│   ├── userscript.md
+│   ├── design-decisions.md
+│   └── test-plan.md
 ├── cmd/
 │   ├── trayapp/                  # Windows tray + server binary
 │   └── cli/                      # Linux container CLI
@@ -129,7 +131,12 @@ The dashboard is then visible at `http://localhost:PORT` on the host.
 
 ## Status
 
-**Phase 0-6 complete and tested.** Core functionality working:
+**Phase 0-8 complete on Linux.** All code paths build and the full Go suite
+is green via `make test`. The Windows tray UI ships as a scaffold: the menu
+items, install path, and the Pause/Quit handlers are wired; the Open
+dashboard / About / Status submenu / icon color-state handlers are
+deliberate TODO stubs. Windows manual verification — including those
+deferred items — is tracked in `docs/test-plan.md`.
 
 - ✅ **Phase 0-1**: Skeleton, persistence layer with all v1 tables
 - ✅ **Phase 2**: HTTP server, `/log` handler, cost resolution, CLI Mode A
@@ -137,16 +144,38 @@ The dashboard is then visible at `http://localhost:PORT` on the host.
 - ✅ **Phase 4**: Snapshots, windows engine, baseline derivation
 - ✅ **Phase 5**: Slack signal (`GET /slack`, `POST /slack/release`), release logging
 - ✅ **Phase 6**: Discount calculation, `/discount` endpoint
+- ✅ **Phase 7**: Tray UI scaffold (`fyne.io/systray`, build-tagged) with
+  Pause/Quit wired and other menu items as TODO stubs, config with
+  `%APPDATA%` resolution, rotating log file, graceful shutdown,
+  `install.ps1` autostart
+- ✅ **Phase 8**: End-to-end Go integration suite
+  (`internal/integration/e2e_test.go`), userscript
+  (`userscript/claude-usage-snapshot.user.js`)
 
-**Remaining (Phase 7-8):**
-- Windows-specific tray UI (menu, icon states)
-- Dashboard HTML/JS (JSON endpoints exist)
-- Userscript (transport tested, DOM parsing TBD)
-- E2E integration tests
-- Windows manual verification
+See `IMPLEMENTATION_STATUS.md` for component-by-component status,
+`docs/roadmap.md` for build-order rationale, `docs/design-decisions.md` for
+key decisions (transient pause state, build-tag isolation), and
+`docs/test-plan.md` for the Linux/Windows verification matrix.
 
-See `IMPLEMENTATION_STATUS.md` for detailed component breakdown and `docs/roadmap.md` 
-for the build order rationale.
+## Userscript installation
+
+The userscript posts the dashboard's reported quota numbers to the trayapp so
+Tier 1 (passive observation) has an authoritative anchor. It lives at
+[`userscript/claude-usage-snapshot.user.js`](userscript/claude-usage-snapshot.user.js).
+
+1. Install [Tampermonkey](https://www.tampermonkey.net/) or
+   [Violentmonkey](https://violentmonkey.github.io/) in your browser.
+2. Open `userscript/claude-usage-snapshot.user.js` and let the manager
+   install it (drag the file in, or open the GitHub raw URL).
+3. Grant `GM.xmlHttpRequest` and `@connect localhost` / `@connect 127.0.0.1`
+   when prompted.
+4. Make sure the trayapp is running (default port `27812`).
+5. Open `https://claude.ai/` in any tab — the script posts one snapshot per
+   minute once the quota DOM nodes are detected.
+
+See `userscript/README.md` for troubleshooting and `docs/userscript.md` for
+the snapshot payload schema and the rationale (mixed content, CORS, Private
+Network Access).
 
 ## Why no online backend
 
