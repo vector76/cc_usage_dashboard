@@ -18,6 +18,7 @@ type Server struct {
 	store *store.Store
 	cfg   *config.Config
 	priceTable ingest.PriceTable
+	metrics *Metrics
 }
 
 // New creates a new HTTP server.
@@ -27,6 +28,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		store:      s,
 		cfg:        cfg,
 		priceTable: ingest.LoadPriceTable(cfg.Pricing.TablePath),
+		metrics:    NewMetrics(),
 	}
 
 	// Register handlers
@@ -37,6 +39,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("GET /slack", srv.handleSlackQuery)
 	srv.mux.HandleFunc("POST /slack/release", srv.handleSlackRelease)
 	srv.mux.HandleFunc("GET /discount", srv.handleDiscount)
+	srv.mux.HandleFunc("GET /metrics", srv.handleMetrics)
 
 	return srv
 }
@@ -148,6 +151,8 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.metrics.IncEventsIngested(req.Source)
+
 	// Return success response
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -190,6 +195,8 @@ func (s *Server) handleParseError(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		return
 	}
+
+	s.metrics.ParseErrors.Add(1)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

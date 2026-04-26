@@ -59,6 +59,8 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.metrics.SnapshotsReceived.Add(1)
+
 	// Trigger windows derivation
 	// In production, this would happen in a background task
 	// For now, we'll do it synchronously

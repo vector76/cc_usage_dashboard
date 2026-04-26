@@ -24,6 +24,8 @@ func (s *Server) handleSlackQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.metrics.SlackQueries.Add(1)
+
 	// Create calculator
 	calculator := slack.NewCalculator(s.store.DB(), slack.Config{
 		HeadroomThreshold:    s.cfg.Slack.HeadroomThreshold,
@@ -87,6 +89,8 @@ func (s *Server) handleSlackRelease(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		return
 	}
+
+	s.metrics.SlackReleases.Add(1)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
