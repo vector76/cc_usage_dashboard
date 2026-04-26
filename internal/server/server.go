@@ -32,9 +32,10 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		priceTable: ingest.LoadPriceTable(cfg.Pricing.TablePath),
 		metrics:    NewMetrics(),
 		slackCalc: slack.NewCalculator(s.DB(), slack.Config{
-			HeadroomThreshold:    cfg.Slack.HeadroomThreshold,
-			QuietPeriodSeconds:   cfg.Slack.QuietPeriodSeconds,
-			FreshnessThresholdMs: cfg.Slack.FreshnessThresholdMs,
+			QuietPeriodSeconds:     cfg.Slack.QuietPeriodSeconds,
+			ReleaseThreshold:       cfg.Slack.ReleaseThreshold,
+			BaselineMaxAgeHours:    cfg.Slack.BaselineMaxAgeHours,
+			BaselineDriftThreshold: cfg.Slack.BaselineDriftThreshold,
 		}),
 	}
 

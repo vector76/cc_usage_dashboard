@@ -34,9 +34,10 @@ type WindowMetrics struct {
 
 // Config holds slack calculation configuration.
 type Config struct {
-	HeadroomThreshold    float64
-	QuietPeriodSeconds   int
-	FreshnessThresholdMs int
+	QuietPeriodSeconds     int
+	ReleaseThreshold       float64
+	BaselineMaxAgeHours    int
+	BaselineDriftThreshold float64
 }
 
 // Calculator computes the slack signal. It is safe for concurrent use; a
@@ -107,15 +108,21 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 
 	resp.SlackCombinedFraction = c.combineSlackFractions(resp.FiveHour, resp.Weekly)
 
-	quietFor, hasEvent, freshOk := c.checkGates(now)
+	quietFor, hasEvent, err := c.quietFor(now)
+	if err != nil {
+		return nil, err
+	}
 	resp.PriorityQuietForSeconds = int(quietFor.Seconds())
 
 	quietThreshold := time.Duration(c.config.QuietPeriodSeconds) * time.Second
 	priorityQuietOk := !hasEvent || quietFor >= quietThreshold
 
-	headroomOk := false
-	if resp.SlackCombinedFraction != nil && *resp.SlackCombinedFraction >= c.config.HeadroomThreshold {
-		headroomOk = true
+	headroomOk := resp.SlackCombinedFraction != nil &&
+		*resp.SlackCombinedFraction >= c.config.ReleaseThreshold
+
+	freshOk, err := c.baselineFreshnessOk(now)
+	if err != nil {
+		return nil, err
 	}
 
 	resp.Gates["headroom"] = headroomOk
@@ -238,36 +245,74 @@ func (c *Calculator) combineSlackFractions(fiveHour, weekly *WindowMetrics) *flo
 	return &min
 }
 
-// checkGates returns (time since last event, whether any events exist,
-// freshness gate status).
+// quietFor returns the time since the most recent usage event and a flag
+// indicating whether any events exist.
 //
 // We use ORDER BY ... LIMIT 1 instead of MAX() because go-sqlite3 erases the
 // column type for aggregate results, returning the timestamp as a raw string
 // that does not scan into time.Time.
-func (c *Calculator) checkGates(now time.Time) (time.Duration, bool, bool) {
+func (c *Calculator) quietFor(now time.Time) (time.Duration, bool, error) {
 	var lastEvent time.Time
 	err := c.db.QueryRow(`SELECT occurred_at FROM usage_events ORDER BY occurred_at DESC LIMIT 1`).Scan(&lastEvent)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to query last event: %w", err)
+	}
+	if lastEvent.IsZero() {
+		return 0, false, nil
+	}
+	dt := now.Sub(lastEvent)
+	if dt < 0 {
+		dt = 0
+	}
+	return dt, true, nil
+}
 
-	var quietFor time.Duration
-	hasEvent := err == nil && !lastEvent.IsZero()
-	if hasEvent {
-		quietFor = now.Sub(lastEvent)
-		if quietFor < 0 {
-			quietFor = 0
-		}
+// baselineFreshnessOk implements the freshness gate from
+// docs/slack-indicator.md: the gate fails iff *both* the latest snapshot is
+// older than baseline_max_age AND consumption since the snapshot exceeds
+// baseline_drift_threshold * quota_total. Missing-snapshot fails the gate
+// (failure mode "no baseline snapshot ever recorded" → release_recommended=false).
+func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
+	var receivedAt time.Time
+	var fiveHourTotal sql.NullFloat64
+	err := c.db.QueryRow(`
+		SELECT received_at, five_hour_total FROM quota_snapshots
+		ORDER BY received_at DESC LIMIT 1
+	`).Scan(&receivedAt, &fiveHourTotal)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to query snapshot: %w", err)
 	}
 
-	var lastSnapshot time.Time
-	err = c.db.QueryRow(`SELECT received_at FROM quota_snapshots ORDER BY received_at DESC LIMIT 1`).Scan(&lastSnapshot)
-
-	freshOk := false
-	if err == nil && !lastSnapshot.IsZero() {
-		age := now.Sub(lastSnapshot)
-		threshold := time.Duration(c.config.FreshnessThresholdMs) * time.Millisecond
-		freshOk = age < threshold
+	age := now.Sub(receivedAt)
+	maxAge := time.Duration(c.config.BaselineMaxAgeHours) * time.Hour
+	if age <= maxAge {
+		return true, nil
 	}
 
-	return quietFor, hasEvent, freshOk
+	if !fiveHourTotal.Valid || fiveHourTotal.Float64 <= 0 {
+		// Snapshot is old and we cannot evaluate drift relative to a quota.
+		// Treat as failed gate: we have no confidence in the baseline.
+		return false, nil
+	}
+
+	var consumedSince float64
+	err = c.db.QueryRow(`
+		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
+		FROM usage_events
+		WHERE occurred_at > ? AND cost_usd_equivalent IS NOT NULL
+	`, receivedAt).Scan(&consumedSince)
+	if err != nil {
+		return false, fmt.Errorf("failed to compute drift: %w", err)
+	}
+
+	driftLimit := c.config.BaselineDriftThreshold * fiveHourTotal.Float64
+	return consumedSince <= driftLimit, nil
 }
 
 // RecordRelease records a release event to the database, resolving it to the

@@ -17,9 +17,10 @@ func newCalc(t *testing.T) (*Calculator, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	cfg := Config{
-		HeadroomThreshold:    0.10,
-		QuietPeriodSeconds:   300,
-		FreshnessThresholdMs: 48 * 3600 * 1000, // 48 hours
+		QuietPeriodSeconds:     300,
+		ReleaseThreshold:       0.10,
+		BaselineMaxAgeHours:    48,
+		BaselineDriftThreshold: 0.25,
 	}
 	return NewCalculator(s.DB(), cfg), s
 }
@@ -359,5 +360,182 @@ func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 	}
 	if math.Abs(*m.SlackFraction-expectedSlackFrac) > tol/baseline {
 		t.Errorf("SlackFraction: got %v, want ~%v", *m.SlackFraction, expectedSlackFrac)
+	}
+}
+
+// seedFreshSnapshot inserts a quota snapshot at receivedAt with a fixed
+// five-hour total (=quotaTotal). Returns nothing; used by gate-boundary tests.
+func seedFreshSnapshot(t *testing.T, s *store.Store, receivedAt time.Time, quotaTotal float64) {
+	t.Helper()
+	rem := quotaTotal
+	if _, err := s.InsertQuotaSnapshot(
+		receivedAt, receivedAt, "userscript",
+		&rem, &quotaTotal, nil,
+		&rem, &quotaTotal, nil,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+}
+
+// (g) Headroom gate fires off ReleaseThreshold, not the historical
+// HeadroomThreshold. Boundary: gate passes at exactly threshold and below
+// threshold fails.
+func TestHeadroomGate_ReleaseThresholdBoundary(t *testing.T) {
+	tests := []struct {
+		name     string
+		consumed float64 // dollars consumed in 5h window (baseline=1000)
+		// Window: started_at = now-1h, ends_at = now+4h, baseline=1000.
+		// progress=0.2, expected=200, slack=200-consumed,
+		// slack_fraction(5h) = (200-consumed)/1000.
+		// Weekly: started_at = now-24h, ends_at = now+6*24h, baseline=10000.
+		// progress=24/(7*24)=1/7≈0.1428, expected=1428.6,
+		// slack=1428.6-consumed, slack_fraction(weekly)≈0.1428 - consumed/10000.
+		// 5h is the binding (smaller) fraction in this layout.
+		wantHeadroom bool
+	}{
+		// Threshold = 0.10. consumed=100 → 5h slack_fraction = (200-100)/1000 = 0.10.
+		{"exactly at threshold", 100.0, true},
+		// consumed=101 → 5h slack_fraction = 0.099 < 0.10.
+		{"just below threshold", 101.0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, s := newCalc(t)
+			defer s.Close()
+
+			now := time.Now().UTC()
+			insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+			insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 10000.0, "snapshot:1")
+
+			cost := tt.consumed
+			if _, err := s.InsertUsageEvent(
+				now.Add(-30*time.Minute), "api",
+				"sess-h", "msg-h", "", "claude-3-5-sonnet-20241022",
+				1, 1, 0, 0,
+				&cost, "reported", "{}",
+			); err != nil {
+				t.Fatalf("insert event: %v", err)
+			}
+			// Fresh snapshot so freshness gate doesn't interfere.
+			seedFreshSnapshot(t, s, now, 1000.0)
+
+			resp, err := c.GetSlack()
+			if err != nil {
+				t.Fatalf("GetSlack: %v", err)
+			}
+			if resp.SlackCombinedFraction == nil {
+				t.Fatal("expected non-nil slack_combined_fraction")
+			}
+			if got := resp.Gates["headroom"]; got != tt.wantHeadroom {
+				t.Errorf("headroom gate: got %v, want %v (combined=%v)",
+					got, tt.wantHeadroom, *resp.SlackCombinedFraction)
+			}
+		})
+	}
+}
+
+// (h) Baseline freshness gate boundary on BaselineMaxAgeHours: a snapshot
+// within max age passes regardless of drift (the AND-gate short-circuits on
+// the age leg). The complementary "stale + small drift" case is covered by
+// the drift-threshold-boundary test below.
+func TestBaselineFreshness_MaxAgeBoundary(t *testing.T) {
+	c, s := newCalc(t)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+	insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 10000.0, "snapshot:1")
+
+	// Snapshot well inside max age (47h < 48h) — gate must pass even though
+	// drift is huge (50% of quota), because the age leg of the AND is false.
+	receivedAt := now.Add(-47 * time.Hour)
+	seedFreshSnapshot(t, s, receivedAt, 1000.0)
+
+	hugeCost := 500.0 // 50% of quota — would trip drift if age check engaged
+	if _, err := s.InsertUsageEvent(
+		receivedAt.Add(1*time.Hour), "api",
+		"sess-d", "msg-d", "", "claude-3-5-sonnet-20241022",
+		1, 1, 0, 0,
+		&hugeCost, "reported", "{}",
+	); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+
+	resp, err := c.GetSlack()
+	if err != nil {
+		t.Fatalf("GetSlack: %v", err)
+	}
+	if !resp.Gates["baseline_freshness"] {
+		t.Errorf("baseline_freshness gate: got false, want true (age < max_age, drift must be ignored)")
+	}
+}
+
+// (i) Baseline freshness gate boundary on BaselineDriftThreshold once the
+// snapshot is older than max age. Threshold = 25% of quota_total = 250.
+func TestBaselineFreshness_DriftThresholdBoundary(t *testing.T) {
+	tests := []struct {
+		name     string
+		drift    float64 // consumption since stale snapshot
+		wantPass bool
+	}{
+		// drift exactly at threshold — gate passes (we use <=).
+		{"drift at threshold", 250.0, true},
+		// drift just over threshold — gate fails.
+		{"drift just over threshold", 250.01, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, s := newCalc(t)
+			defer s.Close()
+
+			now := time.Now().UTC()
+			insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+			insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 10000.0, "snapshot:1")
+
+			// Snapshot 49 hours ago — older than max_age=48h, so drift gate engages.
+			receivedAt := now.Add(-49 * time.Hour)
+			seedFreshSnapshot(t, s, receivedAt, 1000.0)
+
+			cost := tt.drift
+			if _, err := s.InsertUsageEvent(
+				receivedAt.Add(1*time.Hour), "api",
+				"sess-d", "msg-d", "", "claude-3-5-sonnet-20241022",
+				1, 1, 0, 0,
+				&cost, "reported", "{}",
+			); err != nil {
+				t.Fatalf("insert event: %v", err)
+			}
+
+			resp, err := c.GetSlack()
+			if err != nil {
+				t.Fatalf("GetSlack: %v", err)
+			}
+			if got := resp.Gates["baseline_freshness"]; got != tt.wantPass {
+				t.Errorf("baseline_freshness gate: got %v, want %v (drift=%v)",
+					got, tt.wantPass, tt.drift)
+			}
+		})
+	}
+}
+
+// (j) Baseline freshness gate fails when no snapshot has ever been recorded
+// (failure mode "no baseline snapshot ever recorded" → release_recommended=false).
+func TestBaselineFreshness_NoSnapshot(t *testing.T) {
+	c, s := newCalc(t)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+
+	resp, err := c.GetSlack()
+	if err != nil {
+		t.Fatalf("GetSlack: %v", err)
+	}
+	if resp.Gates["baseline_freshness"] {
+		t.Error("baseline_freshness must fail when no snapshot exists")
+	}
+	if resp.ReleaseRecommended {
+		t.Error("release_recommended must be false when no snapshot exists")
 	}
 }
