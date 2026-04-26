@@ -79,6 +79,14 @@ function renderStatus(s) {
   kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
 }
 
+// renderBurnDown plots % used vs. time within a window.
+//   - Y axis: 0–100% (the plan limit).
+//   - Dashed line: linear pace from (start, 0) to (end, 100). Below = under
+//     pace = slack available. Above = burning faster than uniform.
+//   - Solid blue line: actual % used over time, sourced from
+//     quota_snapshots inside the window (win.series). Step plot is more
+//     honest about when we know vs. don't know, but a polyline reads better.
+//   - Marker: latest observation.
 function renderBurnDown(svgID, win) {
   const svg = document.getElementById(svgID);
   while (svg.firstChild) svg.removeChild(svg.firstChild);
@@ -87,47 +95,61 @@ function renderBurnDown(svgID, win) {
     svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "No active window"));
     return;
   }
-  if (win.baseline_total == null) {
-    svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "No baseline"));
-    return;
-  }
   const start = new Date(win.started_at).getTime();
   const end = new Date(win.ends_at).getTime();
-  const Q = Math.max(win.baseline_total, win.consumed || 0, 1e-9);
-  const sx = function (t) { return P + (W - 2 * P) * (t - start) / (end - start); };
-  const sy = function (v) { return H - P - (H - 2 * P) * v / Q; };
+  if (!(end > start)) {
+    svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "Invalid window"));
+    return;
+  }
+  const sx = (t) => P + (W - 2 * P) * (t - start) / (end - start);
+  const sy = (pct) => H - P - (H - 2 * P) * pct / 100;
 
   // axes
   svg.appendChild(el("line", { x1: P, y1: H - P, x2: W - P, y2: H - P, stroke: "#444" }));
   svg.appendChild(el("line", { x1: P, y1: P, x2: P, y2: H - P, stroke: "#444" }));
 
-  // baseline pace line: (start, 0) → (end, Q)
+  // pace line: (start, 0%) → (end, 100%) = uniform burn that exhausts at end
   svg.appendChild(el("line", {
-    x1: sx(start), y1: sy(0), x2: sx(end), y2: sy(win.baseline_total),
+    x1: sx(start), y1: sy(0), x2: sx(end), y2: sy(100),
     stroke: "#888", "stroke-dasharray": "3 3"
   }));
 
-  // consumed line up to "now"
-  const now = Date.now();
-  const tNow = Math.min(Math.max(now, start), end);
-  const consumed = win.consumed || 0;
-  svg.appendChild(el("line", {
-    x1: sx(start), y1: sy(0), x2: sx(tNow), y2: sy(consumed),
-    stroke: "#06c", "stroke-width": "2"
-  }));
-  svg.appendChild(el("circle", { cx: sx(tNow), cy: sy(consumed), r: "4", fill: "#06c" }));
+  // observed series
+  const series = (win.series || []).filter(p => {
+    const t = new Date(p.observed_at).getTime();
+    return t >= start && t < end;
+  });
+  if (series.length > 0) {
+    const points = series.map(p => `${sx(new Date(p.observed_at).getTime())},${sy(p.percent_used)}`).join(" ");
+    svg.appendChild(el("polyline", { points, fill: "none", stroke: "#06c", "stroke-width": "2" }));
+    const latest = series[series.length - 1];
+    const lx = sx(new Date(latest.observed_at).getTime());
+    const ly = sy(latest.percent_used);
+    svg.appendChild(el("circle", { cx: lx, cy: ly, r: "4", fill: "#06c" }));
+    svg.appendChild(el("text", {
+      x: lx, y: ly - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+    }, fmt(latest.percent_used) + "%"));
+  } else if (win.baseline_total != null) {
+    // No series rows yet (older snapshot pre-dating the window) — fall back
+    // to drawing the baseline as a flat segment from start to now.
+    const now = Math.min(Math.max(Date.now(), start), end);
+    svg.appendChild(el("line", {
+      x1: sx(start), y1: sy(win.baseline_total), x2: sx(now), y2: sy(win.baseline_total),
+      stroke: "#06c", "stroke-width": "2"
+    }));
+    svg.appendChild(el("circle", { cx: sx(now), cy: sy(win.baseline_total), r: "4", fill: "#06c" }));
+    svg.appendChild(el("text", {
+      x: sx(now), y: sy(win.baseline_total) - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+    }, fmt(win.baseline_total) + "%"));
+  } else {
+    svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "No data yet"));
+  }
 
-  // labels
+  // axis labels
   svg.appendChild(el("text", { x: P, y: H - 8, "font-size": "10", fill: "#444" }, "start"));
   svg.appendChild(el("text", { x: W - P, y: H - 8, "font-size": "10", fill: "#444", "text-anchor": "end" }, "end"));
-  // baseline_total is a "% used" anchor (0–100); consumed is still dollars
-  // from usage_events. The two share an axis here for layout convenience —
-  // refactoring the chart into a proper % vs. time burn-down is follow-up work.
-  svg.appendChild(el("text", { x: 4, y: P + 4, "font-size": "10", fill: "#444" }, fmt(win.baseline_total) + "%"));
+  svg.appendChild(el("text", { x: 4, y: P + 4, "font-size": "10", fill: "#444" }, "100%"));
   svg.appendChild(el("text", { x: 4, y: H - P, "font-size": "10", fill: "#444" }, "0"));
-  svg.appendChild(el("text", {
-    x: sx(tNow), y: sy(consumed) - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
-  }, "$" + fmt(consumed)));
 }
 
 function renderDiscount(d) {

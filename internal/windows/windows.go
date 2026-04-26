@@ -160,15 +160,20 @@ func (e *Engine) ensureSessionWindow() error {
 		return fmt.Errorf("failed to query windows: %w", err)
 	}
 
-	// Create a new window starting from first event after gap
-	// For now, use "first event" detection logic
-	startTime, err := e.findFirstEventAfterGap("session")
-	if err != nil || startTime.IsZero() {
-		// No events yet, start from now
-		startTime = now
+	// Prefer the snapshot's authoritative reset time ("Resets in N hr M min"
+	// parsed by the userscript). Falls back to event-based detection only
+	// when no snapshot has supplied an end yet.
+	var startTime, endsAt time.Time
+	if t, err := e.findSessionBoundary(); err == nil && !t.IsZero() && t.After(now) {
+		endsAt = t
+		startTime = endsAt.Add(-5 * time.Hour)
+	} else {
+		startTime, err = e.findFirstEventAfterGap("session")
+		if err != nil || startTime.IsZero() {
+			startTime = now
+		}
+		endsAt = startTime.Add(5 * time.Hour)
 	}
-
-	endsAt := startTime.Add(5 * time.Hour)
 
 	// Get baseline from most recent session snapshot at or before window start
 	baseline, baselineSource, err := e.findBaseline("session", startTime)
@@ -318,6 +323,28 @@ func (e *Engine) findBaseline(kind string, t time.Time) (*float64, string, error
 	}
 
 	return &baselineTotal.Float64, "snapshot", nil
+}
+
+// findSessionBoundary extracts the session reset time from the most recent
+// snapshot that supplied one. Userscript v0.3+ parses "Resets in N hr M min"
+// and sends it as session_window_ends; older snapshots may have NULL.
+func (e *Engine) findSessionBoundary() (time.Time, error) {
+	var boundary time.Time
+	err := e.db.QueryRow(`
+		SELECT session_window_ends
+		FROM quota_snapshots
+		WHERE session_window_ends IS NOT NULL
+		ORDER BY observed_at DESC
+		LIMIT 1
+	`).Scan(&boundary)
+
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	} else if err != nil {
+		return time.Time{}, fmt.Errorf("failed to query session boundary: %w", err)
+	}
+
+	return boundary, nil
 }
 
 // findWeeklyBoundary extracts the weekly window boundary from the most recent snapshot.

@@ -23,13 +23,21 @@ var staticFS embed.FS
 
 // WindowState describes one active window in the dashboard state response.
 type WindowState struct {
-	ID            int64     `json:"id"`
-	Kind          string    `json:"kind"`
-	StartedAt     time.Time `json:"started_at"`
-	EndsAt        time.Time `json:"ends_at"`
-	BaselineTotal *float64  `json:"baseline_total"`
-	Consumed      float64   `json:"consumed"`
-	Slack         *float64  `json:"slack"`
+	ID            int64               `json:"id"`
+	Kind          string              `json:"kind"`
+	StartedAt     time.Time           `json:"started_at"`
+	EndsAt        time.Time           `json:"ends_at"`
+	BaselineTotal *float64            `json:"baseline_total"`
+	Consumed      float64             `json:"consumed"`
+	Slack         *float64            `json:"slack"`
+	Series        []UsedSeriesPoint   `json:"series"`
+}
+
+// UsedSeriesPoint is one observation of % used at a point in time, sourced
+// from quota_snapshots within the window.
+type UsedSeriesPoint struct {
+	ObservedAt  time.Time `json:"observed_at"`
+	PercentUsed float64   `json:"percent_used"`
 }
 
 // SeriesBucket is a 15-minute consumption bucket.
@@ -220,6 +228,12 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string, now time.Time) (*Win
 	}
 	ws.Consumed = consumed
 
+	series, err := h.loadUsedSeries(db, kind, startedAt, endsAt)
+	if err != nil {
+		return nil, err
+	}
+	ws.Series = series
+
 	if ws.BaselineTotal != nil {
 		duration := endsAt.Sub(startedAt)
 		if duration > 0 {
@@ -237,6 +251,43 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string, now time.Time) (*Win
 	}
 
 	return ws, nil
+}
+
+// loadUsedSeries returns the per-snapshot %used time series for a window.
+// Reads session_used or weekly_used depending on kind. Empty slice when no
+// matching snapshots exist; never returns nil.
+func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time.Time) ([]UsedSeriesPoint, error) {
+	var col string
+	switch kind {
+	case "session":
+		col = "session_used"
+	case "weekly":
+		col = "weekly_used"
+	default:
+		return []UsedSeriesPoint{}, nil
+	}
+
+	query := fmt.Sprintf(`
+		SELECT observed_at, %s
+		FROM quota_snapshots
+		WHERE observed_at >= ? AND observed_at < ? AND %s IS NOT NULL
+		ORDER BY observed_at
+	`, col, col)
+	rows, err := db.Query(query, store.FormatTime(startedAt), store.FormatTime(endsAt))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []UsedSeriesPoint{}
+	for rows.Next() {
+		var p UsedSeriesPoint
+		if err := rows.Scan(&p.ObservedAt, &p.PercentUsed); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 func (h *Handler) lastSnapshotAge(db *sql.DB, now time.Time) (time.Duration, bool, error) {
