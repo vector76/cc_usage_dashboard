@@ -1,11 +1,73 @@
 # Example price configuration for Claude usage dashboard.
-# Copy this file to prices.yaml and update rates as needed.
+# Copy to prices.yaml and update rates as Anthropic publishes new ones.
 #
-# All rates are in USD per million tokens.
-# Set a model's rates to skip cost computation for that model;
-# null rates will be treated as unknown pricing.
+# All rates are in USD per million tokens, matching Anthropic's published
+# Messages API pricing.
+#
+# Cache rates: usage_events stores a single cache_creation_tokens column,
+# so we can't distinguish 5-minute (1.25x input) from 1-hour (2x input)
+# cache writes here. Claude Code in practice uses 1-hour caching for
+# system prompts and stable context, so the rates below use the 1h
+# multiplier — that's accurate when 1h dominates and a slight over-count
+# when a session leans on 5m caching.
 
 models:
+  # ---- Claude 4.x family (current as of early 2026) ----
+  claude-opus-4-7:
+    input_rate_usd_per_m: 15.00
+    output_rate_usd_per_m: 75.00
+    cache_creation_rate_usd_per_m: 30.00
+    cache_read_rate_usd_per_m: 1.50
+
+  claude-opus-4-6:
+    input_rate_usd_per_m: 15.00
+    output_rate_usd_per_m: 75.00
+    cache_creation_rate_usd_per_m: 30.00
+    cache_read_rate_usd_per_m: 1.50
+
+  claude-opus-4-5:
+    input_rate_usd_per_m: 15.00
+    output_rate_usd_per_m: 75.00
+    cache_creation_rate_usd_per_m: 30.00
+    cache_read_rate_usd_per_m: 1.50
+
+  claude-opus-4-1:
+    input_rate_usd_per_m: 15.00
+    output_rate_usd_per_m: 75.00
+    cache_creation_rate_usd_per_m: 30.00
+    cache_read_rate_usd_per_m: 1.50
+
+  claude-opus-4-0:
+    input_rate_usd_per_m: 15.00
+    output_rate_usd_per_m: 75.00
+    cache_creation_rate_usd_per_m: 30.00
+    cache_read_rate_usd_per_m: 1.50
+
+  claude-sonnet-4-6:
+    input_rate_usd_per_m: 3.00
+    output_rate_usd_per_m: 15.00
+    cache_creation_rate_usd_per_m: 6.00
+    cache_read_rate_usd_per_m: 0.30
+
+  claude-sonnet-4-5:
+    input_rate_usd_per_m: 3.00
+    output_rate_usd_per_m: 15.00
+    cache_creation_rate_usd_per_m: 6.00
+    cache_read_rate_usd_per_m: 0.30
+
+  claude-sonnet-4-0:
+    input_rate_usd_per_m: 3.00
+    output_rate_usd_per_m: 15.00
+    cache_creation_rate_usd_per_m: 6.00
+    cache_read_rate_usd_per_m: 0.30
+
+  claude-haiku-4-5:
+    input_rate_usd_per_m: 1.00
+    output_rate_usd_per_m: 5.00
+    cache_creation_rate_usd_per_m: 2.00
+    cache_read_rate_usd_per_m: 0.10
+
+  # ---- Claude 3.x family (kept for historical events / backfills) ----
   claude-3-5-sonnet-20241022:
     input_rate_usd_per_m: 3.00
     output_rate_usd_per_m: 15.00
