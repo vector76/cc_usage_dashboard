@@ -327,6 +327,80 @@ func TestWindowExpiry(t *testing.T) {
 	}
 }
 
+// TestActiveWindowReanchorsToSnapshotBoundary is a regression for the case
+// where a window was born under the calendar fallback (because no snapshot
+// had supplied an authoritative boundary yet), then the userscript later
+// started reporting the real reset time. ensureWeeklyWindow used to consult
+// snapshots only at creation, leaving the active window stuck on the wrong
+// boundary until it expired — which for weekly is up to 7 days.
+func TestActiveWindowReanchorsToSnapshotBoundary(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	// Sunday April 26 2026 21:00 UTC, with no snapshots yet — the engine
+	// will fall back to the calendar default for the weekly window.
+	now := time.Date(2026, 4, 26, 21, 0, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("first UpdateWindows: %v", err)
+	}
+
+	var oldStart, oldEnds time.Time
+	if err := s.DB().QueryRow(
+		`SELECT started_at, ends_at FROM windows WHERE kind = 'weekly' AND closed = 0`,
+	).Scan(&oldStart, &oldEnds); err != nil {
+		t.Fatalf("query initial weekly window: %v", err)
+	}
+	wantOldEnds := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC) // calendar default
+	if !oldEnds.Equal(wantOldEnds) {
+		t.Fatalf("calendar-default ends_at: got %v, want %v", oldEnds, wantOldEnds)
+	}
+
+	// Userscript v0.3 starts reporting the real reset time (Friday 04:00 UTC,
+	// = Thursday 11pm Eastern). The currently-active window should be
+	// re-anchored, not left stuck on the calendar fallback.
+	authoritativeEnds := time.Date(2026, 5, 1, 4, 0, 0, 0, time.UTC)
+	weekly := 24.0
+	if _, err := s.InsertQuotaSnapshot(
+		now, now, "userscript",
+		nil, nil,
+		&weekly, &authoritativeEnds,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("second UpdateWindows: %v", err)
+	}
+
+	var newStart, newEnds time.Time
+	if err := s.DB().QueryRow(
+		`SELECT started_at, ends_at FROM windows WHERE kind = 'weekly' AND closed = 0`,
+	).Scan(&newStart, &newEnds); err != nil {
+		t.Fatalf("query re-anchored weekly window: %v", err)
+	}
+	if !newEnds.Equal(authoritativeEnds) {
+		t.Errorf("re-anchored ends_at: got %v, want %v", newEnds, authoritativeEnds)
+	}
+	wantNewStart := authoritativeEnds.Add(-7 * 24 * time.Hour)
+	if !newStart.Equal(wantNewStart) {
+		t.Errorf("re-anchored started_at: got %v, want %v", newStart, wantNewStart)
+	}
+
+	// Should not have created a second window; we updated in place.
+	var count int
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM windows WHERE kind = 'weekly'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("count windows: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 weekly window after re-anchor, got %d", count)
+	}
+}
+
 func TestBaselineFromSnapshot(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()

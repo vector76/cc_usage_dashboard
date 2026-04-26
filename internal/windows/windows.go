@@ -145,9 +145,17 @@ func (e *Engine) ensureSessionWindow() error {
 	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselineTotal, &window.BaselineSource)
 
 	if err == nil {
-		// Window exists, check if it's still valid
+		// Window exists. If it's still active, optionally re-anchor it on
+		// the snapshot's authoritative end. ensureSessionWindow used to
+		// only consult snapshots at creation time, which left active
+		// windows stuck on whatever boundary they were born with even
+		// after the userscript started reporting Anthropic's actual
+		// reset. We re-anchor when the snapshot end differs by more than
+		// the rounding tolerance below.
 		if window.EndsAt.After(now) {
-			// Current window is still active
+			if err := e.reanchorIfStale(window.ID, window.EndsAt, "session", 5*time.Hour); err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -211,8 +219,14 @@ func (e *Engine) ensureWeeklyWindow() error {
 	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselineTotal, &window.BaselineSource)
 
 	if err == nil {
-		// Window exists, check if it's still valid
+		// Window exists. Re-anchor on snapshot boundary if needed (see
+		// comment in ensureSessionWindow); same reason — old weekly
+		// windows born under the calendar fallback can be stuck on the
+		// wrong boundary for up to a week.
 		if window.EndsAt.After(now) {
+			if err := e.reanchorIfStale(window.ID, window.EndsAt, "weekly", 7*24*time.Hour); err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -323,6 +337,52 @@ func (e *Engine) findBaseline(kind string, t time.Time) (*float64, string, error
 	}
 
 	return &baselineTotal.Float64, "snapshot", nil
+}
+
+// reanchorIfStale updates an active window's started_at/ends_at to match the
+// most recent snapshot's window_ends, when that boundary differs from the
+// current ends_at by more than the rounding tolerance.
+//
+// Why: snapshot-supplied boundaries ("Resets in 4 hr 55 min") have minute
+// resolution; the same instant rendered into the page can drift ±1 min as
+// the user lingers. We tolerate up to 2 min of drift to avoid thrashing
+// while still re-anchoring windows born under a calendar-default fallback
+// that's hours or days off the truth.
+func (e *Engine) reanchorIfStale(windowID int64, currentEndsAt time.Time, kind string, duration time.Duration) error {
+	const tolerance = 2 * time.Minute
+
+	var snapshotEnds time.Time
+	var err error
+	switch kind {
+	case "session":
+		snapshotEnds, err = e.findSessionBoundary()
+	case "weekly":
+		snapshotEnds, err = e.findWeeklyBoundary()
+	default:
+		return nil
+	}
+	if err != nil || snapshotEnds.IsZero() {
+		return nil
+	}
+
+	delta := snapshotEnds.Sub(currentEndsAt)
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta < tolerance {
+		return nil
+	}
+
+	newStart := snapshotEnds.Add(-duration)
+	if _, err := e.db.Exec(
+		`UPDATE windows SET started_at = ?, ends_at = ? WHERE id = ?`,
+		store.FormatTime(newStart), store.FormatTime(snapshotEnds), windowID,
+	); err != nil {
+		return fmt.Errorf("failed to re-anchor window %d: %w", windowID, err)
+	}
+	slog.Info("re-anchored window to snapshot boundary",
+		"id", windowID, "kind", kind, "old_ends", currentEndsAt, "new_ends", snapshotEnds)
+	return nil
 }
 
 // findSessionBoundary extracts the session reset time from the most recent
