@@ -19,18 +19,39 @@ path is exactly `/settings/usage`. On that path:
 
 1. Wait for at least one `[role="progressbar"][aria-label="Usage"]` node to render
    (MutationObserver, with a sane timeout).
-2. For each progressbar, walk up to the row container and identify the row by its
-   first `<p>` label. Only two labels are kept; everything else is ignored:
-   - **Current session** → `session_used` (% of the rolling 5-hour window).
-   - **All models** → `weekly_used` (% of the weekly limit).
-   "Sonnet only", "Claude Design", "Daily included routine runs", and the extra-usage
-   bars are explicitly skipped — they are not part of the headline plan-limit signal.
-3. Read each bar's `aria-valuenow` (a 0–100 number) directly. We do not text-scrape
-   the "X% used" label, since the DOM exposes the value in a structured attribute.
-4. POST to `http://localhost:27812/snapshot` with a JSON body.
-5. Re-fire on a debounced interval (every 60s) while the tab is open. The dedup hash
-   is based only on the two percentages, so re-posts from the same state are silently
-   dropped.
+2. **Anchor on `<h2>` section headings, not row labels.** For each progressbar, find
+   the most recent preceding `<h2>` in document order. Only two sections are kept:
+   - `Plan usage limits` → first bar in this section is "Current session"
+     (% of the rolling 5-hour window).
+   - `Weekly limits` → first bar in this section is the aggregate "All models"
+     (% of the weekly limit).
+   Sub-rows under "Weekly limits" (Sonnet only, Claude Design, future additions),
+   the "Additional features" section (routines), and the extra-usage section are
+   all ignored. Anchoring on section titles is more durable than matching row
+   labels — Anthropic edits row text often, section headings rarely.
+3. Read `aria-valuenow` (0–100) directly. We do not text-scrape the "X% used" label.
+4. Parse the row's reset hint into a UTC ISO timestamp:
+   - "Resets in 3 hr 33 min" / "Resets in 19 min" → `now + Δ`.
+   - "Resets Thu 11:00 PM" → next future occurrence of that weekday at that
+     local time, converted to UTC.
+   These land in `session_window_ends` / `weekly_window_ends` so the server can
+   anchor the windows on Anthropic's actual reset boundary instead of a calendar
+   guess.
+5. POST to `http://localhost:27812/snapshot`.
+
+**Trigger sources, in priority order:**
+
+- **Persistent MutationObserver** on `document.body`, filtered to `aria-valuenow`
+  attribute changes. Fires within milliseconds of claude.ai's own poll updating
+  the DOM, even on backgrounded tabs.
+- **5-min `setInterval` backstop.** Catches the cases where the observer is torn
+  down by an SPA re-render, or the tab is throttled below the observer's
+  delivery cadence.
+- **Initial sample on script start.**
+
+**No client-side dedup.** Identical-value observations are kept; the server stores
+every row so plateau duration is preserved. Read-time rollups (collapsing runs of
+identical values) are a query-side concern.
 
 ## Why `GM.xmlHttpRequest`, not `fetch()`
 
@@ -71,15 +92,18 @@ Content-Type: application/json
   "observed_at": "2026-04-25T17:32:14Z",
   "source": "userscript",
   "session_used": 6.0,
-  "weekly_used": 23.0
+  "session_window_ends": "2026-04-25T19:02:11Z",
+  "weekly_used": 23.0,
+  "weekly_window_ends": "2026-04-30T06:00:00Z"
 }
 ```
 
 `session_used` and `weekly_used` are 0–100 percentages, both nullable: when only one
 row is parseable the other field is omitted and the trayapp records what was found.
-`*_window_ends` fields are accepted by the server schema and reserved for future use
-(the userscript does not currently parse the "Resets in 3 hr 33 min" / "Resets Thu
-11:00 PM" hints).
+`*_window_ends` are RFC3339 timestamps derived from each row's "Resets …" hint;
+they're omitted when the hint is in a format the parser doesn't recognize (e.g.
+"Resets May 1" when the boundary is far enough out that Anthropic switches to a
+date), in which case the server falls back to its calendar default.
 
 ## CORS
 

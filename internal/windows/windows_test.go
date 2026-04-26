@@ -144,8 +144,10 @@ func TestWeeklyWindowDefaultBoundary(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()
 
-	// Wednesday April 22 2026 12:00 UTC. Default Sunday boundary is the
-	// midnight of the upcoming Monday minus 24h: Sunday April 26 00:00 UTC.
+	// Wednesday April 22 2026 12:00 UTC. Default boundary is the midnight
+	// at the start of the upcoming Monday: Monday April 27 00:00 UTC. The
+	// older formulation subtracted 24h, which put ends_at in the past on a
+	// Sunday and caused the freshly-created window to be born expired.
 	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
 	engine.SetNow(func() time.Time { return now })
 
@@ -159,9 +161,61 @@ func TestWeeklyWindowDefaultBoundary(t *testing.T) {
 		t.Fatalf("query failed: %v", err)
 	}
 
-	wantEnds := time.Date(2026, 4, 26, 0, 0, 0, 0, time.UTC)
+	wantEnds := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC)
 	if !endsAt.Equal(wantEnds) {
 		t.Errorf("default weekly ends_at: got %v, want %v", endsAt, wantEnds)
+	}
+
+	// Regression guard: the window must be in the future relative to `now`.
+	// Without this, a fresh weekly window could be created already-expired,
+	// excluding a contemporaneous snapshot from the in-window baseline pass.
+	if !endsAt.After(now) {
+		t.Errorf("default weekly ends_at must be after now; got %v vs now %v", endsAt, now)
+	}
+}
+
+// TestWeeklyWindowOnSundayDoesNotExpireImmediately is a regression test for
+// the bug where, on a Sunday, the default fallback (Sunday 00:00 UTC of the
+// current week) put ends_at in the past, so a snapshot recorded later that
+// same Sunday fell outside the synthesized window and never seeded the
+// weekly baseline.
+func TestWeeklyWindowOnSundayDoesNotExpireImmediately(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	// Sunday April 26 2026 20:12 UTC — the failure mode was reported here.
+	now := time.Date(2026, 4, 26, 20, 12, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	weekly := 24.0
+	if _, err := s.InsertQuotaSnapshot(
+		now, now, "userscript",
+		nil, nil,
+		&weekly, nil,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows: %v", err)
+	}
+
+	var startedAt, endsAt time.Time
+	var baseline sql.NullFloat64
+	row := s.DB().QueryRow(`SELECT started_at, ends_at, baseline_total FROM windows WHERE kind = 'weekly' AND closed = 0`)
+	if err := row.Scan(&startedAt, &endsAt, &baseline); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+
+	if !endsAt.After(now) {
+		t.Fatalf("weekly ends_at=%v is not after now=%v; window is born expired", endsAt, now)
+	}
+	if !startedAt.Before(now) || !endsAt.After(now) {
+		t.Errorf("snapshot must fall inside the weekly window; got [%v, %v) for now=%v", startedAt, endsAt, now)
+	}
+	if !baseline.Valid || baseline.Float64 != weekly {
+		t.Errorf("expected weekly baseline_total=%v, got %v", weekly, baseline)
 	}
 }
 

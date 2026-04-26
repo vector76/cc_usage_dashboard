@@ -170,8 +170,8 @@ func (e *Engine) ensureSessionWindow() error {
 
 	endsAt := startTime.Add(5 * time.Hour)
 
-	// Get baseline from most recent snapshot at or before window start
-	baseline, baselineSource, err := e.findBaseline(startTime)
+	// Get baseline from most recent session snapshot at or before window start
+	baseline, baselineSource, err := e.findBaseline("session", startTime)
 	if err != nil {
 		slog.Error("failed to find baseline", "err", err)
 		baseline = nil
@@ -223,14 +223,16 @@ func (e *Engine) ensureWeeklyWindow() error {
 	// Try to get window boundary from the most recent snapshot
 	endsAt, err := e.findWeeklyBoundary()
 	if err != nil || endsAt.IsZero() {
-		// Default: Sunday midnight UTC of next week
-		endsAt = e.nextMondayMidnight(now).Add(-24 * time.Hour)
+		// Default: midnight UTC at the start of the upcoming Monday
+		// (i.e. end-of-Sunday boundary). Must be in the future relative
+		// to `now` or the window is born already-expired.
+		endsAt = e.nextMondayMidnight(now)
 	}
 
 	startTime := endsAt.Add(-7 * 24 * time.Hour)
 
-	// Get baseline from most recent snapshot at or before window start
-	baseline, baselineSource, err := e.findBaseline(startTime)
+	// Get baseline from most recent weekly snapshot at or before window start
+	baseline, baselineSource, err := e.findBaseline("weekly", startTime)
 	if err != nil {
 		slog.Error("failed to find baseline", "err", err)
 		baseline = nil
@@ -279,17 +281,30 @@ func (e *Engine) findFirstEventAfterGap(windowKind string) (time.Time, error) {
 	return firstEvent, nil
 }
 
-// findBaseline finds the baseline (latest known % used) at or before t.
-// Used to seed a new window's baseline_total when no in-window snapshot exists yet.
-func (e *Engine) findBaseline(t time.Time) (*float64, string, error) {
+// findBaseline finds the baseline (latest known % used) for the given window
+// kind at or before t. Used to seed a new window's baseline_total when no
+// in-window snapshot exists yet. Subsequent in-window snapshots refine the
+// value via correctBaselineFromSnapshots.
+func (e *Engine) findBaseline(kind string, t time.Time) (*float64, string, error) {
+	var usedCol string
+	switch kind {
+	case "session":
+		usedCol = "session_used"
+	case "weekly":
+		usedCol = "weekly_used"
+	default:
+		return nil, "no_snapshot", nil
+	}
+
 	var baselineTotal sql.NullFloat64
-	err := e.db.QueryRow(`
-		SELECT session_used
+	query := fmt.Sprintf(`
+		SELECT %s
 		FROM quota_snapshots
-		WHERE observed_at <= ? AND session_used IS NOT NULL
+		WHERE observed_at <= ? AND %s IS NOT NULL
 		ORDER BY observed_at DESC
 		LIMIT 1
-	`, store.FormatTime(t)).Scan(&baselineTotal)
+	`, usedCol, usedCol)
+	err := e.db.QueryRow(query, store.FormatTime(t)).Scan(&baselineTotal)
 
 	if err == sql.ErrNoRows {
 		// No snapshot found, use default
