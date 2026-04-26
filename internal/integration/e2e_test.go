@@ -175,7 +175,9 @@ func TestE2E_CLIModeA_DiscountAndSlack(t *testing.T) {
 }
 
 // Scenario 2: posting the same (session_id, message_id) twice keeps exactly
-// one row; the second insert is rejected by the UNIQUE index.
+// one row. The duplicate is the steady state for the Stop hook (which re-
+// walks the entire transcript every fire), so the second post is treated
+// as a successful no-op (200 + duplicate:true), not a 500 error.
 func TestE2E_DuplicateDetection(t *testing.T) {
 	env := newTestEnv(t, "")
 
@@ -185,14 +187,28 @@ func TestE2E_DuplicateDetection(t *testing.T) {
 		"source": "cli",
 	}
 
-	if w := env.do(t, "POST", "/log", payload); w.Code != http.StatusOK {
-		t.Fatalf("first POST /log: status=%d body=%s", w.Code, w.Body.String())
+	w1 := env.do(t, "POST", "/log", payload)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first POST /log: status=%d body=%s", w1.Code, w1.Body.String())
+	}
+	var first map[string]any
+	if err := json.Unmarshal(w1.Body.Bytes(), &first); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if _, ok := first["id"]; !ok {
+		t.Errorf("first POST: expected id in response, got %v", first)
 	}
 
-	w := env.do(t, "POST", "/log", payload)
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("second POST /log: expected 500 from UNIQUE constraint, got %d (%s)",
-			w.Code, w.Body.String())
+	w2 := env.do(t, "POST", "/log", payload)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second POST /log: status=%d body=%s", w2.Code, w2.Body.String())
+	}
+	var second map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &second); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if dup, _ := second["duplicate"].(bool); !dup {
+		t.Errorf("second POST: expected duplicate:true, got %v", second)
 	}
 
 	var count int

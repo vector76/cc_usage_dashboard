@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -239,6 +240,21 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
+		// UNIQUE-constraint violations are the expected steady state when
+		// the Stop hook re-walks the transcript: every assistant turn
+		// already in the DB will collide on (session_id, message_id).
+		// This is the idempotency mechanism — log it at debug, return
+		// 200 with a duplicate flag, and don't bump the ingested metric.
+		if isUniqueConstraintViolation(err) {
+			slog.Debug("usage event already present (idempotent re-post)",
+				"session_id", req.SessionID, "message_id", req.MessageID)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"duplicate": true,
+			})
+			return
+		}
 		slog.Error("failed to insert usage event", "err", err)
 		http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
 		w.Header().Set("Content-Type", "application/json")
@@ -255,6 +271,17 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"id": id,
 	})
+}
+
+// isUniqueConstraintViolation matches the modernc.org/sqlite error message
+// for SQLITE_CONSTRAINT_UNIQUE (extended code 2067). The driver doesn't
+// expose a sentinel error, so we string-match — narrow enough to catch
+// only this case and not other constraint failures.
+func isUniqueConstraintViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // ParseErrorRequest represents the POST /parse_error request payload.

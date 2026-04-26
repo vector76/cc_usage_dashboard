@@ -153,13 +153,23 @@ func TestHandleLogDuplicate(t *testing.T) {
 		t.Errorf("first POST failed with status %d", w.Code)
 	}
 
-	// Second POST with same (session_id, message_id) should fail with UNIQUE constraint
+	// Second POST with same (session_id, message_id) is the steady-state
+	// case for the Stop hook re-walking the transcript: returns 200 with
+	// {duplicate: true} rather than 500. The DB still ends up with one
+	// row.
 	req = httptest.NewRequest("POST", "/log", bytes.NewReader(body))
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("expected second POST to fail with 500, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected duplicate POST to return 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if dup, _ := resp["duplicate"].(bool); !dup {
+		t.Errorf("expected duplicate:true in response, got %v", resp)
 	}
 }
 
