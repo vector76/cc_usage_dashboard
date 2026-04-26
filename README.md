@@ -46,13 +46,8 @@ for binding details and `docs/data-sources.md` for the ingest tiers.
 
 ## Getting started — Windows
 
-The trayapp uses CGO for the system-tray integration, so you need a C toolchain on
-`PATH` before building. Either of these works:
-
-- [TDM-GCC](https://jmeubank.github.io/tdm-gcc/)
-- [MSYS2](https://www.msys2.org/) with the `mingw-w64-x86_64-gcc` package
-
-You also need [Go 1.26.2 or newer](https://go.dev/dl/).
+The build is pure Go (no CGO, no C toolchain) — all you need is
+[Go 1.26.2 or newer](https://go.dev/dl/).
 
 ### Option A — install with `go install`
 
@@ -73,11 +68,19 @@ Useful if you want to read or modify the code. No `make` required.
 ```powershell
 git clone https://github.com/vector76/cc_usage_dashboard.git
 cd cc_usage_dashboard
+
+# Debug build (larger, keeps symbols; useful while developing)
 go build -ldflags="-H=windowsgui" -o trayapp.exe .\cmd\trayapp
+
+# Release build (~30% smaller; strips symbol table and DWARF info)
+go build -ldflags="-s -w -H=windowsgui" -trimpath -o trayapp.exe .\cmd\trayapp
+
 .\trayapp.exe
 ```
 
-The `-H=windowsgui` flag suppresses the console window so the app runs purely in the tray.
+`-H=windowsgui` suppresses the console window so the app runs purely in the
+tray. `-s -w -trimpath` shave the symbol table, DWARF debug info, and
+filesystem paths out of the binary.
 
 ### Autostart on logon
 
@@ -124,12 +127,15 @@ cli log --input-tokens 1234 --output-tokens 567 --cost-usd 0.0123
 The `Makefile` is the convenience entry point on Linux:
 
 ```bash
-make build-trayapp   # headless server-mode binary
-make build-cli       # container CLI
+make build-trayapp   # headless server-mode binary (debug)
+make build-cli       # container CLI (debug)
+make release         # size-optimized Linux + cross-compiled Windows builds
 make test            # full Go test suite
 ```
 
-The trayapp's tray UI is Windows-only; on Linux it builds as a headless server.
+The trayapp's tray UI is Windows-only; on Linux it builds as a headless
+server. Cross-compiling the Windows .exe from Linux is now toolchain-free
+(no mingw needed) thanks to the pure-Go SQLite driver.
 
 ## Userscript installation
 

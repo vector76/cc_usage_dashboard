@@ -218,13 +218,13 @@ func TestPruneParseErrors(t *testing.T) {
 	// Insert an old error
 	store.db.Exec(
 		"INSERT INTO parse_errors (occurred_at, source, reason, payload) VALUES (?, ?, ?, ?)",
-		now.Add(-40*24*time.Hour), "tailer", "old error", "payload",
+		FormatTime(now.Add(-40*24*time.Hour)), "tailer", "old error", "payload",
 	)
 
 	// Insert a recent error
 	store.db.Exec(
 		"INSERT INTO parse_errors (occurred_at, source, reason, payload) VALUES (?, ?, ?, ?)",
-		now.Add(-10*24*time.Hour), "tailer", "recent error", "payload",
+		FormatTime(now.Add(-10*24*time.Hour)), "tailer", "recent error", "payload",
 	)
 
 	// Prune errors older than 30 days
@@ -256,7 +256,7 @@ func TestPruneSlackSamples(t *testing.T) {
 	// Create a window to reference
 	result, err := store.db.Exec(`
 		INSERT INTO windows (kind, started_at, ends_at) VALUES (?, ?, ?)
-	`, "five_hour", now, now.Add(5*time.Hour))
+	`, "five_hour", FormatTime(now), FormatTime(now.Add(5*time.Hour)))
 	if err != nil {
 		t.Fatalf("failed to create window: %v", err)
 	}
@@ -265,12 +265,12 @@ func TestPruneSlackSamples(t *testing.T) {
 	// Insert an old sample
 	store.db.Exec(`
 		INSERT INTO slack_samples (sampled_at, slack_fraction, window_id) VALUES (?, ?, ?)
-	`, now.Add(-100*24*time.Hour), 0.5, windowID)
+	`, FormatTime(now.Add(-100*24*time.Hour)), 0.5, windowID)
 
 	// Insert a recent sample
 	store.db.Exec(`
 		INSERT INTO slack_samples (sampled_at, slack_fraction, window_id) VALUES (?, ?, ?)
-	`, now.Add(-10*24*time.Hour), 0.3, windowID)
+	`, FormatTime(now.Add(-10*24*time.Hour)), 0.3, windowID)
 
 	// Prune samples older than 90 days
 	err = store.PruneSlackSamples(90 * 24 * time.Hour)
@@ -294,7 +294,7 @@ func TestPruneSlackSamples(t *testing.T) {
 
 // Helper functions
 func createTestStore(t *testing.T) *Store {
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("failed to open memory DB: %v", err)
 	}

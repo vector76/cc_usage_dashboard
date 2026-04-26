@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 // Result holds the discount calculation result, conforming to
@@ -86,7 +88,7 @@ func (c *Calculator) Calculate(periodStr string) (*Result, error) {
 			COALESCE(SUM(cost_usd_equivalent), 0)
 		FROM usage_events
 		WHERE occurred_at >= ? AND occurred_at < ?
-	`, startTime, endTime).Scan(
+	`, store.FormatTime(startTime), store.FormatTime(endTime)).Scan(
 		&result.EventsTotal,
 		&result.EventsWithReportedCost,
 		&result.EventsWithComputedCost,

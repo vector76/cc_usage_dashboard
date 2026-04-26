@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 // Window represents a 5-hour or weekly quota window.
@@ -106,7 +108,7 @@ func (e *Engine) correctBaselineFromSnapshots() error {
 			ORDER BY observed_at DESC
 			LIMIT 1
 		`, totalCol, totalCol)
-		err := e.db.QueryRow(query, w.startedAt, w.endsAt).Scan(&snapshotID, &baseline)
+		err := e.db.QueryRow(query, store.FormatTime(w.startedAt), store.FormatTime(w.endsAt)).Scan(&snapshotID, &baseline)
 
 		if err == sql.ErrNoRows {
 			continue
@@ -180,7 +182,7 @@ func (e *Engine) ensureFiveHourWindow() error {
 	_, err = e.db.Exec(`
 		INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
 		VALUES (?, ?, ?, ?, ?, 0)
-	`, "five_hour", startTime, endsAt, baseline, baselineSource)
+	`, "five_hour", store.FormatTime(startTime), store.FormatTime(endsAt), baseline, baselineSource)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert window: %w", err)
@@ -239,7 +241,7 @@ func (e *Engine) ensureWeeklyWindow() error {
 	_, err = e.db.Exec(`
 		INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
 		VALUES (?, ?, ?, ?, ?, 0)
-	`, "weekly", startTime, endsAt, baseline, baselineSource)
+	`, "weekly", store.FormatTime(startTime), store.FormatTime(endsAt), baseline, baselineSource)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert window: %w", err)
@@ -268,7 +270,7 @@ func (e *Engine) findFirstEventAfterGap(windowKind string) (time.Time, error) {
 	err = e.db.QueryRow(`
 		SELECT MIN(occurred_at) FROM usage_events
 		WHERE occurred_at > ?
-	`, lastEnds).Scan(&firstEvent)
+	`, store.FormatTime(lastEnds)).Scan(&firstEvent)
 
 	if err != nil || firstEvent.IsZero() {
 		return time.Time{}, nil
@@ -286,7 +288,7 @@ func (e *Engine) findBaseline(t time.Time) (*float64, string, error) {
 		WHERE observed_at <= ?
 		ORDER BY observed_at DESC
 		LIMIT 1
-	`, t).Scan(&baselineTotal)
+	`, store.FormatTime(t)).Scan(&baselineTotal)
 
 	if err == sql.ErrNoRows {
 		// No snapshot found, use default

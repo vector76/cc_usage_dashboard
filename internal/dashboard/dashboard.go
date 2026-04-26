@@ -204,7 +204,7 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string, now time.Time) (*Win
 		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
 		FROM usage_events
 		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
-	`, startedAt, endsAt).Scan(&consumed)
+	`, store.FormatTime(startedAt), store.FormatTime(endsAt)).Scan(&consumed)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +253,7 @@ func (h *Handler) parseErrors24h(db *sql.DB, now time.Time) (int64, error) {
 	var count int64
 	err := db.QueryRow(`
 		SELECT COUNT(*) FROM parse_errors WHERE occurred_at >= ?
-	`, cutoff).Scan(&count)
+	`, store.FormatTime(cutoff)).Scan(&count)
 	if err != nil {
 		return 0, err
 	}
@@ -270,7 +270,7 @@ func (h *Handler) consumptionSeries(db *sql.DB, now time.Time) ([]SeriesBucket, 
 		WHERE occurred_at >= ? AND cost_usd_equivalent IS NOT NULL
 		GROUP BY bucket_unix
 		ORDER BY bucket_unix
-	`, cutoff)
+	`, store.FormatTime(cutoff))
 	if err != nil {
 		return nil, err
 	}

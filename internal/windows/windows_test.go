@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/vector76/cc_usage_dashboard/internal/store"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 func createTestEngine(t *testing.T) (*Engine, *store.Store) {

@@ -5,13 +5,13 @@ import (
 	"os"
 	"testing"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 // TempDB creates a temporary in-memory SQLite database for testing.
 // It returns a *sql.DB and a cleanup function.
 func TempDB(t *testing.T) (*sql.DB, func()) {
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("failed to open temp DB: %v", err)
 	}

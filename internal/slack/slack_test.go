@@ -30,7 +30,7 @@ func insertWindow(t *testing.T, db *sql.DB, kind string, startedAt, endsAt time.
 	res, err := db.Exec(
 		`INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
 		 VALUES (?, ?, ?, ?, ?, 0)`,
-		kind, startedAt, endsAt, baselineTotal, baselineSource,
+		kind, store.FormatTime(startedAt), store.FormatTime(endsAt), baselineTotal, baselineSource,
 	)
 	if err != nil {
 		t.Fatalf("insert window: %v", err)

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 func TestMetricsLogIncrementsEventsIngested(t *testing.T) {
@@ -155,7 +157,7 @@ func TestMetricsSlackReleaseIncrements(t *testing.T) {
 	now := time.Now().UTC()
 	_, err := testStore.DB().Exec(
 		`INSERT INTO windows (kind, started_at, ends_at) VALUES (?, ?, ?)`,
-		"five_hour", now.Add(-time.Hour), now.Add(time.Hour),
+		"five_hour", store.FormatTime(now.Add(-time.Hour)), store.FormatTime(now.Add(time.Hour)),
 	)
 	if err != nil {
 		t.Fatalf("failed to seed window: %v", err)

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 // SlackResponse is the response from GET /slack endpoint. JSON keys match
@@ -191,7 +193,7 @@ func (c *Calculator) computeMetrics(w *activeWindow, now time.Time) (*WindowMetr
 		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
 		FROM usage_events
 		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
-	`, w.startedAt, w.endsAt).Scan(&consumed)
+	`, store.FormatTime(w.startedAt), store.FormatTime(w.endsAt)).Scan(&consumed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute consumption: %w", err)
 	}
@@ -313,7 +315,7 @@ func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
 		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
 		FROM usage_events
 		WHERE occurred_at > ? AND cost_usd_equivalent IS NOT NULL
-	`, receivedAt).Scan(&consumedSince)
+	`, store.FormatTime(receivedAt)).Scan(&consumedSince)
 	if err != nil {
 		return false, fmt.Errorf("failed to compute drift: %w", err)
 	}
@@ -335,7 +337,7 @@ func (c *Calculator) RecordRelease(releasedAt time.Time, jobTag string, estimate
 		WHERE kind = ? AND started_at <= ? AND ends_at > ?
 		ORDER BY started_at DESC
 		LIMIT 1
-	`, windowKind, releasedAt, releasedAt).Scan(&windowID)
+	`, windowKind, store.FormatTime(releasedAt), store.FormatTime(releasedAt)).Scan(&windowID)
 
 	if err == sql.ErrNoRows {
 		return 0, ErrNoActiveWindow
@@ -346,7 +348,7 @@ func (c *Calculator) RecordRelease(releasedAt time.Time, jobTag string, estimate
 	result, err := c.db.Exec(`
 		INSERT INTO slack_releases (released_at, received_at, job_tag, estimated_cost, slack_at_release, window_id)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, releasedAt, time.Now().UTC(), jobTag, estimatedCost, slackAtRelease, windowID)
+	`, store.FormatTime(releasedAt), store.FormatTime(time.Now()), jobTag, estimatedCost, slackAtRelease, windowID)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert release: %w", err)
@@ -375,7 +377,7 @@ func (c *Calculator) RecordSample(fraction *float64) (int64, error) {
 	result, err := c.db.Exec(`
 		INSERT INTO slack_samples (sampled_at, slack_fraction, window_id)
 		VALUES (?, ?, ?)
-	`, time.Now().UTC(), fraction, windowID)
+	`, store.FormatTime(time.Now()), fraction, windowID)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert sample: %w", err)

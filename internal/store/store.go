@@ -6,8 +6,27 @@ import (
 	"fmt"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
+
+// FormatTime renders a time as an RFC3339Nano string in UTC. modernc.org/sqlite
+// serializes time.Time via Go's default String() method
+// ("2006-01-02 15:04:05.x +0000 UTC"), which SQLite's date functions
+// (strftime, julianday, datetime) cannot parse. All call sites that pass a
+// time.Time as a query parameter must funnel through this helper instead so
+// that values land in the table as parseable RFC3339 strings.
+func FormatTime(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// FormatTimePtr is the *time.Time variant: nil maps to a typed nil so the
+// driver writes SQL NULL instead of attempting to format a zero pointer.
+func FormatTimePtr(t *time.Time) interface{} {
+	if t == nil {
+		return nil
+	}
+	return FormatTime(*t)
+}
 
 // Store provides access to the SQLite database.
 type Store struct {
@@ -16,7 +35,7 @@ type Store struct {
 
 // Open opens or creates a SQLite database at the given path and applies migrations.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite3", path)
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -83,7 +102,7 @@ func (s *Store) InsertUsageEvent(
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			cost_usd_equivalent, cost_source, model, raw_json
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, occurredAt, source, sessionID, messageID, projectPath,
+	`, FormatTime(occurredAt), source, sessionID, messageID, projectPath,
 		inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
 		costUSD, costSource, model, rawJSON)
 
@@ -116,9 +135,9 @@ func (s *Store) InsertQuotaSnapshot(
 			weekly_remaining, weekly_total, weekly_window_ends,
 			raw_json
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, observedAt, receivedAt, source,
-		fiveHourRemaining, fiveHourTotal, fiveHourWindowEnds,
-		weeklyRemaining, weeklyTotal, weeklyWindowEnds,
+	`, FormatTime(observedAt), FormatTime(receivedAt), source,
+		fiveHourRemaining, fiveHourTotal, FormatTimePtr(fiveHourWindowEnds),
+		weeklyRemaining, weeklyTotal, FormatTimePtr(weeklyWindowEnds),
 		rawJSON)
 
 	if err != nil {
@@ -141,7 +160,7 @@ func (s *Store) InsertParseError(
 	result, err := s.db.Exec(`
 		INSERT INTO parse_errors (occurred_at, source, reason, payload)
 		VALUES (?, ?, ?, ?)
-	`, occurredAt, source, reason, payload)
+	`, FormatTime(occurredAt), source, reason, payload)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert parse error: %w", err)
@@ -159,7 +178,7 @@ func (s *Store) InsertParseError(
 // keeping only a summary of how many were deleted.
 func (s *Store) PruneParseErrors(olderThan time.Duration) error {
 	cutoff := time.Now().Add(-olderThan)
-	_, err := s.db.Exec("DELETE FROM parse_errors WHERE occurred_at < ?", cutoff)
+	_, err := s.db.Exec("DELETE FROM parse_errors WHERE occurred_at < ?", FormatTime(cutoff))
 	if err != nil {
 		return fmt.Errorf("failed to prune parse errors: %w", err)
 	}
@@ -169,7 +188,7 @@ func (s *Store) PruneParseErrors(olderThan time.Duration) error {
 // PruneSlackSamples removes slack samples older than the given duration.
 func (s *Store) PruneSlackSamples(olderThan time.Duration) error {
 	cutoff := time.Now().Add(-olderThan)
-	_, err := s.db.Exec("DELETE FROM slack_samples WHERE sampled_at < ?", cutoff)
+	_, err := s.db.Exec("DELETE FROM slack_samples WHERE sampled_at < ?", FormatTime(cutoff))
 	if err != nil {
 		return fmt.Errorf("failed to prune slack samples: %w", err)
 	}
@@ -223,7 +242,7 @@ func (s *Store) SetTailerOffset(filePath string, offset int64) error {
 		ON CONFLICT(file_path) DO UPDATE SET
 			byte_offset = excluded.byte_offset,
 			updated_at = excluded.updated_at
-	`, filePath, offset, time.Now())
+	`, filePath, offset, FormatTime(time.Now()))
 
 	if err != nil {
 		return fmt.Errorf("failed to set tailer offset: %w", err)
