@@ -129,8 +129,24 @@ The dashboard is then visible at `http://localhost:PORT` on the host.
 
 ## Status
 
-Pre-implementation. See `docs/roadmap.md` for the build order and `docs/overview.md`
-for full design rationale.
+**Phase 0-6 complete and tested.** Core functionality working:
+
+- ✅ **Phase 0-1**: Skeleton, persistence layer with all v1 tables
+- ✅ **Phase 2**: HTTP server, `/log` handler, cost resolution, CLI Mode A
+- ✅ **Phase 3**: Transcript parser, host tailer with fsnotify, CLI Mode B (hook mode)
+- ✅ **Phase 4**: Snapshots, windows engine, baseline derivation
+- ✅ **Phase 5**: Slack signal (`GET /slack`, `POST /slack/release`), release logging
+- ✅ **Phase 6**: Discount calculation, `/discount` endpoint
+
+**Remaining (Phase 7-8):**
+- Windows-specific tray UI (menu, icon states)
+- Dashboard HTML/JS (JSON endpoints exist)
+- Userscript (transport tested, DOM parsing TBD)
+- E2E integration tests
+- Windows manual verification
+
+See `IMPLEMENTATION_STATUS.md` for detailed component breakdown and `docs/roadmap.md` 
+for the build order rationale.
 
 ## Why no online backend
 
