@@ -10,8 +10,11 @@ import (
 	"image/png"
 	"log/slog"
 	"os/exec"
+	"runtime"
+	"runtime/debug"
 
 	"fyne.io/systray"
+	"golang.org/x/sys/windows"
 
 	"github.com/vector76/cc_usage_dashboard/internal/icon"
 	"github.com/vector76/cc_usage_dashboard/internal/server"
@@ -33,9 +36,6 @@ func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle
 		systray.SetTooltip("Claude Usage Dashboard")
 
 		mOpen := systray.AddMenuItem("Open dashboard", "Open the dashboard in the default browser")
-		// Status is a placeholder submenu host; populate dynamically once
-		// the snapshot loop is wired in a later bead.
-		systray.AddMenuItem("Status", "Current burn and slack")
 		mPause := systray.AddMenuItemCheckbox("Pause slack signal", "Suppress release recommendations", false)
 		systray.AddSeparator()
 		mAbout := systray.AddMenuItem("About", "Version and build info")
@@ -62,8 +62,10 @@ func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle
 					}
 					slog.Info("tray: pause toggled", "checked", mPause.Checked())
 				case <-mAbout.ClickedCh:
-					// TODO: surface a real about dialog; for now log version.
-					slog.Info("tray: about", "version", Version)
+					// Run the modal MessageBox in a fresh goroutine so the
+					// menu dispatcher is free to handle other clicks while
+					// the dialog is open.
+					go showAboutDialog()
 				case <-mQuit.ClickedCh:
 					slog.Info("tray: quit clicked")
 					systray.Quit()
@@ -85,6 +87,52 @@ func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle
 // a console window even with -H=windowsgui).
 func openURL(url string) error {
 	return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+}
+
+// showAboutDialog pops a modal Windows MessageBox with version + build info.
+// VCS revision comes from debug.ReadBuildInfo, which Go populates automatically
+// when building inside a git checkout — no -ldflags injection required.
+func showAboutDialog() {
+	body := fmt.Sprintf(
+		"Claude Usage Dashboard\nVersion: %s\nCommit:  %s\n\n%s",
+		Version, buildRevision(), runtime.Version(),
+	)
+	caption := "About Claude Usage Dashboard"
+
+	bodyPtr, err := windows.UTF16PtrFromString(body)
+	if err != nil {
+		slog.Warn("about: encode body failed", "err", err)
+		return
+	}
+	captionPtr, err := windows.UTF16PtrFromString(caption)
+	if err != nil {
+		slog.Warn("about: encode caption failed", "err", err)
+		return
+	}
+	// MB_OK | MB_ICONINFORMATION | MB_TOPMOST so the dialog isn't lost behind
+	// other windows when launched from the tray.
+	const flags = 0x00000000 | 0x00000040 | 0x00040000
+	if _, err := windows.MessageBox(0, bodyPtr, captionPtr, flags); err != nil {
+		slog.Warn("about: MessageBox failed", "err", err)
+	}
+}
+
+// buildRevision returns the git commit hash baked in by `go build`, or
+// "(unknown)" when build info is unavailable (e.g. tests, GOFLAGS overrides).
+func buildRevision() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "(unknown)"
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" {
+			if len(s.Value) >= 12 {
+				return s.Value[:12]
+			}
+			return s.Value
+		}
+	}
+	return "(unknown)"
 }
 
 // buildTrayIcon wraps the embedded PNG in a single-image Windows ICO
