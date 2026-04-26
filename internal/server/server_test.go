@@ -39,14 +39,44 @@ func TestHandleHealthz(t *testing.T) {
 		t.Errorf("expected status 200, got %d", w.Code)
 	}
 
-	var result map[string]string
+	var result map[string]interface{}
 	err := json.NewDecoder(w.Body).Decode(&result)
 	if err != nil {
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	if result["status"] != "healthy" {
-		t.Errorf("expected status 'healthy', got %s", result["status"])
+	if status, _ := result["status"].(string); status != "healthy" {
+		t.Errorf("expected status 'healthy', got %v", result["status"])
+	}
+	if _, ok := result["tailer_caught_up"]; !ok {
+		t.Error("response missing 'tailer_caught_up' field")
+	}
+}
+
+type fakeTailer struct{ caughtUp bool }
+
+func (f fakeTailer) CaughtUp() bool { return f.caughtUp }
+
+func TestHandleHealthzReportsTailerStatus(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	srv.SetTailer(fakeTailer{caughtUp: true})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	caught, ok := result["tailer_caught_up"].(bool)
+	if !ok || !caught {
+		t.Errorf("expected tailer_caught_up=true, got %v", result["tailer_caught_up"])
 	}
 }
 

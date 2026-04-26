@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/anthropics/usage-dashboard/internal/store"
@@ -21,6 +22,7 @@ type Tailer struct {
 	offsetMu    sync.Mutex
 	stopChan    chan struct{}
 	doneChan    chan struct{}
+	caughtUp    atomic.Bool
 }
 
 // NewTailer creates a new tailer for the given projects directory.
@@ -85,6 +87,7 @@ func (t *Tailer) run() {
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
 				t.handleFileChange(event.Name)
+				t.refreshCaughtUp()
 			}
 		case <-ticker.C:
 			t.pollOnce()
@@ -122,6 +125,39 @@ func (t *Tailer) pollOnce() {
 		t.handleFileChange(path)
 		return nil
 	})
+	t.refreshCaughtUp()
+}
+
+// CaughtUp reports whether the most recent poll cycle finished with no
+// pending bytes for any tracked file. Returns true before any tracked files
+// exist (no work pending implies caught up).
+func (t *Tailer) CaughtUp() bool {
+	return t.caughtUp.Load()
+}
+
+// refreshCaughtUp recomputes the caught-up flag by comparing each tracked
+// file's persisted offset against its current size.
+func (t *Tailer) refreshCaughtUp() {
+	t.offsetMu.Lock()
+	snapshot := make(map[string]int64, len(t.offsets))
+	for f, o := range t.offsets {
+		snapshot[f] = o
+	}
+	t.offsetMu.Unlock()
+
+	for f, off := range snapshot {
+		info, err := os.Stat(f)
+		if err != nil {
+			// Treat unreadable tracked files as caught-up (we can't make
+			// progress) so a single missing file doesn't pin the flag false.
+			continue
+		}
+		if info.Size() > off {
+			t.caughtUp.Store(false)
+			return
+		}
+	}
+	t.caughtUp.Store(true)
 }
 
 // handleFileChange processes a changed transcript file.

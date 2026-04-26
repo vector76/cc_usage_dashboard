@@ -8,10 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/anthropics/usage-dashboard/internal/config"
+	"github.com/anthropics/usage-dashboard/internal/ingest"
 	"github.com/anthropics/usage-dashboard/internal/netbind"
 	"github.com/anthropics/usage-dashboard/internal/server"
 	"github.com/anthropics/usage-dashboard/internal/store"
@@ -19,24 +22,28 @@ import (
 
 const Version = "0.0.1"
 
+const (
+	logRotateMaxSize    int64 = 10 * 1024 * 1024
+	logRotateMaxBackups       = 5
+	retentionInterval         = 5 * time.Minute
+	windowsTickInterval       = 30 * time.Second
+)
+
 func main() {
 	configPath := flag.String("config", "", "path to config file")
 	flag.String("version", Version, "show version")
 	flag.Parse()
 
-	// Resolve config path if not provided
 	if *configPath == "" {
 		*configPath = config.ResolveConfigPath()
 	}
 
-	// Load configuration
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Use resolved paths if not set in config
 	if cfg.Database.Path == "" {
 		cfg.Database.Path = config.ResolveDBPath()
 	}
@@ -44,14 +51,19 @@ func main() {
 		cfg.Claude.ProjectsDir = config.ResolveProjectsDir()
 	}
 
-	// Ensure database directory exists
 	dbDir := filepath.Dir(cfg.Database.Path)
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create database directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Open database
+	// Configure logging destination before opening the DB so startup errors
+	// land in the rotated log when one is configured.
+	logCloser := setupLogging(cfg.Logging.File, cfg.Logging.Level)
+	if logCloser != nil {
+		defer logCloser.Close()
+	}
+
 	db, err := store.Open(cfg.Database.Path)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
@@ -61,8 +73,26 @@ func main() {
 
 	slog.Info("Claude Usage Dashboard starting", "version", Version, "db", cfg.Database.Path)
 
-	// Create HTTP server
 	srv := server.New(db, cfg)
+
+	priceTable := ingest.LoadPriceTable(cfg.Pricing.TablePath)
+
+	tailer := ingest.NewTailer(cfg.Claude.ProjectsDir, db, priceTable)
+	tailer.Start()
+	srv.SetTailer(tailer)
+
+	// stop signals every background loop (retention pruner, windows ticker)
+	// to exit; wg lets shutdown wait for them. The tailer has its own
+	// stopChan + doneChan and is stopped via tailer.Stop() so we don't
+	// double-track it on the WaitGroup.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go runRetentionLoop(&wg, stop, db, cfg)
+
+	wg.Add(1)
+	go runWindowsLoop(&wg, stop, srv)
 
 	// Resolve bind addresses (loopback + detected Docker/WSL adapters + overrides).
 	ifaces, err := net.Interfaces()
@@ -79,10 +109,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Server error channel — one slot per listener.
 	serverErr := make(chan error, len(bindAddrs))
 
-	// Start a listener per resolved address.
 	for _, host := range bindAddrs {
 		addr := fmt.Sprintf("%s:%d", host, cfg.HTTP.Port)
 		go func(a string) {
@@ -91,10 +119,6 @@ func main() {
 		}(addr)
 	}
 
-	// Wait for signal, or for every listener to exit. A single listener
-	// failing (e.g. bind conflict between 0.0.0.0 and a specific address when
-	// fallback is enabled, or a stale interface IP) must not bring down the
-	// trayapp while other listeners are still serving.
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
@@ -117,12 +141,12 @@ waitLoop:
 		}
 	}
 
-	// Graceful shutdown with timeout
 	shutdownDone := make(chan struct{})
 	go func() {
 		slog.Info("shutting down gracefully")
-		// Note: http.Server doesn't have built-in Shutdown in this version
-		// In production, would need to implement proper shutdown logic
+		close(stop)
+		tailer.Stop()
+		wg.Wait()
 		close(shutdownDone)
 	}()
 
@@ -131,5 +155,78 @@ waitLoop:
 		slog.Info("shutdown complete")
 	case <-time.After(5 * time.Second):
 		slog.Warn("shutdown timeout, forcing exit")
+	}
+}
+
+// runRetentionLoop prunes parse_errors and slack_samples on a 5-minute cadence
+// using the configured retention windows. Exits when stop is closed.
+func runRetentionLoop(wg *sync.WaitGroup, stop <-chan struct{}, db *store.Store, cfg *config.Config) {
+	defer wg.Done()
+	ticker := time.NewTicker(retentionInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			parseErrAge := time.Duration(cfg.Retention.ParseErrorsDays) * 24 * time.Hour
+			if err := db.PruneParseErrors(parseErrAge); err != nil {
+				slog.Error("prune parse errors", "err", err)
+			}
+			slackAge := time.Duration(cfg.Retention.SlackSamplesDays) * 24 * time.Hour
+			if err := db.PruneSlackSamples(slackAge); err != nil {
+				slog.Error("prune slack samples", "err", err)
+			}
+		}
+	}
+}
+
+// runWindowsLoop calls UpdateWindows on a 30-second cadence so windows
+// progress (open the next 5h/weekly window, correct baselines from
+// snapshots) even when no HTTP traffic is arriving.
+func runWindowsLoop(wg *sync.WaitGroup, stop <-chan struct{}, srv *server.Server) {
+	defer wg.Done()
+	we := srv.WindowsEngine()
+	ticker := time.NewTicker(windowsTickInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := we.UpdateWindows(); err != nil {
+				slog.Error("update windows", "err", err)
+			}
+		}
+	}
+}
+
+// setupLogging swaps slog's default handler to write to a rotating file when
+// cfg.Logging.File is non-empty. Returns the file's Close function (nil when
+// stdout is the destination).
+func setupLogging(file, level string) *rotatingWriter {
+	if file == "" {
+		return nil
+	}
+	w, err := newRotatingWriter(file, logRotateMaxSize, logRotateMaxBackups)
+	if err != nil {
+		slog.Warn("failed to set up rotating log file, falling back to stdout", "path", file, "err", err)
+		return nil
+	}
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: parseLogLevel(level)})
+	slog.SetDefault(slog.New(handler))
+	return w
+}
+
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
 	}
 }

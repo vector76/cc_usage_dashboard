@@ -15,6 +15,13 @@ import (
 	"github.com/anthropics/usage-dashboard/internal/windows"
 )
 
+// TailerStatus reports whether the tailer has caught up with all known
+// transcript files. The server uses it for the /healthz response without
+// taking a hard dependency on the ingest package's concrete Tailer type.
+type TailerStatus interface {
+	CaughtUp() bool
+}
+
 // Server handles HTTP requests.
 type Server struct {
 	mux   *http.ServeMux
@@ -25,6 +32,7 @@ type Server struct {
 	slackCalc *slack.Calculator
 	windowsEngine *windows.Engine
 	dashboardHandler *dashboard.Handler
+	tailerStatus TailerStatus
 }
 
 // New creates a new HTTP server.
@@ -75,6 +83,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
+// SetTailer attaches a TailerStatus source whose CaughtUp() value is reported
+// in /healthz. Safe to call once before serving traffic; concurrent calls are
+// not supported.
+func (s *Server) SetTailer(t TailerStatus) {
+	s.tailerStatus = t
+}
+
+// WindowsEngine returns the server's internal windows engine so callers (the
+// trayapp main, integration tests) can drive periodic UpdateWindows ticks
+// against the same instance the server uses.
+func (s *Server) WindowsEngine() *windows.Engine {
+	return s.windowsEngine
+}
+
 // LogRequest logs incoming requests (middleware-style).
 func (s *Server) LogRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +107,11 @@ func (s *Server) LogRequest(next http.Handler) http.Handler {
 	})
 }
 
-// handleHealthz checks if the trayapp and database are healthy.
+// handleHealthz checks if the trayapp and database are healthy. Per the
+// Phase 7 contract, a tailer that hasn't caught up does NOT degrade health to
+// 503 — only an unwritable database does. The current tailer state is
+// surfaced via the tailer_caught_up field so dashboards/operators can observe
+// it without paging.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// Check database accessibility
 	err := s.store.DB().Ping()
@@ -94,10 +120,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	caughtUp := false
+	if s.tailerStatus != nil {
+		caughtUp = s.tailerStatus.CaughtUp()
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
-		"status": "healthy",
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":           "healthy",
+		"tailer_caught_up": caughtUp,
 	})
 }
 
