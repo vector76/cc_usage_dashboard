@@ -92,6 +92,13 @@ func processHookInput(stdin io.Reader, hostURL string) {
 			"source":        "hook",
 		}
 
+		// Forward the assistant turn's transcript timestamp as occurred_at.
+		// Without this, every event in a backfill lands at time.Now(),
+		// collapsing an entire session's history to a few seconds.
+		if ts, ok := record["timestamp"].(string); ok && ts != "" {
+			eventPayload["occurred_at"] = ts
+		}
+
 		// Add optional fields if present
 		if sessionID, ok := record["sessionId"].(string); ok {
 			eventPayload["session_id"] = sessionID

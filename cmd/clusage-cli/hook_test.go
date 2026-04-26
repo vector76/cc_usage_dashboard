@@ -58,9 +58,10 @@ func TestInferProjectPath(t *testing.T) {
 func TestProcessHookInputFlow(t *testing.T) {
 	// Capture POSTs hitting the stub trayapp.
 	type capturedEvent struct {
-		SessionID string `json:"session_id"`
-		MessageID string `json:"message_id"`
-		Source    string `json:"source"`
+		SessionID  string `json:"session_id"`
+		MessageID  string `json:"message_id"`
+		Source     string `json:"source"`
+		OccurredAt string `json:"occurred_at"`
 	}
 
 	var (
@@ -97,9 +98,9 @@ func TestProcessHookInputFlow(t *testing.T) {
 	// fixture used a flat snake_case schema that never existed in practice;
 	// keeping the test honest is what catches regressions like the one
 	// where every line was silently skipped because msgMap["usage"] was nil.
-	transcript := `{"type":"assistant","sessionId":"sess-1","message":{"id":"msg-1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":50}}}
+	transcript := `{"type":"assistant","sessionId":"sess-1","timestamp":"2026-04-26T17:04:22.527Z","message":{"id":"msg-1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":50}}}
 {"type":"user","sessionId":"sess-1","message":{"content":"hi"}}
-{"type":"assistant","sessionId":"sess-1","message":{"id":"msg-2","model":"claude-sonnet-4-6","usage":{"input_tokens":200,"output_tokens":120,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}}
+{"type":"assistant","sessionId":"sess-1","timestamp":"2026-04-26T17:09:11.012Z","message":{"id":"msg-2","model":"claude-sonnet-4-6","usage":{"input_tokens":200,"output_tokens":120,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}}
 `
 
 	// Write the transcript under a projects/<encoded>/<file>.jsonl layout
@@ -140,21 +141,28 @@ func TestProcessHookInputFlow(t *testing.T) {
 		}
 	}
 
-	// Expected (session_id, message_id) pairs.
-	wantSet := map[[2]string]bool{
-		{"sess-1", "msg-1"}: false,
-		{"sess-1", "msg-2"}: false,
+	// Expected (session_id, message_id, occurred_at) tuples — occurred_at
+	// must round-trip from the transcript line's "timestamp" field, not
+	// default to the server's wall clock.
+	want := map[[2]string]string{
+		{"sess-1", "msg-1"}: "2026-04-26T17:04:22.527Z",
+		{"sess-1", "msg-2"}: "2026-04-26T17:09:11.012Z",
 	}
+	seen := map[[2]string]bool{}
 	for _, ev := range captured {
 		key := [2]string{ev.SessionID, ev.MessageID}
-		if _, ok := wantSet[key]; !ok {
+		wantTS, ok := want[key]
+		if !ok {
 			t.Errorf("unexpected event pair: %v", key)
 			continue
 		}
-		wantSet[key] = true
+		if ev.OccurredAt != wantTS {
+			t.Errorf("event %v: occurred_at = %q, want %q", key, ev.OccurredAt, wantTS)
+		}
+		seen[key] = true
 	}
-	for pair, seen := range wantSet {
-		if !seen {
+	for pair := range want {
+		if !seen[pair] {
 			t.Errorf("expected pair %v not seen", pair)
 		}
 	}

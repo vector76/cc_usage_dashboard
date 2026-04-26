@@ -155,18 +155,26 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 // LogPostRequest represents the POST /log request payload.
+//
+// OccurredAt is when the assistant turn actually happened. The Stop hook
+// reads it from each transcript line's "timestamp" field; manual /log
+// callers can omit it and the server falls back to time.Now() at insert
+// time. Without this, backfills compress all of a session's events into
+// the few seconds the CLI takes to walk the transcript, which destroys
+// the consumption-over-time signal the dashboard charts depend on.
 type LogPostRequest struct {
-	InputTokens         int     `json:"input_tokens"`
-	OutputTokens        int     `json:"output_tokens"`
-	CacheCreationTokens int     `json:"cache_creation_tokens,omitempty"`
-	CacheReadTokens     int     `json:"cache_read_tokens,omitempty"`
-	CostUSD             *float64 `json:"cost_usd,omitempty"`
-	SessionID           string  `json:"session_id,omitempty"`
-	MessageID           string  `json:"message_id,omitempty"`
-	Model               string  `json:"model,omitempty"`
-	ProjectPath         string  `json:"project_path,omitempty"`
-	Source              string  `json:"source,omitempty"`
-	RawJSON             string  `json:"raw_json,omitempty"`
+	OccurredAt          *time.Time `json:"occurred_at,omitempty"`
+	InputTokens         int        `json:"input_tokens"`
+	OutputTokens        int        `json:"output_tokens"`
+	CacheCreationTokens int        `json:"cache_creation_tokens,omitempty"`
+	CacheReadTokens     int        `json:"cache_read_tokens,omitempty"`
+	CostUSD             *float64   `json:"cost_usd,omitempty"`
+	SessionID           string     `json:"session_id,omitempty"`
+	MessageID           string     `json:"message_id,omitempty"`
+	Model               string     `json:"model,omitempty"`
+	ProjectPath         string     `json:"project_path,omitempty"`
+	Source              string     `json:"source,omitempty"`
+	RawJSON             string     `json:"raw_json,omitempty"`
 }
 
 // handleLog processes POST /log requests.
@@ -206,9 +214,16 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		req.Source = "api"
 	}
 
+	// Honor the request's occurred_at when supplied (Stop hook backfill).
+	// Falls back to time.Now() for manual /log callers that don't set it.
+	occurredAt := time.Now()
+	if req.OccurredAt != nil {
+		occurredAt = *req.OccurredAt
+	}
+
 	// Insert into database
 	id, err := s.store.InsertUsageEvent(
-		time.Now(),
+		occurredAt,
 		req.Source,
 		req.SessionID,
 		req.MessageID,
