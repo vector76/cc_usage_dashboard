@@ -5,6 +5,7 @@
 /.bm
 
 # Build artifacts (anchored to repo root so they don't clobber source dirs)
+/cli
 /clusage-cli
 /trayapp
 /trayapp.exe
