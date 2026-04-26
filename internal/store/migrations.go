@@ -96,6 +96,17 @@ CREATE TABLE IF NOT EXISTS parse_errors (
 );
 `,
 	},
+	{
+		Version: 2,
+		Name:    "create_tailer_offsets",
+		SQL: `
+CREATE TABLE IF NOT EXISTS tailer_offsets (
+	file_path TEXT PRIMARY KEY,
+	byte_offset INTEGER NOT NULL,
+	updated_at TIMESTAMP NOT NULL
+);
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.

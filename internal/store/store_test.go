@@ -28,8 +28,8 @@ func TestOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("expected schema version 1, got %d", version)
+	if version != 2 {
+		t.Errorf("expected schema version 2, got %d", version)
 	}
 }
 

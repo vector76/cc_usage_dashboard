@@ -205,7 +205,7 @@ func (e *Engine) findFirstEventAfterGap(windowKind string) (time.Time, error) {
 
 // findBaseline finds the baseline quota for a given timestamp.
 func (e *Engine) findBaseline(t time.Time) (*float64, string, error) {
-	var baselineTotal float64
+	var baselineTotal sql.NullFloat64
 	err := e.db.QueryRow(`
 		SELECT five_hour_total
 		FROM quota_snapshots
@@ -221,7 +221,11 @@ func (e *Engine) findBaseline(t time.Time) (*float64, string, error) {
 		return nil, "", fmt.Errorf("failed to query baseline: %w", err)
 	}
 
-	return &baselineTotal, "snapshot", nil
+	if !baselineTotal.Valid {
+		return nil, "no_snapshot", nil
+	}
+
+	return &baselineTotal.Float64, "snapshot", nil
 }
 
 // findWeeklyBoundary extracts the weekly window boundary from the most recent snapshot.

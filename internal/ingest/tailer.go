@@ -131,9 +131,19 @@ func (t *Tailer) handleFileChange(filePath string) {
 		return
 	}
 
+	// Load offset from memory cache or database if not cached
 	t.offsetMu.Lock()
-	offset := t.offsets[filePath]
+	offset, cached := t.offsets[filePath]
 	t.offsetMu.Unlock()
+
+	if !cached {
+		// Try to load from DB
+		dbOffset, err := t.store.GetTailerOffset(filePath)
+		if err != nil {
+			slog.Warn("failed to load tailer offset from database", "path", filePath, "err", err)
+		}
+		offset = dbOffset
+	}
 
 	// Open the file
 	file, err := os.Open(filePath)
@@ -200,7 +210,7 @@ func (t *Tailer) handleFileChange(filePath string) {
 			t.recordParseError("tailer", filePath, fmt.Sprintf("database insert failed: %v", err), event.RawJSON)
 		}
 
-		// Update offset
+		// Update offset: each line is raw JSON + newline
 		newOffset += int64(len(event.RawJSON) + 1) // +1 for newline
 	}
 
@@ -209,17 +219,13 @@ func (t *Tailer) handleFileChange(filePath string) {
 		t.recordParseError("tailer", filePath, parseErr.Reason, parseErr.Line)
 	}
 
-	// Update and persist the offset
+	// Persist the offset to both memory cache and database
 	t.offsetMu.Lock()
 	t.offsets[filePath] = newOffset
 	t.offsetMu.Unlock()
 
-	// Get the file size for the new offset
-	info, err := file.Stat()
-	if err == nil {
-		t.offsetMu.Lock()
-		t.offsets[filePath] = info.Size()
-		t.offsetMu.Unlock()
+	if err := t.store.SetTailerOffset(filePath, newOffset); err != nil {
+		slog.Error("failed to persist tailer offset", "path", filePath, "offset", newOffset, "err", err)
 	}
 }
 
@@ -233,13 +239,8 @@ func (t *Tailer) recordParseError(source, path, reason, payload string) {
 
 // isTranscriptFile checks if a file is a transcript JSONL.
 func isTranscriptFile(path string) bool {
-	// Look for files matching Claude Code transcript patterns
-	// Claude Code stores transcripts in project directories
-	if filepath.Ext(path) != "" {
-		return false // Skip files with extensions for now
-	}
-
-	name := filepath.Base(path)
-	// Check for typical Claude Code transcript markers
-	return name == "transcript" || name == "messages"
+	// Claude Code stores transcripts as JSONL files with the session ID as the filename
+	// Layout: ~/.claude/projects/<encoded-project-path>/<session-id>.jsonl
+	// We accept any .jsonl file since the tailer only watches the configured projects dir
+	return filepath.Ext(path) == ".jsonl"
 }

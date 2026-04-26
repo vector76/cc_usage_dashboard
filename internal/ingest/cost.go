@@ -3,6 +3,9 @@ package ingest
 
 import (
 	"log/slog"
+	"os"
+
+	"gopkg.in/yaml.v3"
 )
 
 // PriceTable holds model pricing information.
@@ -63,11 +66,46 @@ func computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens
 	return cost
 }
 
-// LoadPriceTable loads the price table from config.
-// Returns nil if the table cannot be loaded (non-fatal).
+// LoadPriceTable loads the price table from a YAML file.
+// Returns an empty table if the file cannot be loaded (non-fatal).
 func LoadPriceTable(path string) PriceTable {
-	// Placeholder: will be implemented with YAML loading
-	// For now, return nil and let the system handle unknown costs
-	slog.Debug("price table loading not yet implemented", "path", path)
-	return nil
+	if path == "" {
+		slog.Debug("no price table path configured")
+		return make(PriceTable)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		slog.Warn("failed to read price table file", "path", path, "err", err)
+		return make(PriceTable)
+	}
+
+	// Parse YAML into a structured format
+	type priceConfig struct {
+		Models map[string]struct {
+			InputRatePerM          float64 `yaml:"input_rate_usd_per_m"`
+			OutputRatePerM         float64 `yaml:"output_rate_usd_per_m"`
+			CacheCreationRatePerM  float64 `yaml:"cache_creation_rate_usd_per_m"`
+			CacheReadRatePerM      float64 `yaml:"cache_read_rate_usd_per_m"`
+		} `yaml:"models"`
+	}
+
+	var cfg priceConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		slog.Warn("failed to parse price table YAML", "path", path, "err", err)
+		return make(PriceTable)
+	}
+
+	table := make(PriceTable)
+	for modelName, rates := range cfg.Models {
+		table[modelName] = &ModelPrices{
+			InputRate:         rates.InputRatePerM,
+			OutputRate:        rates.OutputRatePerM,
+			CacheCreationRate: rates.CacheCreationRatePerM,
+			CacheReadRate:     rates.CacheReadRatePerM,
+		}
+	}
+
+	slog.Debug("loaded price table", "path", path, "models", len(table))
+	return table
 }

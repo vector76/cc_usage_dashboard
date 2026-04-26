@@ -164,3 +164,33 @@ func (s *Store) PruneSlackSamples(olderThan time.Duration) error {
 	}
 	return nil
 }
+
+// GetTailerOffset retrieves the last known byte offset for a transcript file.
+// Returns 0 if no offset has been recorded (file is new).
+func (s *Store) GetTailerOffset(filePath string) (int64, error) {
+	var offset int64
+	err := s.db.QueryRow("SELECT byte_offset FROM tailer_offsets WHERE file_path = ?", filePath).Scan(&offset)
+	if err == sql.ErrNoRows {
+		return 0, nil // No offset recorded yet
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get tailer offset: %w", err)
+	}
+	return offset, nil
+}
+
+// SetTailerOffset records the byte offset for a transcript file.
+func (s *Store) SetTailerOffset(filePath string, offset int64) error {
+	_, err := s.db.Exec(`
+		INSERT INTO tailer_offsets (file_path, byte_offset, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			byte_offset = excluded.byte_offset,
+			updated_at = excluded.updated_at
+	`, filePath, offset, time.Now())
+
+	if err != nil {
+		return fmt.Errorf("failed to set tailer offset: %w", err)
+	}
+	return nil
+}
