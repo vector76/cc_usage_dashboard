@@ -190,18 +190,27 @@ function renderBurnDown(svgID, win) {
   if (volume.length > 0) {
     const maxVol = Math.max.apply(null, volume.map(b => b.cost_usd));
     if (maxVol > 0) {
-      // Bar width: full chart width / nominal bucket count, scaled to
-      // 80% so bars don't touch.
-      const span = sx(end) - sx(start);
-      const barW = Math.max(1, (span / volume.length) * 0.8);
+      // Each bar covers its actual bucket duration on the X axis —
+      // [bucket_start, bucket_start + bucket_secs) — so bar width
+      // reflects time, not the number of populated buckets. SQL
+      // GROUP BY only returns buckets with data, so a 5h chart with 10
+      // active 5-min buckets must still render bars at 5-min width
+      // (~6 px), not 1/10 of the chart wide.
+      const bucketMs = (win.bucket_secs || 300) * 1000;
       const volH = VOL_BOTTOM - VOL_TOP;
       for (const b of volume) {
         const t = new Date(b.bucket_start).getTime();
-        const cx = sx(t);
+        const x0 = sx(t);
+        const x1 = sx(t + bucketMs);
+        // Left-align to the bucket's start; small inset so adjacent
+        // populated buckets don't visually merge.
+        const inset = Math.max(0.5, (x1 - x0) * 0.1);
+        const x = x0 + inset / 2;
+        const w = Math.max(1, (x1 - x0) - inset);
         const h = (b.cost_usd / maxVol) * volH;
         svg.appendChild(el("rect", {
-          x: cx - barW / 2, y: VOL_BOTTOM - h, width: barW, height: h,
-          fill: "#06c", opacity: "0.55"
+          x: x, y: VOL_BOTTOM - h, width: w, height: h,
+          fill: "#06c", opacity: "0.7"
         }));
       }
       // Max-volume label on the volume panel

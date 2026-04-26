@@ -32,6 +32,11 @@ type WindowState struct {
 	Slack         *float64          `json:"slack"`
 	Series        []UsedSeriesPoint `json:"series"`
 	Volume        []SeriesBucket    `json:"volume"`
+	// BucketSecs is the width of each Volume bucket in seconds. The
+	// client uses this to size bars by their actual time span instead
+	// of by the count of populated buckets, since GROUP BY only emits
+	// rows for buckets that have data.
+	BucketSecs int `json:"bucket_secs"`
 }
 
 // UsedSeriesPoint is one observation of % used at a point in time, sourced
@@ -235,11 +240,13 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string, now time.Time) (*Win
 	}
 	ws.Series = series
 
-	volume, err := h.loadVolumeSeries(db, startedAt, endsAt, bucketSecsForKind(kind))
+	bucketSecs := bucketSecsForKind(kind)
+	volume, err := h.loadVolumeSeries(db, startedAt, endsAt, bucketSecs)
 	if err != nil {
 		return nil, err
 	}
 	ws.Volume = volume
+	ws.BucketSecs = bucketSecs
 
 	if ws.BaselineTotal != nil {
 		duration := endsAt.Sub(startedAt)
