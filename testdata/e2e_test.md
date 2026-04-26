@@ -1,8 +1,22 @@
 # End-to-End Test Scenarios
 
-These scenarios exercise the major code paths and should be validated before shipping v1.
+The canonical runner for these scenarios is the Go test file
+[`internal/integration/e2e_test.go`](../internal/integration/e2e_test.go).
+Each scenario below maps to one `TestE2E_*` function that exercises the
+server in-process — no separate binaries, no shell, no listening port — so
+the suite is Linux-runnable and runs as part of `make test`.
+
+```bash
+go test ./internal/integration/...
+```
+
+The shell snippets below describe the same flows as they would look against
+a running `trayapp`/`clusage-cli` install; treat them as documentation, not
+as the runnable spec.
 
 ## Scenario 1: CLI Mode A posts events
+
+Go test: `TestE2E_CLIModeA_DiscountAndSlack`
 
 ```bash
 # Start the server
@@ -27,10 +41,17 @@ kill $SERVER_PID
 
 **Expected:**
 - All CLI posts succeed (exit 0)
-- /discount returns event counts and costs
-- /slack returns window metrics and release_recommended
+- /discount returns the documented fields including `events_total`,
+  `consumed_usd_equivalent`, `events_with_reported_cost`,
+  `events_with_computed_cost`, `events_without_cost`, `cost_coverage_pct`,
+  `savings_usd`
+- /slack returns documented top-level keys (`now`, `five_hour`, `weekly`,
+  `slack_combined_fraction`, `priority_quiet_for_seconds`, `paused`,
+  `release_recommended`, `gates`) with the four documented gate keys
 
 ## Scenario 2: Duplicate detection
+
+Go test: `TestE2E_DuplicateDetection`
 
 ```bash
 # Start server
@@ -50,10 +71,13 @@ kill $SERVER_PID
 ```
 
 **Expected:**
-- Second POST still succeeds (exit code 4 or 5 from UNIQUE constraint)
+- First POST succeeds (200)
+- Second POST returns 500 from the UNIQUE constraint
 - Database contains exactly 1 row for (s1, m1)
 
 ## Scenario 3: Snapshot and window derivation
+
+Go test: `TestE2E_SnapshotAndWindowDerivation`
 
 ```bash
 # Start server
@@ -75,12 +99,8 @@ curl -X POST http://localhost:27812/snapshot \
     "weekly_window_ends": "2026-04-28T00:00:00Z"
   }'
 
-# Post some events
-./clusage-cli log --input-tokens 100 --output-tokens 50
-./clusage-cli log --input-tokens 200 --output-tokens 100
-
 # Query windows table
-sqlite3 usage.db "SELECT kind, strftime('%Y-%m-%d %H:%M:%S', started_at) FROM windows;"
+sqlite3 usage.db "SELECT kind, baseline_total FROM windows;"
 
 # Cleanup
 kill $SERVER_PID
@@ -89,9 +109,13 @@ kill $SERVER_PID
 **Expected:**
 - Snapshot stored successfully
 - Windows created for both 5-hour and weekly
-- Windows have correct baseline_total from snapshot
+- 5-hour window has `baseline_total = five_hour_total`
+- Weekly window has `baseline_total = weekly_total` (set by the in-window
+  baseline correction pass)
 
 ## Scenario 4: Cost resolution
+
+Go test: `TestE2E_CostResolution`
 
 ```bash
 # Start server with price table configured
@@ -116,11 +140,13 @@ kill $SERVER_PID
 ```
 
 **Expected:**
-- First event: cost_source='reported', cost_usd_equivalent=0.05
-- Second event: cost_source='computed', cost_usd_equivalent~0.018
-- Third event: cost_source=NULL, cost_usd_equivalent=NULL
+- First event: `cost_source='reported'`, `cost_usd_equivalent=0.05`
+- Second event: `cost_source='computed'`, `cost_usd_equivalent=0.0105`
+- Third event: `cost_usd_equivalent` is NULL
 
-## Scenario 5: Slack signal
+## Scenario 5: Slack release flow
+
+Go test: `TestE2E_SlackReleaseFlow`
 
 ```bash
 # Start server
@@ -128,7 +154,7 @@ kill $SERVER_PID
 SERVER_PID=$!
 sleep 1
 
-# Create a window and snapshot
+# Establish an active 5-hour window (snapshot, or seeded directly in tests)
 curl -X POST http://localhost:27812/snapshot \
   -H "Content-Type: application/json" \
   -d '{
@@ -143,8 +169,7 @@ curl -X POST http://localhost:27812/snapshot \
 ./clusage-cli log --input-tokens 100 --output-tokens 50 --cost-usd 0.01
 
 # Get slack signal
-./clusage-cli slack --format release-bool
-./clusage-cli slack --format fraction
+./clusage-cli slack --format json
 
 # Record a release
 curl -X POST http://localhost:27812/slack/release \
@@ -153,23 +178,27 @@ curl -X POST http://localhost:27812/slack/release \
     "released_at": "2026-04-26T11:00:00Z",
     "job_tag": "batch-job-1",
     "estimated_cost": 0.02,
-    "slack_at_release": 0.49
+    "slack_at_release": 0.49,
+    "window_kind": "five_hour"
   }'
 
 # Verify release recorded
-sqlite3 usage.db "SELECT job_tag, estimated_cost FROM slack_releases;"
+sqlite3 usage.db "SELECT job_tag, estimated_cost, window_id FROM slack_releases;"
 
 # Cleanup
 kill $SERVER_PID
 ```
 
 **Expected:**
-- Slack calculations succeed
-- release-bool returns true or false
-- fraction returns decimal value
-- Release is recorded in database
+- /slack succeeds and exposes `release_recommended`
+- /slack/release returns 200
+- `slack_releases` row contains `job_tag='batch-job-1'`,
+  `estimated_cost=0.02`, `slack_at_release=0.49`, and `window_id` referring
+  to the active 5-hour window
 
 ## Scenario 6: Parse error recording
+
+Go test: `TestE2E_ParseErrorRoundTrip`
 
 ```bash
 # Start server
@@ -187,7 +216,7 @@ curl -X POST http://localhost:27812/parse_error \
   }'
 
 # Query parse errors
-sqlite3 usage.db "SELECT source, reason FROM parse_errors LIMIT 1;"
+sqlite3 usage.db "SELECT source, reason, payload FROM parse_errors LIMIT 1;"
 
 # Cleanup
 kill $SERVER_PID
@@ -195,11 +224,13 @@ kill $SERVER_PID
 
 **Expected:**
 - Parse error stored successfully
-- Query returns source='tailer' and reason='malformed JSON line'
+- Query returns `source='tailer'`, `reason='malformed JSON line'`, and the
+  original payload verbatim
 
 ## Manual Verification (Windows host only)
 
-The following items require Windows:
+The following items require Windows and are not covered by the Go suite:
+
 - Tray icon displays and responds to clicks
 - Tray menu items (Dashboard, Status, Pause, About, Quit) work
 - Color state changes (green/yellow/red) reflect slack state
@@ -207,4 +238,4 @@ The following items require Windows:
 - Task Scheduler autostart works
 - Graceful shutdown on logoff/shutdown
 
-See `CLAUDE.md` Phase 6 for Windows checklist.
+See `CLAUDE.md` Phase 6 for the Windows checklist.
