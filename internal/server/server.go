@@ -9,6 +9,7 @@ import (
 
 	"github.com/anthropics/usage-dashboard/internal/config"
 	"github.com/anthropics/usage-dashboard/internal/ingest"
+	"github.com/anthropics/usage-dashboard/internal/slack"
 	"github.com/anthropics/usage-dashboard/internal/store"
 )
 
@@ -19,6 +20,7 @@ type Server struct {
 	cfg   *config.Config
 	priceTable ingest.PriceTable
 	metrics *Metrics
+	slackCalc *slack.Calculator
 }
 
 // New creates a new HTTP server.
@@ -29,6 +31,11 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		cfg:        cfg,
 		priceTable: ingest.LoadPriceTable(cfg.Pricing.TablePath),
 		metrics:    NewMetrics(),
+		slackCalc: slack.NewCalculator(s.DB(), slack.Config{
+			HeadroomThreshold:    cfg.Slack.HeadroomThreshold,
+			QuietPeriodSeconds:   cfg.Slack.QuietPeriodSeconds,
+			FreshnessThresholdMs: cfg.Slack.FreshnessThresholdMs,
+		}),
 	}
 
 	// Register handlers

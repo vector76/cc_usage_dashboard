@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -15,6 +16,7 @@ type ReleaseRequest struct {
 	JobTag         string    `json:"job_tag"`
 	EstimatedCost  *float64  `json:"estimated_cost,omitempty"`
 	SlackAtRelease *float64  `json:"slack_at_release,omitempty"`
+	WindowKind     string    `json:"window_kind,omitempty"`
 }
 
 // handleSlackQuery processes GET /slack requests.
@@ -26,15 +28,7 @@ func (s *Server) handleSlackQuery(w http.ResponseWriter, r *http.Request) {
 
 	s.metrics.SlackQueries.Add(1)
 
-	// Create calculator
-	calculator := slack.NewCalculator(s.store.DB(), slack.Config{
-		HeadroomThreshold:    s.cfg.Slack.HeadroomThreshold,
-		QuietPeriodSeconds:   s.cfg.Slack.QuietPeriodSeconds,
-		FreshnessThresholdMs: s.cfg.Slack.FreshnessThresholdMs,
-	})
-
-	// Get slack
-	slackResp, err := calculator.GetSlack()
+	slackResp, err := s.slackCalc.GetSlack()
 	if err != nil {
 		slog.Error("failed to compute slack", "err", err)
 		http.Error(w, `{"error":"computation error"}`, http.StatusInternalServerError)
@@ -42,9 +36,8 @@ func (s *Server) handleSlackQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record sample if enabled
-	if s.cfg.EnableSlackSampling && slackResp.SlackFraction != nil {
-		_, err := calculator.RecordSample(slackResp.SlackFraction)
+	if s.cfg.EnableSlackSampling && slackResp.SlackCombinedFraction != nil {
+		_, err := s.slackCalc.RecordSample(slackResp.SlackCombinedFraction)
 		if err != nil {
 			slog.Warn("failed to record slack sample", "err", err)
 		}
@@ -69,23 +62,36 @@ func (s *Server) handleSlackRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate required fields
 	if req.JobTag == "" {
 		http.Error(w, `{"error":"job_tag required"}`, http.StatusBadRequest)
 		w.Header().Set("Content-Type", "application/json")
 		return
 	}
+	if req.ReleasedAt.IsZero() {
+		http.Error(w, `{"error":"released_at required"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		return
+	}
 
-	// Record the release
-	calculator := slack.NewCalculator(s.store.DB(), slack.Config{})
-	id, err := calculator.RecordRelease(req.ReleasedAt, req.JobTag, req.EstimatedCost, req.SlackAtRelease)
+	windowKind := req.WindowKind
+	if windowKind == "" {
+		windowKind = "five_hour"
+	}
+	if windowKind != "five_hour" && windowKind != "weekly" {
+		http.Error(w, `{"error":"invalid window_kind"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		return
+	}
+
+	id, err := s.slackCalc.RecordRelease(req.ReleasedAt, req.JobTag, req.EstimatedCost, req.SlackAtRelease, windowKind)
 	if err != nil {
-		if err.Error() == "no active 5-hour window for this release" {
+		if errors.Is(err, slack.ErrNoActiveWindow) {
 			http.Error(w, `{"error":"no active window"}`, http.StatusConflict)
-		} else {
-			slog.Error("failed to record release", "err", err)
-			http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
+			w.Header().Set("Content-Type", "application/json")
+			return
 		}
+		slog.Error("failed to record release", "err", err)
+		http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
 		w.Header().Set("Content-Type", "application/json")
 		return
 	}

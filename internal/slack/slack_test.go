@@ -98,8 +98,8 @@ func TestGetSlack_NullCombinedFractionWhenNoEvents(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetSlack: %v", err)
 		}
-		if resp.SlackFraction != nil {
-			t.Errorf("expected nil slack_combined_fraction, got %v", *resp.SlackFraction)
+		if resp.SlackCombinedFraction != nil {
+			t.Errorf("expected nil slack_combined_fraction, got %v", *resp.SlackCombinedFraction)
 		}
 		if resp.ReleaseRecommended {
 			t.Error("expected release_recommended=false")
@@ -129,8 +129,8 @@ func TestGetSlack_NullCombinedFractionWhenNoEvents(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetSlack: %v", err)
 		}
-		if resp.SlackFraction != nil {
-			t.Errorf("expected nil slack_combined_fraction when 5-hour absent, got %v", *resp.SlackFraction)
+		if resp.SlackCombinedFraction != nil {
+			t.Errorf("expected nil slack_combined_fraction when 5-hour absent, got %v", *resp.SlackCombinedFraction)
 		}
 		if resp.ReleaseRecommended {
 			t.Error("expected release_recommended=false when 5-hour window absent")
@@ -155,7 +155,7 @@ func TestRecordRelease_ResolvesWindowID(t *testing.T) {
 
 	cost := 1.20
 	slackVal := 8.40
-	releaseID, err := c.RecordRelease(now, "nightly-lint", &cost, &slackVal)
+	releaseID, err := c.RecordRelease(now, "nightly-lint", &cost, &slackVal, "five_hour")
 	if err != nil {
 		t.Fatalf("RecordRelease: %v", err)
 	}
@@ -181,8 +181,52 @@ func TestRecordRelease_ErrorWhenNoWindow(t *testing.T) {
 	// window — RecordRelease must still error.
 	insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 5000.0, "snapshot:1")
 
-	if _, err := c.RecordRelease(now, "nightly-lint", nil, nil); err == nil {
+	if _, err := c.RecordRelease(now, "nightly-lint", nil, nil, "five_hour"); err == nil {
 		t.Error("expected error when no five_hour window matches released_at")
+	}
+}
+
+// priority_quiet gate must pass when the user has been idle long enough
+// (quietFor >= QuietPeriodSeconds) and fail when the most recent event is
+// within the quiet window. Guards against re-introducing the historical
+// inversion where the gate was `quietFor > 0`.
+func TestPriorityQuietGate_NotInverted(t *testing.T) {
+	tests := []struct {
+		name        string
+		eventOffset time.Duration // negative = in the past
+		wantPass    bool
+	}{
+		{"recent activity fails the gate", -10 * time.Second, false},
+		{"old activity passes the gate", -10 * time.Minute, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, s := newCalc(t)
+			defer s.Close()
+
+			now := time.Now().UTC()
+			insertWindow(t, s.DB(), "five_hour", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
+
+			cost := 1.0
+			if _, err := s.InsertUsageEvent(
+				now.Add(tt.eventOffset), "api",
+				"sess-x", "msg-x", "", "claude-3-5-sonnet-20241022",
+				100, 50, 0, 0,
+				&cost, "reported", "{}",
+			); err != nil {
+				t.Fatalf("insert event: %v", err)
+			}
+
+			resp, err := c.GetSlack()
+			if err != nil {
+				t.Fatalf("GetSlack: %v", err)
+			}
+			got := resp.Gates["priority_quiet"]
+			if got != tt.wantPass {
+				t.Errorf("priority_quiet gate: got %v, want %v (quiet_for=%ds)",
+					got, tt.wantPass, resp.PriorityQuietForSeconds)
+			}
+		})
 	}
 }
 
@@ -228,11 +272,11 @@ func TestSetPaused_ForcesReleaseRecommendedFalse(t *testing.T) {
 	if !resp.Paused {
 		t.Error("expected Paused=true")
 	}
-	if resp.SlackFraction == nil {
+	if resp.SlackCombinedFraction == nil {
 		t.Fatal("test setup invalid: expected positive slack fraction, got nil")
 	}
-	if *resp.SlackFraction <= 0 {
-		t.Fatalf("test setup invalid: expected positive slack fraction, got %v", *resp.SlackFraction)
+	if *resp.SlackCombinedFraction <= 0 {
+		t.Fatalf("test setup invalid: expected positive slack fraction, got %v", *resp.SlackCombinedFraction)
 	}
 	if resp.ReleaseRecommended {
 		t.Error("expected ReleaseRecommended=false when paused, regardless of slack")
@@ -275,9 +319,9 @@ func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSlack: %v", err)
 	}
-	m := resp.FiveHourWindow
+	m := resp.FiveHour
 	if m == nil {
-		t.Fatal("expected FiveHourWindow metrics, got nil")
+		t.Fatal("expected FiveHour metrics, got nil")
 	}
 
 	// Recompute the expected values relative to a "now" sampled inside
@@ -297,9 +341,9 @@ func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 	expectedSlack := expectedE - consumed
 	expectedSlackFrac := expectedSlack / baseline
 
-	// Progress (cumulative consumed) must equal the inserted cost exactly.
-	if math.Abs(m.Progress-consumed) > 1e-6 {
-		t.Errorf("Progress (consumed): got %v, want %v", m.Progress, consumed)
+	// Consumed must equal the inserted cost exactly.
+	if math.Abs(m.Consumed-consumed) > 1e-6 {
+		t.Errorf("Consumed: got %v, want %v", m.Consumed, consumed)
 	}
 
 	// Allow a small tolerance for time-since-insertion drift.

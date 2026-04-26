@@ -4,26 +4,32 @@ package slack
 import (
 	"database/sql"
 	"fmt"
+	"sync"
 	"time"
 )
 
-// SlackResponse is the response from GET /slack endpoint.
+// SlackResponse is the response from GET /slack endpoint. JSON keys match
+// docs/slack-indicator.md.
 type SlackResponse struct {
-	FiveHourWindow *WindowMetrics `json:"five_hour_window"`
-	WeeklyWindow   *WindowMetrics `json:"weekly_window"`
-	SlackFraction  *float64       `json:"slack_combined_fraction"` // min of the two, null if either is null
-	QuietForSecs   int            `json:"quiet_for_seconds"`
-	Paused         bool           `json:"paused"`
-	ReleaseRecommended bool        `json:"release_recommended"`
-	Gates          map[string]bool `json:"gates"`
+	Now                     time.Time       `json:"now"`
+	FiveHour                *WindowMetrics  `json:"five_hour"`
+	Weekly                  *WindowMetrics  `json:"weekly"`
+	SlackCombinedFraction   *float64        `json:"slack_combined_fraction"`
+	PriorityQuietForSeconds int             `json:"priority_quiet_for_seconds"`
+	Paused                  bool            `json:"paused"`
+	ReleaseRecommended      bool            `json:"release_recommended"`
+	Gates                   map[string]bool `json:"gates"`
 }
 
-// WindowMetrics holds the computed metrics for a window.
+// WindowMetrics holds the computed metrics for a single window.
 type WindowMetrics struct {
-	Progress      float64 `json:"progress"`       // tokens consumed so far
-	Expected      float64 `json:"expected"`       // expected consumption for elapsed time
-	Slack         float64 `json:"slack"`          // remaining headroom
-	SlackFraction *float64 `json:"slack_fraction"` // (expected - actual) / baseline, nil if window not started
+	WindowStart   time.Time `json:"window_start"`
+	WindowEnd     time.Time `json:"window_end"`
+	QuotaTotal    float64   `json:"quota_total"`
+	Consumed      float64   `json:"consumed"`
+	Expected      float64   `json:"expected"`
+	Slack         float64   `json:"slack"`
+	SlackFraction *float64  `json:"slack_fraction"`
 }
 
 // Config holds slack calculation configuration.
@@ -33,11 +39,15 @@ type Config struct {
 	FreshnessThresholdMs int
 }
 
-// Calculator computes the slack signal.
+// Calculator computes the slack signal. It is safe for concurrent use; a
+// single instance is shared across HTTP handlers so the in-memory pause flag
+// persists between requests.
 type Calculator struct {
 	db     *sql.DB
 	config Config
-	paused bool // in-memory pause state
+
+	mu     sync.RWMutex
+	paused bool
 }
 
 // NewCalculator creates a new slack calculator.
@@ -45,18 +55,24 @@ func NewCalculator(db *sql.DB, cfg Config) *Calculator {
 	return &Calculator{
 		db:     db,
 		config: cfg,
-		paused: false,
 	}
 }
 
 // SetPaused sets the pause state.
 func (c *Calculator) SetPaused(paused bool) {
+	c.mu.Lock()
 	c.paused = paused
+	c.mu.Unlock()
 }
 
 // GetSlack computes the current slack signal.
 func (c *Calculator) GetSlack() (*SlackResponse, error) {
-	// Get active windows
+	now := time.Now().UTC()
+
+	c.mu.RLock()
+	paused := c.paused
+	c.mu.RUnlock()
+
 	fiveHourWindow, err := c.getActiveWindow("five_hour")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get 5-hour window: %w", err)
@@ -68,48 +84,63 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 	}
 
 	resp := &SlackResponse{
-		Paused: c.paused,
+		Now:    now,
+		Paused: paused,
 		Gates:  make(map[string]bool),
 	}
 
-	// Compute metrics for each window
 	if fiveHourWindow != nil {
-		metrics, err := c.computeMetrics(fiveHourWindow)
-		if err == nil {
-			resp.FiveHourWindow = metrics
+		metrics, err := c.computeMetrics(fiveHourWindow, now)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute five_hour metrics: %w", err)
 		}
+		resp.FiveHour = metrics
 	}
 
 	if weeklyWindow != nil {
-		metrics, err := c.computeMetrics(weeklyWindow)
-		if err == nil {
-			resp.WeeklyWindow = metrics
+		metrics, err := c.computeMetrics(weeklyWindow, now)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute weekly metrics: %w", err)
 		}
+		resp.Weekly = metrics
 	}
 
-	// Combine slack fractions
-	resp.SlackFraction = c.combineSlackFractions(resp.FiveHourWindow, resp.WeeklyWindow)
+	resp.SlackCombinedFraction = c.combineSlackFractions(resp.FiveHour, resp.Weekly)
 
-	// Check gates
-	quietFor, headroom, fresh := c.checkGates()
-	resp.QuietForSecs = int(quietFor.Seconds())
+	quietFor, hasEvent, freshOk := c.checkGates(now)
+	resp.PriorityQuietForSeconds = int(quietFor.Seconds())
 
-	resp.Gates["headroom"] = headroom
-	resp.Gates["priority_quiet"] = quietFor > 0
-	resp.Gates["freshness"] = fresh
-	resp.Gates["not_paused"] = !c.paused
+	quietThreshold := time.Duration(c.config.QuietPeriodSeconds) * time.Second
+	priorityQuietOk := !hasEvent || quietFor >= quietThreshold
 
-	// Release is recommended if all gates pass and slack is positive
-	resp.ReleaseRecommended = (resp.SlackFraction != nil && *resp.SlackFraction > 0 &&
-		headroom && fresh && !c.paused)
+	headroomOk := false
+	if resp.SlackCombinedFraction != nil && *resp.SlackCombinedFraction >= c.config.HeadroomThreshold {
+		headroomOk = true
+	}
+
+	resp.Gates["headroom"] = headroomOk
+	resp.Gates["priority_quiet"] = priorityQuietOk
+	resp.Gates["baseline_freshness"] = freshOk
+	resp.Gates["not_paused"] = !paused
+
+	resp.ReleaseRecommended = headroomOk && priorityQuietOk && freshOk && !paused
 
 	return resp, nil
 }
 
+// activeWindow holds the fields we need from the windows table.
+type activeWindow struct {
+	id            int64
+	startedAt     time.Time
+	endsAt        time.Time
+	baselineTotal *float64
+}
+
 // getActiveWindow fetches the active window of a given kind.
-func (c *Calculator) getActiveWindow(kind string) (map[string]interface{}, error) {
-	var id, baselineTotal, baselineSource interface{}
-	var startedAt, endsAt time.Time
+func (c *Calculator) getActiveWindow(kind string) (*activeWindow, error) {
+	var w activeWindow
+	var baselineTotal sql.NullFloat64
+	var baselineSource sql.NullString
 
 	err := c.db.QueryRow(`
 		SELECT id, started_at, ends_at, baseline_total, baseline_source
@@ -117,88 +148,89 @@ func (c *Calculator) getActiveWindow(kind string) (map[string]interface{}, error
 		WHERE kind = ? AND closed = 0
 		ORDER BY started_at DESC
 		LIMIT 1
-	`, kind).Scan(&id, &startedAt, &endsAt, &baselineTotal, &baselineSource)
+	`, kind).Scan(&w.id, &w.startedAt, &w.endsAt, &baselineTotal, &baselineSource)
 
 	if err == sql.ErrNoRows {
-		return nil, nil // No active window
+		return nil, nil
 	} else if err != nil {
 		return nil, fmt.Errorf("failed to query window: %w", err)
 	}
 
-	return map[string]interface{}{
-		"id":              id,
-		"started_at":      startedAt,
-		"ends_at":         endsAt,
-		"baseline_total":  baselineTotal,
-		"baseline_source": baselineSource,
-	}, nil
+	if baselineTotal.Valid {
+		v := baselineTotal.Float64
+		w.baselineTotal = &v
+	}
+	return &w, nil
 }
 
-// computeMetrics computes window metrics from a window record.
-func (c *Calculator) computeMetrics(window map[string]interface{}) (*WindowMetrics, error) {
-	startedAt := window["started_at"].(time.Time)
-	endsAt := window["ends_at"].(time.Time)
-	baselineTotal := window["baseline_total"]
-
-	// Get actual consumption in the window
-	var actualCost float64
+// computeMetrics computes window metrics for an active window.
+//
+// Per docs/slack-indicator.md:
+//
+//	progress(t)       = clamp((t - t0) / (t1 - t0), 0, 1)
+//	E(t)              = Q * progress(t)
+//	slack(t)          = E(t) - U(t)
+//	slack_fraction(t) = slack(t) / Q
+func (c *Calculator) computeMetrics(w *activeWindow, now time.Time) (*WindowMetrics, error) {
+	var consumed float64
 	err := c.db.QueryRow(`
 		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
 		FROM usage_events
 		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
-	`, startedAt, endsAt).Scan(&actualCost)
-
+	`, w.startedAt, w.endsAt).Scan(&consumed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compute consumption: %w", err)
 	}
 
-	metrics := &WindowMetrics{
-		Progress: actualCost,
+	m := &WindowMetrics{
+		WindowStart: w.startedAt,
+		WindowEnd:   w.endsAt,
+		Consumed:    consumed,
+	}
+	if w.baselineTotal != nil {
+		m.QuotaTotal = *w.baselineTotal
 	}
 
-	// Compute expected consumption based on elapsed time
-	now := time.Now()
-	if now.Before(startedAt) {
-		// Window hasn't started yet
-		metrics.SlackFraction = nil
-		return metrics, nil
+	// Window has not started yet.
+	if now.Before(w.startedAt) {
+		return m, nil
 	}
 
-	windowDuration := endsAt.Sub(startedAt)
-	elapsedDuration := now.Sub(startedAt)
-	if elapsedDuration < 0 {
-		elapsedDuration = 0
+	windowDuration := w.endsAt.Sub(w.startedAt)
+	if windowDuration <= 0 {
+		return m, nil
+	}
+	elapsed := now.Sub(w.startedAt)
+	progress := float64(elapsed) / float64(windowDuration)
+	if progress < 0 {
+		progress = 0
+	}
+	if progress > 1 {
+		progress = 1
 	}
 
-	elapsedFraction := float64(elapsedDuration) / float64(windowDuration)
-
-	if baselineTotal != nil {
-		baseline := baselineTotal.(float64)
-		metrics.Expected = baseline * elapsedFraction
-		metrics.Slack = baseline - actualCost
-
-		// Compute slack fraction
-		slackFraction := (metrics.Expected - actualCost) / baseline
-		metrics.SlackFraction = &slackFraction
+	if w.baselineTotal != nil {
+		baseline := *w.baselineTotal
+		m.Expected = baseline * progress
+		m.Slack = m.Expected - consumed
+		if baseline > 0 {
+			frac := m.Slack / baseline
+			m.SlackFraction = &frac
+		}
 	}
 
-	return metrics, nil
+	return m, nil
 }
 
-// combineSlackFractions combines slack fractions from both windows (minimum).
+// combineSlackFractions returns min(a, b) of the two windows' slack fractions.
+// Per docs: combined is null whenever either window's slack_fraction is null.
 func (c *Calculator) combineSlackFractions(fiveHour, weekly *WindowMetrics) *float64 {
 	if fiveHour == nil || fiveHour.SlackFraction == nil {
-		if weekly == nil || weekly.SlackFraction == nil {
-			return nil
-		}
-		return weekly.SlackFraction
+		return nil
 	}
-
 	if weekly == nil || weekly.SlackFraction == nil {
-		return fiveHour.SlackFraction
+		return nil
 	}
-
-	// Return the minimum
 	min := *fiveHour.SlackFraction
 	if *weekly.SlackFraction < min {
 		min = *weekly.SlackFraction
@@ -206,52 +238,55 @@ func (c *Calculator) combineSlackFractions(fiveHour, weekly *WindowMetrics) *flo
 	return &min
 }
 
-// checkGates checks the three gates: headroom, quiet period, freshness.
-// Returns: (time since last event, headroom ok, freshness ok).
-func (c *Calculator) checkGates() (time.Duration, bool, bool) {
-	now := time.Now()
-
-	// Get time of last event
-	var lastEventTime time.Time
-	err := c.db.QueryRow(`
-		SELECT MAX(occurred_at) FROM usage_events
-	`).Scan(&lastEventTime)
+// checkGates returns (time since last event, whether any events exist,
+// freshness gate status).
+//
+// We use ORDER BY ... LIMIT 1 instead of MAX() because go-sqlite3 erases the
+// column type for aggregate results, returning the timestamp as a raw string
+// that does not scan into time.Time.
+func (c *Calculator) checkGates(now time.Time) (time.Duration, bool, bool) {
+	var lastEvent time.Time
+	err := c.db.QueryRow(`SELECT occurred_at FROM usage_events ORDER BY occurred_at DESC LIMIT 1`).Scan(&lastEvent)
 
 	var quietFor time.Duration
-	if err == nil && !lastEventTime.IsZero() {
-		quietFor = now.Sub(lastEventTime)
+	hasEvent := err == nil && !lastEvent.IsZero()
+	if hasEvent {
+		quietFor = now.Sub(lastEvent)
+		if quietFor < 0 {
+			quietFor = 0
+		}
 	}
 
-	// Get time of last snapshot
 	var lastSnapshot time.Time
-	err = c.db.QueryRow(`
-		SELECT MAX(received_at) FROM quota_snapshots
-	`).Scan(&lastSnapshot)
+	err = c.db.QueryRow(`SELECT received_at FROM quota_snapshots ORDER BY received_at DESC LIMIT 1`).Scan(&lastSnapshot)
 
-	freshOk := true
+	freshOk := false
 	if err == nil && !lastSnapshot.IsZero() {
 		age := now.Sub(lastSnapshot)
 		threshold := time.Duration(c.config.FreshnessThresholdMs) * time.Millisecond
 		freshOk = age < threshold
 	}
 
-	headroomOk := true // Placeholder for headroom check
-
-	return quietFor, headroomOk, freshOk
+	return quietFor, hasEvent, freshOk
 }
 
-// RecordRelease records a release event to the database.
-func (c *Calculator) RecordRelease(releasedAt time.Time, jobTag string, estimatedCost *float64, slackAtRelease *float64) (int64, error) {
-	// Find which window this release falls into
-	var fiveHourWindowID int64
+// RecordRelease records a release event to the database, resolving it to the
+// active window of the requested kind containing releasedAt.
+func (c *Calculator) RecordRelease(releasedAt time.Time, jobTag string, estimatedCost *float64, slackAtRelease *float64, windowKind string) (int64, error) {
+	if windowKind == "" {
+		windowKind = "five_hour"
+	}
+
+	var windowID int64
 	err := c.db.QueryRow(`
 		SELECT id FROM windows
-		WHERE kind = 'five_hour' AND started_at <= ? AND ends_at > ?
+		WHERE kind = ? AND started_at <= ? AND ends_at > ?
+		ORDER BY started_at DESC
 		LIMIT 1
-	`, releasedAt, releasedAt).Scan(&fiveHourWindowID)
+	`, windowKind, releasedAt, releasedAt).Scan(&windowID)
 
 	if err == sql.ErrNoRows {
-		return 0, fmt.Errorf("no active 5-hour window for this release")
+		return 0, ErrNoActiveWindow
 	} else if err != nil {
 		return 0, fmt.Errorf("failed to find window: %w", err)
 	}
@@ -259,7 +294,7 @@ func (c *Calculator) RecordRelease(releasedAt time.Time, jobTag string, estimate
 	result, err := c.db.Exec(`
 		INSERT INTO slack_releases (released_at, received_at, job_tag, estimated_cost, slack_at_release, window_id)
 		VALUES (?, ?, ?, ?, ?, ?)
-	`, releasedAt, time.Now(), jobTag, estimatedCost, slackAtRelease, fiveHourWindowID)
+	`, releasedAt, time.Now().UTC(), jobTag, estimatedCost, slackAtRelease, windowID)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert release: %w", err)
@@ -268,9 +303,12 @@ func (c *Calculator) RecordRelease(releasedAt time.Time, jobTag string, estimate
 	return result.LastInsertId()
 }
 
+// ErrNoActiveWindow is returned by RecordRelease when no window of the
+// requested kind contains the releasedAt timestamp.
+var ErrNoActiveWindow = fmt.Errorf("no active window")
+
 // RecordSample records a slack sample if sampling is enabled.
 func (c *Calculator) RecordSample(fraction *float64) (int64, error) {
-	// Find the active 5-hour window
 	var windowID int64
 	err := c.db.QueryRow(`
 		SELECT id FROM windows
@@ -285,7 +323,7 @@ func (c *Calculator) RecordSample(fraction *float64) (int64, error) {
 	result, err := c.db.Exec(`
 		INSERT INTO slack_samples (sampled_at, slack_fraction, window_id)
 		VALUES (?, ?, ?)
-	`, time.Now(), fraction, windowID)
+	`, time.Now().UTC(), fraction, windowID)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert sample: %w", err)
