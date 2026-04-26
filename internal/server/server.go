@@ -11,6 +11,7 @@ import (
 	"github.com/anthropics/usage-dashboard/internal/ingest"
 	"github.com/anthropics/usage-dashboard/internal/slack"
 	"github.com/anthropics/usage-dashboard/internal/store"
+	"github.com/anthropics/usage-dashboard/internal/windows"
 )
 
 // Server handles HTTP requests.
@@ -21,6 +22,7 @@ type Server struct {
 	priceTable ingest.PriceTable
 	metrics *Metrics
 	slackCalc *slack.Calculator
+	windowsEngine *windows.Engine
 }
 
 // New creates a new HTTP server.
@@ -37,6 +39,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 			BaselineMaxAgeHours:    cfg.Slack.BaselineMaxAgeHours,
 			BaselineDriftThreshold: cfg.Slack.BaselineDriftThreshold,
 		}),
+		windowsEngine: windows.NewEngine(s.DB()),
 	}
 
 	// Register handlers
@@ -160,6 +163,8 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.metrics.IncEventsIngested(req.Source)
+
+	s.deriveWindows()
 
 	// Return success response
 	w.Header().Set("Content-Type", "application/json")

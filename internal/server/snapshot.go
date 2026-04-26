@@ -76,7 +76,8 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 // deriveWindows maintains the windows table based on events and snapshots.
 // This is called after each snapshot or event insertion.
 func (s *Server) deriveWindows() {
-	// Placeholder: will be implemented in next iteration
-	// For now, this is a no-op
+	if err := s.windowsEngine.UpdateWindows(); err != nil {
+		slog.Error("failed to update windows", "err", err)
+	}
 }
 

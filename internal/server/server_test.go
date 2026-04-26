@@ -22,6 +22,7 @@ func createTestServer(t *testing.T) (*Server, *store.Store) {
 	cfg.Database.Path = ":memory:"
 	cfg.Pricing.TablePath = ""
 
+	// New() provisions the windows engine alongside other dependencies.
 	return New(testStore, cfg), testStore
 }
 
