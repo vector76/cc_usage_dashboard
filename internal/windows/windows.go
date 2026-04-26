@@ -51,7 +51,88 @@ func (e *Engine) UpdateWindows() error {
 		return err
 	}
 
+	// Correct baselines for any in-window snapshots
+	if err := e.correctBaselineFromSnapshots(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+// correctBaselineFromSnapshots updates window baselines when snapshots occur within the window.
+func (e *Engine) correctBaselineFromSnapshots() error {
+	// Find all active windows
+	rows, err := e.db.Query(`
+		SELECT id, kind, started_at FROM windows WHERE closed = 0
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to query windows: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var windowID int64
+		var kind string
+		var startedAt time.Time
+
+		if err := rows.Scan(&windowID, &kind, &startedAt); err != nil {
+			return fmt.Errorf("failed to scan window: %w", err)
+		}
+
+		// Find the most recent snapshot at or after window start
+		var snapshotID int64
+		var snapshotBaseline sql.NullFloat64
+
+		if kind == "five_hour" {
+			err := e.db.QueryRow(`
+				SELECT id, five_hour_total FROM quota_snapshots
+				WHERE observed_at >= ?
+				ORDER BY observed_at DESC
+				LIMIT 1
+			`, startedAt).Scan(&snapshotID, &snapshotBaseline)
+
+			if err == nil && snapshotBaseline.Valid {
+				// Update the window baseline
+				baselineSource := fmt.Sprintf("snapshot:%d", snapshotID)
+				slog.Debug("correcting baseline", "windowID", windowID, "newBaseline", snapshotBaseline.Float64)
+				_, updateErr := e.db.Exec(`
+					UPDATE windows SET baseline_total = ?, baseline_source = ?
+					WHERE id = ?
+				`, snapshotBaseline.Float64, baselineSource, windowID)
+
+				if updateErr != nil {
+					return fmt.Errorf("failed to update window baseline: %w", updateErr)
+				}
+			} else if err != sql.ErrNoRows {
+				slog.Debug("snapshot query error", "err", err)
+			}
+		} else if kind == "weekly" {
+			err := e.db.QueryRow(`
+				SELECT id, weekly_total FROM quota_snapshots
+				WHERE observed_at >= ?
+				ORDER BY observed_at DESC
+				LIMIT 1
+			`, startedAt).Scan(&snapshotID, &snapshotBaseline)
+
+			if err == nil && snapshotBaseline.Valid {
+				// Update the window baseline
+				baselineSource := fmt.Sprintf("snapshot:%d", snapshotID)
+				slog.Debug("correcting baseline", "windowID", windowID, "newBaseline", snapshotBaseline.Float64)
+				_, updateErr := e.db.Exec(`
+					UPDATE windows SET baseline_total = ?, baseline_source = ?
+					WHERE id = ?
+				`, snapshotBaseline.Float64, baselineSource, windowID)
+
+				if updateErr != nil {
+					return fmt.Errorf("failed to update window baseline: %w", updateErr)
+				}
+			} else if err != sql.ErrNoRows {
+				slog.Debug("snapshot query error", "err", err)
+			}
+		}
+	}
+
+	return rows.Err()
 }
 
 // ensureFiveHourWindow ensures a 5-hour window exists for the current period.

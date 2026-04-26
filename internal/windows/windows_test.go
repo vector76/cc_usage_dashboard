@@ -307,6 +307,68 @@ func isValidSnapshotSource(s string) bool {
 	return len(s) > 9 && s[:9] == "snapshot:"
 }
 
+func TestBaselineCorrectionDebug(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	// Insert an event to start the window
+	_, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	)
+	if err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+
+	// Update windows
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	// Insert snapshot WITHIN the window
+	laterTime := now.Add(1 * time.Minute)
+	newBaseline := 200.0
+	_, err = s.InsertQuotaSnapshot(
+		laterTime, laterTime, "test",
+		nil, &newBaseline, nil,
+		nil, nil, nil,
+		"{}",
+	)
+	if err != nil {
+		t.Fatalf("failed to insert snapshot: %v", err)
+	}
+
+	// Verify snapshot was inserted
+	var snapshotCount int
+	row := s.DB().QueryRow(`SELECT COUNT(*) FROM quota_snapshots`)
+	if err := row.Scan(&snapshotCount); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	t.Logf("Snapshot count: %d", snapshotCount)
+
+	// Update windows again to trigger baseline correction
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("second UpdateWindows failed: %v", err)
+	}
+
+	// Check window baseline
+	var windowBaseline sql.NullFloat64
+	var baselineSource string
+	row = s.DB().QueryRow(`SELECT baseline_total, baseline_source FROM windows WHERE kind = 'five_hour' AND closed = 0`)
+	if err := row.Scan(&windowBaseline, &baselineSource); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+
+	t.Logf("Window baseline: %v, source: %s", windowBaseline, baselineSource)
+
+	if !windowBaseline.Valid || windowBaseline.Float64 != newBaseline {
+		t.Errorf("expected baseline %f, got %v (source: %s)", newBaseline, windowBaseline, baselineSource)
+	}
+}
+
 func TestDriftCalculation(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()
