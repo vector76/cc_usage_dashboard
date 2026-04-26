@@ -1,0 +1,25 @@
+# Example price configuration for Claude usage dashboard.
+# Copy this file to prices.yaml and update rates as needed.
+#
+# All rates are in USD per million tokens.
+# Set a model's rates to skip cost computation for that model;
+# null rates will be treated as unknown pricing.
+
+models:
+  claude-3-5-sonnet-20241022:
+    input_rate_usd_per_m: 3.00
+    output_rate_usd_per_m: 15.00
+    cache_creation_rate_usd_per_m: 3.75
+    cache_read_rate_usd_per_m: 0.30
+
+  claude-3-opus-20250219:
+    input_rate_usd_per_m: 15.00
+    output_rate_usd_per_m: 75.00
+    cache_creation_rate_usd_per_m: 18.75
+    cache_read_rate_usd_per_m: 1.50
+
+  claude-3-haiku-20250307:
+    input_rate_usd_per_m: 0.80
+    output_rate_usd_per_m: 4.00
+    cache_creation_rate_usd_per_m: 1.00
+    cache_read_rate_usd_per_m: 0.08

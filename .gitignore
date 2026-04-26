@@ -2,3 +2,35 @@
 .env.*
 !.env.example
 .raymond/
+/.bm
+
+# Build artifacts
+clusage-cli
+trayapp
+trayapp.exe
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Development
+usage.db
+usage.db-wal
+usage.db-shm
+*.log

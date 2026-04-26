@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build CLI
+        run: make build-cli
+
+      - name: Build trayapp
+        run: make build-trayapp
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: clusage-cli
+          path: clusage-cli
+
+      - name: Upload trayapp artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: trayapp
+          path: trayapp
