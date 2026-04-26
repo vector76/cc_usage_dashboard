@@ -34,11 +34,11 @@
   <div class="charts">
     <div>
       <h3>Session window</h3>
-      <svg id="chart-session" viewBox="0 0 400 160" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+      <svg id="chart-session" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
     <div>
       <h3>Weekly window</h3>
-      <svg id="chart-weekly" viewBox="0 0 400 160" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+      <svg id="chart-weekly" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
     </div>
   </div>
 </section>
@@ -97,18 +97,28 @@ function renderStatus(s) {
   kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
 }
 
-// renderBurnDown plots % used vs. time within a window.
-//   - Y axis: 0–100% (the plan limit).
-//   - Dashed line: linear pace from (start, 0) to (end, 100). Below = under
-//     pace = slack available. Above = burning faster than uniform.
-//   - Solid blue line: actual % used over time, sourced from
-//     quota_snapshots inside the window (win.series). Step plot is more
-//     honest about when we know vs. don't know, but a polyline reads better.
-//   - Marker: latest observation.
+// renderBurnDown plots % remaining vs. time within a window, with a
+// dollar-volume bar chart underneath in the style of a stock price+volume
+// chart. Layout (200 tall):
+//   y=8..132    upper panel — % remaining (100 at top, 0 at bottom)
+//   y=140..184  lower panel — $ consumption per bucket (bars from baseline)
+//   y=192       x-axis time labels shared across both panels
+//
+//   - Dashed line: linear pace from (start, 100% remaining) to (end, 0%
+//     remaining). Above = under pace = slack available. Below = burning
+//     faster than uniform.
+//   - Solid blue line: actual % remaining over time, computed as
+//     100 - percent_used from each snapshot in win.series.
+//   - Volume bars: per-bucket sum of cost_usd_equivalent inside the
+//     window. Y of the volume panel is auto-scaled to the largest bar.
 function renderBurnDown(svgID, win) {
   const svg = document.getElementById(svgID);
   while (svg.firstChild) svg.removeChild(svg.firstChild);
-  const W = 400, H = 160, P = 32;
+  const W = 400, H = 200, P = 32;
+  const PCT_TOP = 8, PCT_BOTTOM = 132;
+  const VOL_TOP = 140, VOL_BOTTOM = 184;
+  const AXIS_Y = 196;
+
   if (!win) {
     svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "No active window"));
     return;
@@ -120,55 +130,93 @@ function renderBurnDown(svgID, win) {
     return;
   }
   const sx = (t) => P + (W - 2 * P) * (t - start) / (end - start);
-  const sy = (pct) => H - P - (H - 2 * P) * pct / 100;
+  // Y axis is inverted: pct=100 (full quota remaining) sits at the top of
+  // the upper panel; pct=0 (exhausted) sits at the bottom.
+  const syPct = (pct) => PCT_TOP + (PCT_BOTTOM - PCT_TOP) * (100 - pct) / 100;
 
-  // axes
-  svg.appendChild(el("line", { x1: P, y1: H - P, x2: W - P, y2: H - P, stroke: "#444" }));
-  svg.appendChild(el("line", { x1: P, y1: P, x2: P, y2: H - P, stroke: "#444" }));
+  // Upper panel border (left + bottom)
+  svg.appendChild(el("line", { x1: P, y1: PCT_TOP, x2: P, y2: PCT_BOTTOM, stroke: "#444" }));
+  svg.appendChild(el("line", { x1: P, y1: PCT_BOTTOM, x2: W - P, y2: PCT_BOTTOM, stroke: "#444" }));
 
-  // pace line: (start, 0%) → (end, 100%) = uniform burn that exhausts at end
+  // Pace line: (start, 100% remaining) → (end, 0% remaining)
   svg.appendChild(el("line", {
-    x1: sx(start), y1: sy(0), x2: sx(end), y2: sy(100),
+    x1: sx(start), y1: syPct(100), x2: sx(end), y2: syPct(0),
     stroke: "#888", "stroke-dasharray": "3 3"
   }));
 
-  // observed series
+  // Observed % remaining series
   const series = (win.series || []).filter(p => {
     const t = new Date(p.observed_at).getTime();
     return t >= start && t < end;
   });
   if (series.length > 0) {
-    const points = series.map(p => `${sx(new Date(p.observed_at).getTime())},${sy(p.percent_used)}`).join(" ");
+    const points = series.map(p => `${sx(new Date(p.observed_at).getTime())},${syPct(100 - p.percent_used)}`).join(" ");
     svg.appendChild(el("polyline", { points, fill: "none", stroke: "#06c", "stroke-width": "2" }));
     const latest = series[series.length - 1];
     const lx = sx(new Date(latest.observed_at).getTime());
-    const ly = sy(latest.percent_used);
+    const remaining = 100 - latest.percent_used;
+    const ly = syPct(remaining);
     svg.appendChild(el("circle", { cx: lx, cy: ly, r: "4", fill: "#06c" }));
     svg.appendChild(el("text", {
       x: lx, y: ly - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
-    }, fmt(latest.percent_used) + "%"));
+    }, fmt(remaining) + "%"));
   } else if (win.baseline_total != null) {
-    // No series rows yet (older snapshot pre-dating the window) — fall back
-    // to drawing the baseline as a flat segment from start to now.
+    // No in-window snapshots yet — flat segment at the baseline value.
     const now = Math.min(Math.max(Date.now(), start), end);
+    const remaining = 100 - win.baseline_total;
     svg.appendChild(el("line", {
-      x1: sx(start), y1: sy(win.baseline_total), x2: sx(now), y2: sy(win.baseline_total),
+      x1: sx(start), y1: syPct(remaining), x2: sx(now), y2: syPct(remaining),
       stroke: "#06c", "stroke-width": "2"
     }));
-    svg.appendChild(el("circle", { cx: sx(now), cy: sy(win.baseline_total), r: "4", fill: "#06c" }));
+    svg.appendChild(el("circle", { cx: sx(now), cy: syPct(remaining), r: "4", fill: "#06c" }));
     svg.appendChild(el("text", {
-      x: sx(now), y: sy(win.baseline_total) - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
-    }, fmt(win.baseline_total) + "%"));
+      x: sx(now), y: syPct(remaining) - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+    }, fmt(remaining) + "%"));
   } else {
-    svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "No data yet"));
+    svg.appendChild(el("text", {
+      x: W / 2, y: (PCT_TOP + PCT_BOTTOM) / 2, "text-anchor": "middle", fill: "#888"
+    }, "No data yet"));
   }
 
-  // axis labels
+  // Lower panel: $ volume bars
+  const volume = (win.volume || []).filter(b => {
+    const t = new Date(b.bucket_start).getTime();
+    return t >= start && t < end;
+  });
+  // Volume panel border (baseline only)
+  svg.appendChild(el("line", { x1: P, y1: VOL_BOTTOM, x2: W - P, y2: VOL_BOTTOM, stroke: "#444" }));
+  svg.appendChild(el("line", { x1: P, y1: VOL_TOP, x2: P, y2: VOL_BOTTOM, stroke: "#444" }));
+
+  if (volume.length > 0) {
+    const maxVol = Math.max.apply(null, volume.map(b => b.cost_usd));
+    if (maxVol > 0) {
+      // Bar width: full chart width / nominal bucket count, scaled to
+      // 80% so bars don't touch.
+      const span = sx(end) - sx(start);
+      const barW = Math.max(1, (span / volume.length) * 0.8);
+      const volH = VOL_BOTTOM - VOL_TOP;
+      for (const b of volume) {
+        const t = new Date(b.bucket_start).getTime();
+        const cx = sx(t);
+        const h = (b.cost_usd / maxVol) * volH;
+        svg.appendChild(el("rect", {
+          x: cx - barW / 2, y: VOL_BOTTOM - h, width: barW, height: h,
+          fill: "#06c", opacity: "0.55"
+        }));
+      }
+      // Max-volume label on the volume panel
+      svg.appendChild(el("text", {
+        x: 4, y: VOL_TOP + 4, "font-size": "9", fill: "#444"
+      }, "$" + fmt(maxVol)));
+    }
+  }
+
+  // Axis labels
   const dur = end - start;
-  svg.appendChild(el("text", { x: P, y: H - 8, "font-size": "10", fill: "#444" }, fmtAxisTime(start, dur)));
-  svg.appendChild(el("text", { x: W - P, y: H - 8, "font-size": "10", fill: "#444", "text-anchor": "end" }, fmtAxisTime(end, dur)));
-  svg.appendChild(el("text", { x: 4, y: P + 4, "font-size": "10", fill: "#444" }, "100%"));
-  svg.appendChild(el("text", { x: 4, y: H - P, "font-size": "10", fill: "#444" }, "0"));
+  svg.appendChild(el("text", { x: P, y: AXIS_Y, "font-size": "10", fill: "#444" }, fmtAxisTime(start, dur)));
+  svg.appendChild(el("text", { x: W - P, y: AXIS_Y, "font-size": "10", fill: "#444", "text-anchor": "end" }, fmtAxisTime(end, dur)));
+  svg.appendChild(el("text", { x: 4, y: PCT_TOP + 4, "font-size": "10", fill: "#444" }, "100%"));
+  svg.appendChild(el("text", { x: 4, y: PCT_BOTTOM, "font-size": "10", fill: "#444" }, "0"));
 }
 
 function renderDiscount(d) {

@@ -23,14 +23,15 @@ var staticFS embed.FS
 
 // WindowState describes one active window in the dashboard state response.
 type WindowState struct {
-	ID            int64               `json:"id"`
-	Kind          string              `json:"kind"`
-	StartedAt     time.Time           `json:"started_at"`
-	EndsAt        time.Time           `json:"ends_at"`
-	BaselineTotal *float64            `json:"baseline_total"`
-	Consumed      float64             `json:"consumed"`
-	Slack         *float64            `json:"slack"`
-	Series        []UsedSeriesPoint   `json:"series"`
+	ID            int64             `json:"id"`
+	Kind          string            `json:"kind"`
+	StartedAt     time.Time         `json:"started_at"`
+	EndsAt        time.Time         `json:"ends_at"`
+	BaselineTotal *float64          `json:"baseline_total"`
+	Consumed      float64           `json:"consumed"`
+	Slack         *float64          `json:"slack"`
+	Series        []UsedSeriesPoint `json:"series"`
+	Volume        []SeriesBucket    `json:"volume"`
 }
 
 // UsedSeriesPoint is one observation of % used at a point in time, sourced
@@ -234,6 +235,12 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string, now time.Time) (*Win
 	}
 	ws.Series = series
 
+	volume, err := h.loadVolumeSeries(db, startedAt, endsAt, bucketSecsForKind(kind))
+	if err != nil {
+		return nil, err
+	}
+	ws.Volume = volume
+
 	if ws.BaselineTotal != nil {
 		duration := endsAt.Sub(startedAt)
 		if duration > 0 {
@@ -251,6 +258,56 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string, now time.Time) (*Win
 	}
 
 	return ws, nil
+}
+
+// bucketSecsForKind picks a bucket width that yields a readable number of
+// bars per window. Session = 5 hours / 5 min ≈ 60 bars; weekly = 7 days /
+// 6 hours = 28 bars. Returned size aligns to UTC by virtue of strftime('%s').
+func bucketSecsForKind(kind string) int {
+	switch kind {
+	case "weekly":
+		return 6 * 3600
+	default:
+		return 5 * 60
+	}
+}
+
+// loadVolumeSeries buckets dollar consumption inside a window for the
+// volume bar chart that sits below the % remaining curve. Each row is the
+// sum of cost_usd_equivalent for usage_events whose occurred_at falls in
+// [bucket_start, bucket_start + bucketSecs).
+func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, bucketSecs int) ([]SeriesBucket, error) {
+	if bucketSecs <= 0 {
+		return []SeriesBucket{}, nil
+	}
+	query := fmt.Sprintf(`
+		SELECT
+			(CAST(strftime('%%s', occurred_at) AS INTEGER) / %d) * %d AS bucket_unix,
+			COALESCE(SUM(cost_usd_equivalent), 0) AS total
+		FROM usage_events
+		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
+		GROUP BY bucket_unix
+		ORDER BY bucket_unix
+	`, bucketSecs, bucketSecs)
+	rows, err := db.Query(query, store.FormatTime(startedAt), store.FormatTime(endsAt))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []SeriesBucket{}
+	for rows.Next() {
+		var bucketUnix int64
+		var total float64
+		if err := rows.Scan(&bucketUnix, &total); err != nil {
+			return nil, err
+		}
+		out = append(out, SeriesBucket{
+			BucketStart: time.Unix(bucketUnix, 0).UTC(),
+			CostUSD:     total,
+		})
+	}
+	return out, rows.Err()
 }
 
 // loadUsedSeries returns the per-snapshot %used time series for a window.
