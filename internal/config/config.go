@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -16,7 +17,9 @@ type Config struct {
 	} `yaml:"database"`
 
 	HTTP struct {
-		Port int `yaml:"port"`
+		Port           int      `yaml:"port"`
+		Bind           []string `yaml:"bind"`
+		EnableFallback bool     `yaml:"enable_fallback"`
 	} `yaml:"http"`
 
 	Claude struct {
@@ -27,15 +30,27 @@ type Config struct {
 		TablePath string `yaml:"table_path"`
 	} `yaml:"pricing"`
 
+	Tailer struct {
+		PollIntervalMs int `yaml:"poll_interval_ms"`
+	} `yaml:"tailer"`
+
+	Logging struct {
+		Level string `yaml:"level"`
+		File  string `yaml:"file"`
+	} `yaml:"logging"`
+
 	Slack struct {
-		HeadroomThreshold    float64 `yaml:"headroom_threshold"`
-		QuietPeriodSeconds   int     `yaml:"quiet_period_seconds"`
-		FreshnessThresholdMs int     `yaml:"freshness_threshold_ms"`
+		HeadroomThreshold      float64 `yaml:"headroom_threshold"`
+		QuietPeriodSeconds     int     `yaml:"quiet_period_seconds"`
+		FreshnessThresholdMs   int     `yaml:"freshness_threshold_ms"`
+		ReleaseThreshold       float64 `yaml:"release_threshold"`
+		BaselineMaxAgeHours    int     `yaml:"baseline_max_age_hours"`
+		BaselineDriftThreshold float64 `yaml:"baseline_drift_threshold"`
 	} `yaml:"slack"`
 
 	Subscription struct {
-		MonthlyUSD   float64 `yaml:"monthly_usd"`
-		BillingCycleDays int `yaml:"billing_cycle_days"`
+		MonthlyUSD       float64 `yaml:"monthly_usd"`
+		BillingCycleDays int     `yaml:"billing_cycle_days"`
 	} `yaml:"subscription"`
 
 	Retention struct {
@@ -53,11 +68,19 @@ func Load(path string) (*Config, error) {
 	// Set defaults
 	cfg.Database.Path = "usage.db"
 	cfg.HTTP.Port = 27812
+	cfg.HTTP.Bind = []string{"127.0.0.1"}
+	cfg.HTTP.EnableFallback = false
 	cfg.Claude.ProjectsDir = expandHome("~/.claude/projects")
 	cfg.Pricing.TablePath = "config/prices.example.yaml"
+	cfg.Tailer.PollIntervalMs = 1000
+	cfg.Logging.Level = "info"
+	cfg.Logging.File = ""
 	cfg.Slack.HeadroomThreshold = 10.0
 	cfg.Slack.QuietPeriodSeconds = 300
 	cfg.Slack.FreshnessThresholdMs = 60000
+	cfg.Slack.ReleaseThreshold = 0.10
+	cfg.Slack.BaselineMaxAgeHours = 48
+	cfg.Slack.BaselineDriftThreshold = 0.25
 	cfg.Subscription.MonthlyUSD = 20.0
 	cfg.Subscription.BillingCycleDays = 30
 	cfg.Retention.ParseErrorsDays = 30
@@ -79,12 +102,51 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Resolve env-style placeholders in path/dir fields.
+	cfg.Database.Path = expandPlaceholders(cfg.Database.Path)
+	cfg.Claude.ProjectsDir = expandPlaceholders(cfg.Claude.ProjectsDir)
+	cfg.Pricing.TablePath = expandPlaceholders(cfg.Pricing.TablePath)
+
 	return &cfg, nil
 }
 
-// expandHome expands ~/ to the user's home directory.
+// expandPlaceholders replaces Windows-style environment placeholders
+// (%APPDATA%, %LOCALAPPDATA%, %USERPROFILE%, %HOME%) with values from the
+// environment. On Linux those vars are typically empty, so we fall back to
+// the user's home directory to keep cross-platform config files testable.
+func expandPlaceholders(s string) string {
+	if s == "" {
+		return s
+	}
+	tokens := []string{"APPDATA", "LOCALAPPDATA", "USERPROFILE", "HOME"}
+	var home string
+	homeResolved := false
+	for _, name := range tokens {
+		token := "%" + name + "%"
+		if !strings.Contains(s, token) {
+			continue
+		}
+		val := os.Getenv(name)
+		if val == "" {
+			if !homeResolved {
+				if h, err := os.UserHomeDir(); err == nil {
+					home = h
+				}
+				homeResolved = true
+			}
+			val = home
+		}
+		if val == "" {
+			continue
+		}
+		s = strings.ReplaceAll(s, token, val)
+	}
+	return s
+}
+
+// expandHome expands a leading ~/ to the user's home directory.
 func expandHome(path string) string {
-	if path[:2] != "~/" {
+	if !strings.HasPrefix(path, "~/") {
 		return path
 	}
 	home, err := os.UserHomeDir()
