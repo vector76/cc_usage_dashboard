@@ -32,7 +32,7 @@ lint: vet
 	gofmt -d .
 
 build-cli:
-	GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -o clusage-cli ./cmd/cli
+	GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -o clusage-cli ./cmd/clusage-cli
 
 build-trayapp:
 	GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -o trayapp ./cmd/trayapp
@@ -43,7 +43,7 @@ build-trayapp-windows:
 # Size-optimized release builds. -H=windowsgui detaches the .exe from the
 # console so the trayapp runs purely in the system tray.
 release:
-	GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -ldflags="$(RELEASE_LDFLAGS)" -o clusage-cli ./cmd/cli
+	GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -ldflags="$(RELEASE_LDFLAGS)" -o clusage-cli ./cmd/clusage-cli
 	GOOS=linux GOARCH=amd64 go build $(GOFLAGS) -ldflags="$(RELEASE_LDFLAGS)" -o trayapp ./cmd/trayapp
 	GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -ldflags="$(RELEASE_LDFLAGS) -H=windowsgui" -o trayapp.exe ./cmd/trayapp
 

@@ -38,7 +38,7 @@ development; run the full suite before declaring done.
 | Slack calculator                    | `go test ./internal/slack/...`                     | Combined fraction, gates (headroom, priority quiet, freshness, not-paused), pause |
 | Discount calculator                 | `go test ./internal/discount/...`                  | Documented field names (`savings_usd`, `value_ratio`, `consumed_usd_equivalent`) |
 | HTTP server (handlers + dashboard)  | `go test ./internal/server/...`                    | `/log`, `/parse_error`, `/snapshot`, `/slack`, `/slack/release`, `/discount`     |
-| CLI hook payload parsing            | `go test ./cmd/cli/...`                            | Hook stdin payload → `/log` POST                                                 |
+| CLI hook payload parsing            | `go test ./cmd/clusage-cli/...`                    | Hook stdin payload → `/log` POST                                                 |
 | End-to-end integration              | `go test ./internal/integration/...`               | Six scenarios documented in `testdata/e2e_test.md`                                |
 
 ### Build verification

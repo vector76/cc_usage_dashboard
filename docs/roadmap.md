@@ -21,7 +21,7 @@ expectation above also applies even when not repeated.
 
 - `go.mod`, basic directory layout per `README.md`.
 - A no-op `cmd/trayapp` that opens a tray icon and exits cleanly.
-- A no-op `cmd/cli` that prints version.
+- A no-op `cmd/clusage-cli` that prints version.
 - CI: `go vet`, `go test`, cross-compile both binaries.
 
 Exit criteria: `trayapp.exe` runs, shows a tray icon, quits cleanly. `clusage-cli ping`

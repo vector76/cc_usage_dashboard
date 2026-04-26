@@ -110,16 +110,16 @@ If you run Claude Code inside dev containers that don't bind-mount `~/.claude`, 
 the CLI in the container so its Stop hook POSTs per-message usage to the host:
 
 ```bash
-go install github.com/vector76/cc_usage_dashboard/cmd/cli@latest
+go install github.com/vector76/cc_usage_dashboard/cmd/clusage-cli@latest
 
 # Wire it into ~/.claude/settings.json:
-#   "Stop": [{ "hooks": [{ "type": "command", "command": "cli log --from-hook || true" }] }]
+#   "Stop": [{ "hooks": [{ "type": "command", "command": "clusage-cli log --from-hook || true" }] }]
 ```
 
 For ad-hoc tests:
 
 ```bash
-cli log --input-tokens 1234 --output-tokens 567 --cost-usd 0.0123
+clusage-cli log --input-tokens 1234 --output-tokens 567 --cost-usd 0.0123
 ```
 
 ## Building on Linux

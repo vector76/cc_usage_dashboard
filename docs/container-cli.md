@@ -7,7 +7,7 @@ build target.
 ## Build
 
 ```
-GOOS=linux GOARCH=amd64 go build -o clusage-cli ./cmd/cli
+GOOS=linux GOARCH=amd64 go build -o clusage-cli ./cmd/clusage-cli
 ```
 
 Static binary, no runtime deps, drop into `/usr/local/bin` in any container image.

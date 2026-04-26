@@ -60,7 +60,7 @@ A single Go executable. Responsibilities:
 Why a single binary: simplifies install, eliminates IPC, keeps the SQLite writer
 single-threaded by construction.
 
-### Container CLI (`cmd/cli`, Linux)
+### Container CLI (`cmd/clusage-cli`, Linux)
 
 A small Go binary. Subcommands:
 
