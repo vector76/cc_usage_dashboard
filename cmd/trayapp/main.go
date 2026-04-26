@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -17,8 +18,16 @@ import (
 	"github.com/anthropics/usage-dashboard/internal/ingest"
 	"github.com/anthropics/usage-dashboard/internal/netbind"
 	"github.com/anthropics/usage-dashboard/internal/server"
+	"github.com/anthropics/usage-dashboard/internal/slack"
 	"github.com/anthropics/usage-dashboard/internal/store"
 )
+
+// pauseToggle adapts a *slack.Calculator into the tiny `interface{ Toggle() }`
+// the tray UI consumes, so the Pause menu item flips the same in-memory
+// pause flag the HTTP handlers read.
+type pauseToggle struct{ c *slack.Calculator }
+
+func (p pauseToggle) Toggle() { p.c.SetPaused(!p.c.IsPaused()) }
 
 const Version = "0.0.1"
 
@@ -94,6 +103,19 @@ func main() {
 	wg.Add(1)
 	go runWindowsLoop(&wg, stop, srv)
 
+	// Tray UI: blocks on Windows until Quit is chosen, no-op stub elsewhere.
+	// Cancelling trayCtx during shutdown unblocks the stub and asks the
+	// systray runtime to tear down on Windows. trayDone closes when
+	// StartTray returns so the main loop can shut down the rest of the
+	// process if the user quits via the tray menu.
+	trayCtx, cancelTray := context.WithCancel(context.Background())
+	defer cancelTray()
+	trayDone := make(chan struct{})
+	go func() {
+		StartTray(trayCtx, srv, pauseToggle{c: srv.SlackCalculator()})
+		close(trayDone)
+	}()
+
 	// Resolve bind addresses (loopback + detected Docker/WSL adapters + overrides).
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -129,6 +151,9 @@ waitLoop:
 		case <-sigChan:
 			slog.Info("received shutdown signal")
 			break waitLoop
+		case <-trayDone:
+			slog.Info("tray exited; shutting down")
+			break waitLoop
 		case err := <-serverErr:
 			remaining--
 			if err != nil {
@@ -145,6 +170,7 @@ waitLoop:
 	go func() {
 		slog.Info("shutting down gracefully")
 		close(stop)
+		cancelTray()
 		tailer.Stop()
 		wg.Wait()
 		close(shutdownDone)

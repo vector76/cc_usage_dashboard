@@ -97,6 +97,13 @@ func (s *Server) WindowsEngine() *windows.Engine {
 	return s.windowsEngine
 }
 
+// SlackCalculator returns the shared slack calculator instance so callers
+// (the tray UI) can mutate the in-memory pause state on the same instance
+// that the HTTP handlers read from.
+func (s *Server) SlackCalculator() *slack.Calculator {
+	return s.slackCalc
+}
+
 // LogRequest logs incoming requests (middleware-style).
 func (s *Server) LogRequest(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

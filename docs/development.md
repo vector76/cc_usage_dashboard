@@ -48,6 +48,18 @@ Example:
 - `internal/tray/tray_windows.go` — Windows implementation
 - `internal/tray/tray_linux.go` — Linux stub (no-op)
 
+The tray UI in `cmd/trayapp/` follows this pattern: `tray_windows.go`
+(`//go:build windows`) wires the real `fyne.io/systray` menu (Open dashboard,
+Status, Pause slack signal, About, Quit) and is the only file that imports the
+systray dep, while `tray_stub.go` (`//go:build !windows`) exposes the same
+`StartTray(ctx, srv, paused)` signature as a no-op that simply blocks on
+`ctx.Done()`. `cmd/trayapp/main.go` calls `StartTray` from a goroutine on
+every platform, passing a small adapter around the shared `*slack.Calculator`
+so the Pause menu item flips the same in-memory pause flag the HTTP handlers
+read. This keeps the Linux build of `make build-trayapp` headless and
+dependency-free while letting the Windows cross-compile produce a functional
+tray binary skeleton.
+
 ## Testing
 
 Tests are written before or alongside implementation. See `docs/roadmap.md` for
