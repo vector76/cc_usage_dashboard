@@ -126,18 +126,22 @@ func (t *Tailer) pollOnce() {
 
 // handleFileChange processes a changed transcript file.
 func (t *Tailer) handleFileChange(filePath string) {
-	// Only process transcript files
 	if !isTranscriptFile(filePath) {
 		return
 	}
+	t.processFile(filePath)
+}
 
-	// Load offset from memory cache or database if not cached
+// processFile reads new content from a transcript file starting at the saved
+// offset, ingests any usage events, and advances the offset by the number of
+// bytes the parser fully consumed (complete, newline-terminated lines —
+// including malformed lines whose errors were recorded).
+func (t *Tailer) processFile(filePath string) {
 	t.offsetMu.Lock()
 	offset, cached := t.offsets[filePath]
 	t.offsetMu.Unlock()
 
 	if !cached {
-		// Try to load from DB
 		dbOffset, err := t.store.GetTailerOffset(filePath)
 		if err != nil {
 			slog.Warn("failed to load tailer offset from database", "path", filePath, "err", err)
@@ -145,7 +149,6 @@ func (t *Tailer) handleFileChange(filePath string) {
 		offset = dbOffset
 	}
 
-	// Open the file
 	file, err := os.Open(filePath)
 	if err != nil {
 		slog.Error("failed to open transcript file", "path", filePath, "err", err)
@@ -154,7 +157,6 @@ func (t *Tailer) handleFileChange(filePath string) {
 	}
 	defer file.Close()
 
-	// Seek to the last known position
 	if offset > 0 {
 		if _, err := file.Seek(offset, 0); err != nil {
 			slog.Error("failed to seek in transcript file", "path", filePath, "offset", offset, "err", err)
@@ -162,9 +164,7 @@ func (t *Tailer) handleFileChange(filePath string) {
 		}
 	}
 
-	// Parse the file from the offset
 	parser := NewParser(file)
-	newOffset := offset
 
 	for {
 		event, err := parser.ParseNext()
@@ -172,12 +172,10 @@ func (t *Tailer) handleFileChange(filePath string) {
 			slog.Error("parser error", "path", filePath, "err", err)
 			break
 		}
-
 		if event == nil {
-			break // EOF
+			break
 		}
 
-		// Resolve cost
 		cost, costSource := ResolveCost(
 			event.ReportedCost,
 			event.Model,
@@ -188,7 +186,6 @@ func (t *Tailer) handleFileChange(filePath string) {
 			t.priceTable,
 		)
 
-		// Insert the event
 		_, err = t.store.InsertUsageEvent(
 			event.OccurredAt,
 			"tailer",
@@ -204,22 +201,18 @@ func (t *Tailer) handleFileChange(filePath string) {
 			costSource,
 			event.RawJSON,
 		)
-
 		if err != nil {
 			slog.Error("failed to insert event", "path", filePath, "err", err)
 			t.recordParseError("tailer", filePath, fmt.Sprintf("database insert failed: %v", err), event.RawJSON)
 		}
-
-		// Update offset: each line is raw JSON + newline
-		newOffset += int64(len(event.RawJSON) + 1) // +1 for newline
 	}
 
-	// Record any parse errors from the parser
 	for _, parseErr := range parser.Errors() {
 		t.recordParseError("tailer", filePath, parseErr.Reason, parseErr.Line)
 	}
 
-	// Persist the offset to both memory cache and database
+	newOffset := offset + parser.BytesConsumed()
+
 	t.offsetMu.Lock()
 	t.offsets[filePath] = newOffset
 	t.offsetMu.Unlock()

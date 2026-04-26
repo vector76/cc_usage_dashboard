@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -33,59 +34,71 @@ type ParseError struct {
 
 // Parser parses Claude Code JSONL transcripts.
 type Parser struct {
-	reader   io.Reader
-	scanner  *bufio.Scanner
-	lineNum  int64
-	errors   []ParseError
+	reader        *bufio.Reader
+	lineNum       int64
+	bytesConsumed int64
+	errors        []ParseError
 }
 
 // NewParser creates a new parser for reading from a reader.
 func NewParser(r io.Reader) *Parser {
 	return &Parser{
-		reader:  r,
-		scanner: bufio.NewScanner(r),
-		errors:  make([]ParseError, 0),
+		reader: bufio.NewReader(r),
+		errors: make([]ParseError, 0),
 	}
 }
 
 // ParseNext reads the next line and returns a parsed event if it contains usage data.
 // Returns nil, nil if the line doesn't contain usage or EOF is reached.
-// Returns nil, error if parsing fails.
+// Returns nil, error if reading fails.
 func (p *Parser) ParseNext() (*ParsedEvent, error) {
-	for p.scanner.Scan() {
-		p.lineNum++
-		line := p.scanner.Bytes()
+	for {
+		line, readErr := p.reader.ReadString('\n')
+		// Only count bytes for fully-terminated lines so a partial trailing
+		// line in a still-growing file isn't skipped on the next read.
+		hadNewline := readErr == nil
 
-		// Skip empty lines
-		if len(line) == 0 {
-			continue
+		if len(line) > 0 {
+			p.lineNum++
+			if hadNewline {
+				p.bytesConsumed += int64(len(line))
+			}
+
+			stripped := strings.TrimRight(line, "\n")
+			if len(stripped) > 0 {
+				event, parseErr := p.parseLine([]byte(stripped))
+				if parseErr != nil {
+					p.errors = append(p.errors, ParseError{
+						LineNumber: p.lineNum,
+						Line:       stripped,
+						Reason:     parseErr.Error(),
+					})
+				} else if event != nil {
+					return event, nil
+				}
+			}
 		}
 
-		event, err := p.parseLine(line)
-		if err != nil {
-			p.errors = append(p.errors, ParseError{
-				LineNumber: p.lineNum,
-				Line:       string(line),
-				Reason:     err.Error(),
-			})
-			continue
+		if readErr == io.EOF {
+			return nil, nil
 		}
-
-		if event != nil {
-			return event, nil
+		if readErr != nil {
+			return nil, fmt.Errorf("read error: %w", readErr)
 		}
 	}
-
-	if err := p.scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scanner error: %w", err)
-	}
-
-	return nil, nil // EOF
 }
 
 // Errors returns all parsing errors encountered.
 func (p *Parser) Errors() []ParseError {
 	return p.errors
+}
+
+// BytesConsumed returns the total bytes of complete (newline-terminated) lines
+// the parser has read. Partial trailing lines are excluded so the caller can
+// safely advance a file offset by this amount without skipping data that may
+// be appended later.
+func (p *Parser) BytesConsumed() int64 {
+	return p.bytesConsumed
 }
 
 // parseLine tries to extract a usage event from a JSON line.

@@ -64,7 +64,7 @@ func TestTailerProcessFile(t *testing.T) {
 	}
 
 	// Process the file
-	tailer.handleFileChange(transcriptPath)
+	tailer.processFile(transcriptPath)
 
 	// Verify events were inserted
 	rows, err := s.DB().Query(`SELECT COUNT(*) FROM usage_events WHERE source = 'tailer'`)
@@ -120,7 +120,7 @@ func TestTailerIncremental(t *testing.T) {
 	}
 
 	// Process initial content
-	tailer.handleFileChange(transcriptPath)
+	tailer.processFile(transcriptPath)
 
 	// Check we have 1 event
 	var count1 int
@@ -143,7 +143,7 @@ func TestTailerIncremental(t *testing.T) {
 	}
 
 	// Process again (should only add the new event)
-	tailer.handleFileChange(transcriptPath)
+	tailer.processFile(transcriptPath)
 
 	// Check we now have 2 events
 	var count2 int
@@ -237,7 +237,7 @@ func TestTailerMalformedLine(t *testing.T) {
 	}
 
 	// Process the file (should not crash)
-	tailer.handleFileChange(transcriptPath)
+	tailer.processFile(transcriptPath)
 
 	// Verify valid events were inserted
 	var validCount int
@@ -259,6 +259,75 @@ func TestTailerMalformedLine(t *testing.T) {
 
 	if errorCount > 0 {
 		t.Logf("recorded %d parse errors (expected at least 1)", errorCount)
+	}
+}
+
+// TestTailerOffsetAdvancesPastSkippedLines verifies that the saved offset
+// reflects every line the parser scanned, not just lines that produced a
+// usage event. Otherwise non-usage and malformed lines would be re-read on
+// every pass.
+func TestTailerOffsetAdvancesPastSkippedLines(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+	tailer := NewTailer(tmpDir, s, make(PriceTable))
+	transcriptPath := filepath.Join(tmpDir, "session-mixed.jsonl")
+
+	// Mix of valid-usage, non-usage, and malformed lines.
+	lines := []string{
+		`{"type":"user","content":"hello"}`,
+		`malformed json line`,
+		`{"type":"assistant","session_id":"s1","message_id":"m1","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"user","content":"more"}`,
+		`{"type":"assistant","session_id":"s1","message_id":"m2","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":200,"output_tokens":100}}`,
+	}
+	content := strings.Join(lines, "\n") + "\n"
+
+	if err := os.WriteFile(transcriptPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	tailer.processFile(transcriptPath)
+
+	// Offset must equal full file size so subsequent calls don't reprocess
+	// the non-usage and malformed lines.
+	tailer.offsetMu.Lock()
+	offset := tailer.offsets[transcriptPath]
+	tailer.offsetMu.Unlock()
+	if offset != int64(len(content)) {
+		t.Errorf("expected offset %d (full file), got %d", len(content), offset)
+	}
+
+	// Append more content; only the appended event should be ingested.
+	appended := `{"type":"assistant","session_id":"s1","message_id":"m3","timestamp":"2026-04-26T10:02:00Z","usage":{"input_tokens":300,"output_tokens":150}}` + "\n"
+	f, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("failed to open for append: %v", err)
+	}
+	if _, err := f.WriteString(appended); err != nil {
+		t.Fatalf("failed to append: %v", err)
+	}
+	f.Close()
+
+	tailer.processFile(transcriptPath)
+
+	var count int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM usage_events WHERE source = 'tailer'`).Scan(&count); err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	if count != 3 {
+		t.Errorf("expected 3 events total (2 initial + 1 appended), got %d", count)
+	}
+
+	tailer.offsetMu.Lock()
+	finalOffset := tailer.offsets[transcriptPath]
+	tailer.offsetMu.Unlock()
+	if finalOffset != int64(len(content)+len(appended)) {
+		t.Errorf("expected final offset %d, got %d", len(content)+len(appended), finalOffset)
 	}
 }
 
