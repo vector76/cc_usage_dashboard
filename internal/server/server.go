@@ -36,6 +36,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("POST /snapshot", srv.handleSnapshot)
 	srv.mux.HandleFunc("GET /slack", srv.handleSlackQuery)
 	srv.mux.HandleFunc("POST /slack/release", srv.handleSlackRelease)
+	srv.mux.HandleFunc("GET /discount", srv.handleDiscount)
 
 	return srv
 }
