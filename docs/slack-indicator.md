@@ -71,6 +71,11 @@ the queue is expected to apply one client-side gate of its own.
 
 3. **Baseline freshness gate.** See dedicated section below.
 
+4. **Not-paused gate.** The user can pause the slack signal from the tray menu (see
+   `docs/tray-app.md`). When paused, the endpoint still computes and returns the
+   numeric fields so dashboards keep working, but `paused: true` and the gate fails.
+   A queue distinguishing "paused" from "below threshold" can read `paused` directly.
+
 ### Client-side gate (queue's responsibility)
 
 4. **Per-job budget cap.** Each pending job has an estimated cost. The queue should
@@ -110,11 +115,13 @@ Response:
   },
   "slack_combined_fraction": 0.132,
   "priority_quiet_for_seconds": 432,
+  "paused": false,
   "release_recommended": true,
   "gates": {
     "headroom":          true,
     "priority_quiet":    true,
-    "baseline_freshness": true
+    "baseline_freshness": true,
+    "not_paused":        true
   }
 }
 ```
@@ -174,10 +181,12 @@ v1 just records the release decision.
 
 ## Failure modes
 
-| Condition                                    | Behavior                                |
-|----------------------------------------------|-----------------------------------------|
-| No baseline snapshot ever recorded           | `release_recommended=false`. Show alert.|
-| Window has not started (no events yet)       | `slack_fraction = null`, `release_recommended=false`. |
-| Negative slack on either window              | `release_recommended=false`.            |
-| Baseline drift detected                      | Freshness gate fails.                   |
-| Trayapp restart mid-window                   | Recovers from `windows` table state.    |
+| Condition                                          | Behavior                                |
+|----------------------------------------------------|-----------------------------------------|
+| `GET /slack`: no baseline snapshot ever recorded   | `release_recommended=false`. Show alert.|
+| `GET /slack`: window has not started (no events)   | `slack_fraction = null`, `release_recommended=false`. |
+| `GET /slack`: negative slack on either window      | `release_recommended=false`.            |
+| `GET /slack`: baseline drift detected              | Freshness gate fails.                   |
+| Either endpoint: trayapp restart mid-window        | Recovers from `windows` table state.    |
+| `POST /slack/release`: no window of requested kind | HTTP 409. Queue should not have called `/release` if the corresponding `GET /slack` reported `release_recommended=false`; this catches the misuse. |
+| `POST /slack/release`: required field missing      | HTTP 400.                               |
