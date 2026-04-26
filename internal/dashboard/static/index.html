@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Claude Usage Dashboard</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 1rem; background: #fafafa; color: #222; }
+  h1 { margin: 0 0 1rem 0; font-size: 1.4rem; }
+  h2 { margin-top: 0; font-size: 1.1rem; }
+  h3 { margin: 0 0 0.5rem 0; font-size: 0.95rem; color: #444; }
+  section { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 4px; }
+  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
+  .kv { display: grid; grid-template-columns: max-content auto; column-gap: 1rem; row-gap: 0.25rem; margin: 0; }
+  .kv dt { color: #666; }
+  .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .alert { color: #c00; font-weight: bold; }
+  .ok { color: #060; }
+  .muted { color: #888; }
+  svg { width: 100%; height: auto; display: block; }
+</style>
+</head>
+<body>
+<h1>Claude Usage Dashboard</h1>
+
+<section id="status">
+  <h2>Status</h2>
+  <dl class="kv" id="status-kv"><dd class="muted">Loading…</dd></dl>
+</section>
+
+<section>
+  <h2>Burn-down</h2>
+  <div class="charts">
+    <div>
+      <h3>5-hour window</h3>
+      <svg id="chart-five-hour" viewBox="0 0 400 160" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div>
+      <h3>Weekly window</h3>
+      <svg id="chart-weekly" viewBox="0 0 400 160" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+  </div>
+</section>
+
+<section id="discount">
+  <h2>Discount (last 24h)</h2>
+  <dl class="kv" id="discount-kv"><dd class="muted">Loading…</dd></dl>
+</section>
+
+<script>
+function fmt(x, d) {
+  if (x == null || (typeof x === "number" && !isFinite(x))) return "—";
+  return Number(x).toFixed(d == null ? 2 : d);
+}
+function fmtTime(s) { return s ? new Date(s).toLocaleString() : "—"; }
+function el(tag, attrs, text) {
+  const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+function renderStatus(s) {
+  const kv = document.getElementById("status-kv");
+  const lines = [];
+  lines.push(["Now", fmtTime(s.now)]);
+  lines.push(["Last snapshot age", s.last_snapshot_age_seconds == null ? "no snapshots yet" : fmt(s.last_snapshot_age_seconds, 0) + " s"]);
+  lines.push(["Parse errors (24h)", s.parse_errors_24h]);
+  lines.push(["Paused", s.paused ? "yes" : "no"]);
+  let driftHTML;
+  if (s.drift == null) {
+    driftHTML = "—";
+  } else {
+    const cls = s.drift_alert ? "alert" : "ok";
+    driftHTML = '<span class="' + cls + '">' + fmt(s.drift, 4) + (s.drift_alert ? " (alert)" : "") + "</span>";
+  }
+  lines.push(["Drift (5h)", driftHTML]);
+  kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
+}
+
+function renderBurnDown(svgID, win) {
+  const svg = document.getElementById(svgID);
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const W = 400, H = 160, P = 32;
+  if (!win) {
+    svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "No active window"));
+    return;
+  }
+  if (win.baseline_total == null) {
+    svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "No baseline"));
+    return;
+  }
+  const start = new Date(win.started_at).getTime();
+  const end = new Date(win.ends_at).getTime();
+  const Q = Math.max(win.baseline_total, win.consumed || 0, 1e-9);
+  const sx = function (t) { return P + (W - 2 * P) * (t - start) / (end - start); };
+  const sy = function (v) { return H - P - (H - 2 * P) * v / Q; };
+
+  // axes
+  svg.appendChild(el("line", { x1: P, y1: H - P, x2: W - P, y2: H - P, stroke: "#444" }));
+  svg.appendChild(el("line", { x1: P, y1: P, x2: P, y2: H - P, stroke: "#444" }));
+
+  // baseline pace line: (start, 0) → (end, Q)
+  svg.appendChild(el("line", {
+    x1: sx(start), y1: sy(0), x2: sx(end), y2: sy(win.baseline_total),
+    stroke: "#888", "stroke-dasharray": "3 3"
+  }));
+
+  // consumed line up to "now"
+  const now = Date.now();
+  const tNow = Math.min(Math.max(now, start), end);
+  const consumed = win.consumed || 0;
+  svg.appendChild(el("line", {
+    x1: sx(start), y1: sy(0), x2: sx(tNow), y2: sy(consumed),
+    stroke: "#06c", "stroke-width": "2"
+  }));
+  svg.appendChild(el("circle", { cx: sx(tNow), cy: sy(consumed), r: "4", fill: "#06c" }));
+
+  // labels
+  svg.appendChild(el("text", { x: P, y: H - 8, "font-size": "10", fill: "#444" }, "start"));
+  svg.appendChild(el("text", { x: W - P, y: H - 8, "font-size": "10", fill: "#444", "text-anchor": "end" }, "end"));
+  svg.appendChild(el("text", { x: 4, y: P + 4, "font-size": "10", fill: "#444" }, "$" + fmt(win.baseline_total)));
+  svg.appendChild(el("text", { x: 4, y: H - P, "font-size": "10", fill: "#444" }, "$0"));
+  svg.appendChild(el("text", {
+    x: sx(tNow), y: sy(consumed) - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+  }, "$" + fmt(consumed)));
+}
+
+function renderDiscount(d) {
+  const kv = document.getElementById("discount-kv");
+  if (!d || d.error) { kv.innerHTML = '<dd class="muted">unavailable</dd>'; return; }
+  const lines = [];
+  lines.push(["Period", d.period]);
+  lines.push(["Consumed (USD eq.)", "$" + fmt(d.consumed_usd_equivalent)]);
+  lines.push(["Subscription prorated", "$" + fmt(d.subscription_cost_prorated_usd)]);
+  lines.push(["Savings", "$" + fmt(d.savings_usd)]);
+  lines.push(["Value ratio", fmt(d.value_ratio)]);
+  lines.push(["Discount %", d.discount_pct == null ? "—" : fmt(d.discount_pct) + "%"]);
+  lines.push(["Cost coverage", fmt(d.cost_coverage_pct) + "%"]);
+  lines.push(["Events (total / reported / computed / none)",
+    d.events_total + " / " + d.events_with_reported_cost + " / " + d.events_with_computed_cost + " / " + d.events_without_cost]);
+  kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
+}
+
+async function refresh() {
+  try {
+    const sResp = await fetch("/api/dashboard/state");
+    const s = await sResp.json();
+    renderStatus(s);
+    renderBurnDown("chart-five-hour", s.five_hour);
+    renderBurnDown("chart-weekly", s.weekly);
+  } catch (e) { console.error("state error", e); }
+  try {
+    const dResp = await fetch("/discount?period=24h");
+    const d = await dResp.json();
+    renderDiscount(d);
+  } catch (e) { console.error("discount error", e); }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

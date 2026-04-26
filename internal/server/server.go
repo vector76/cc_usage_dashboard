@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/anthropics/usage-dashboard/internal/config"
+	"github.com/anthropics/usage-dashboard/internal/dashboard"
 	"github.com/anthropics/usage-dashboard/internal/ingest"
 	"github.com/anthropics/usage-dashboard/internal/slack"
 	"github.com/anthropics/usage-dashboard/internal/store"
@@ -23,6 +24,7 @@ type Server struct {
 	metrics *Metrics
 	slackCalc *slack.Calculator
 	windowsEngine *windows.Engine
+	dashboardHandler *dashboard.Handler
 }
 
 // New creates a new HTTP server.
@@ -42,6 +44,16 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		windowsEngine: windows.NewEngine(s.DB()),
 	}
 
+	dh, err := dashboard.NewHandler(s, srv.slackCalc, srv.windowsEngine, cfg.Slack.BaselineDriftThreshold)
+	if err != nil {
+		// Embedded asset failure is a build-time error in practice; fall back to
+		// nil handler so the rest of the server still starts. The dashboard
+		// routes simply won't be registered.
+		slog.Error("failed to initialize dashboard handler", "err", err)
+	} else {
+		srv.dashboardHandler = dh
+	}
+
 	// Register handlers
 	srv.mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	srv.mux.HandleFunc("POST /log", srv.handleLog)
@@ -51,6 +63,9 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("POST /slack/release", srv.handleSlackRelease)
 	srv.mux.HandleFunc("GET /discount", srv.handleDiscount)
 	srv.mux.HandleFunc("GET /metrics", srv.handleMetrics)
+	if srv.dashboardHandler != nil {
+		srv.dashboardHandler.Register(srv.mux)
+	}
 
 	return srv
 }

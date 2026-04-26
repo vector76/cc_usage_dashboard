@@ -66,6 +66,13 @@ func (c *Calculator) SetPaused(paused bool) {
 	c.mu.Unlock()
 }
 
+// IsPaused reports the current pause state.
+func (c *Calculator) IsPaused() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.paused
+}
+
 // GetSlack computes the current slack signal.
 func (c *Calculator) GetSlack() (*SlackResponse, error) {
 	now := time.Now().UTC()
