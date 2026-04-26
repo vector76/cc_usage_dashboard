@@ -35,3 +35,7 @@ usage.db
 usage.db-wal
 usage.db-shm
 *.log
+
+# Screenshots dropped into the repo while iterating
+Screenshot*.png
+*.screenshot.png
