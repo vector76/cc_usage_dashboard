@@ -60,9 +60,14 @@ worth?" and `discount_pct` is the conventional framing.
 - **Cache tokens skew the comparison.** Anthropic's dollar-equivalent figures may or may
   not weight cached input tokens at their actual API rate. The ratio is meaningful for
   *trend* analysis even if absolute dollars are slightly off.
-- **`cost_usd_equivalent` is sometimes missing** when the source did not report it. The
-  dashboard should display "X% of events have cost data" alongside the ratio so the user
-  knows how much extrapolation is happening.
+- **Computed-cost share matters.** Many events have `cost_source = 'computed'` (we
+  derived cost from tokens × price table because the source didn't report). Computed
+  cost is only as accurate as the price table, which is hand-maintained. The API
+  exposes `events_with_reported_cost` and `events_with_computed_cost` separately so
+  the user can see how much of the ratio is our estimate vs. Anthropic's number.
+- **Events with unknown model** can't be costed at all (no price-table entry) and
+  appear as `cost_usd_equivalent = NULL`. These are excluded from `D` and counted in
+  `events_without_cost`.
 - **Subscription proration is approximate.** A user who happens to do all their work on
   weekends will see misleadingly high discount ratios on weekday samples. Default to
   computing over windows of at least 7 days for stable ratios; show shorter windows with
@@ -87,7 +92,9 @@ Response:
   "discount_pct": 85.1,
   "savings_usd": 265.73,
   "events_total": 1283,
-  "events_with_cost": 1180,
+  "events_with_reported_cost": 612,
+  "events_with_computed_cost": 568,
+  "events_without_cost": 103,
   "cost_coverage_pct": 92.0
 }
 ```

@@ -137,9 +137,40 @@ deferred. They don't change the architecture — only the body of `E(t)`.
 
 ## Slack consumption logging
 
-When a queue caller releases a job, it should include the job tag in a `POST /slack/release`
-call. The trayapp records the release in `slack_log` so the dashboard can show "free work
-done this week" and tune thresholds based on actuals.
+When a queue caller releases a job, it should `POST /slack/release` to record the
+decision. The trayapp writes a row to `slack_releases` so the dashboard can show
+"free work done this week" and so we can tune thresholds against actuals.
+
+Request body:
+
+```json
+{
+  "released_at": "2026-04-26T12:34:56Z",
+  "job_tag":          "nightly-lint",
+  "estimated_cost":   1.20,
+  "slack_at_release": 8.40,
+  "window_kind":      "five_hour"
+}
+```
+
+- `released_at`: when the queue made the decision (the trayapp also records its own
+  `received_at`, so clock skew is observable).
+- `job_tag`: free-form identifier for the job; goes to `slack_releases.job_tag`.
+- `estimated_cost`: the queue's estimate in dollar-equivalent units. Lets us audit
+  the per-job budget cap retrospectively.
+- `slack_at_release`: the absolute slack value the queue saw on the preceding `GET
+  /slack`. Detects races where slack changed between the query and the release.
+- `window_kind`: which window the queue was sizing against (`five_hour` | `weekly`).
+  Optional; defaults to `five_hour` since that's the binding window most of the time.
+  The trayapp resolves this to a `windows` row at insert time, picking the window of
+  the requested `kind` that contains `released_at`. If the window rolled over between
+  `GET /slack` and `POST /slack/release` (rare but possible), the FK will point at
+  the *new* window, while `slack_at_release` still reflects the *old* window's slack;
+  this is an audit signal, not a bug — the row will show an unusually high
+  `slack_at_release` relative to the new window's quota and is easy to filter.
+
+A follow-up `POST /slack/release/<id>/complete` with `actual_cost` is deferred to v2;
+v1 just records the release decision.
 
 ## Failure modes
 

@@ -74,18 +74,33 @@ the trayapp from `usage_events` + `quota_snapshots`.
 This table exists so historical windows can be queried efficiently for charts without
 recomputing from raw events every time.
 
-### `slack_log`
+### `slack_samples`
 
 Optional: time-series of slack signal values, sampled when the slack endpoint is queried.
 Useful for tuning the queue heuristics later. Can be turned off.
 
-| Column        | Type      | Notes                                |
-|---------------|-----------|--------------------------------------|
-| id            | INTEGER PK|                                      |
-| sampled_at    | TIMESTAMP |                                      |
-| slack_fraction| REAL      | (expected − actual) / quota_total.   |
-| window_id     | INTEGER   | FK into `windows`.                   |
-| released_job  | TEXT      | Optional tag from the queue caller.  |
+| Column         | Type       | Notes                                |
+|----------------|------------|--------------------------------------|
+| id             | INTEGER PK |                                      |
+| sampled_at     | TIMESTAMP  |                                      |
+| slack_fraction | REAL       | (expected − actual) / quota_total.   |
+| window_id      | INTEGER    | FK into `windows`.                   |
+
+### `slack_releases`
+
+One row per `POST /slack/release`. Lets us audit the queue's decisions against the
+slack values we exposed at the time. Distinct from `slack_samples`: this is a discrete
+event log, not a time-series.
+
+| Column            | Type       | Notes                                            |
+|-------------------|------------|--------------------------------------------------|
+| id                | INTEGER PK |                                                  |
+| released_at       | TIMESTAMP  | Reported by the queue (its clock).               |
+| received_at       | TIMESTAMP  | When the trayapp received the POST. Skew check.  |
+| job_tag           | TEXT       | Free-form identifier the queue chose.            |
+| estimated_cost    | REAL       | Dollar-equivalent the queue expected the job to cost. |
+| slack_at_release  | REAL       | The slack value the queue saw on its prior `/slack`. |
+| window_id         | INTEGER    | FK into `windows`. Which window the queue sized against. |
 
 ### `parse_errors`
 
@@ -124,7 +139,8 @@ hand when Anthropic updates rates.
 - `usage_events`: keep forever. Volume is small (KB/day at most).
 - `quota_snapshots`: keep forever.
 - `windows`: keep forever.
-- `slack_log`: optional, default off. If on, retain 90 days.
+- `slack_samples`: optional, default off. If on, retain 90 days.
+- `slack_releases`: keep forever. Volume is tiny (one row per released job).
 - `parse_errors`: retain 30 days, with a count-only summary kept indefinitely.
 
 ## Migrations

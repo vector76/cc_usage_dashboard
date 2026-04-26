@@ -21,7 +21,7 @@ and no cross-machine state.
 |  |    POST /slack/release    <- queue reports a released job              ||
 |  |    GET  /slack            <- current slack signal (for external queue) ||
 |  |    GET  /discount         <- effective-discount summary                ||
-|  |    GET  /healthz          <- liveness                                 ||
+|  |    GET  /healthz          <- liveness                                  ||
 |  |    GET  /metrics          <- counters                                  ||
 |  |    GET  /dashboard        <- HTML/JS UI                                ||
 |  |                                                                        ||

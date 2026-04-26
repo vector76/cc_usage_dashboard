@@ -36,7 +36,7 @@ token usage to the host server.
 |   [Tray app: Go .exe]   <----- HTTP -----   [Containers: Linux CLI]   |
 |     - HTTP server                                                     |
 |     - SQLite DB                                                       |
-|     - tail of ~/.claude session JSONL (primary data source)           |
+|     - passive ingest: ~/.claude JSONL tail + container Stop hooks     |
 |     - tray UI (status, slack indicator)                               |
 |     - dashboard (served from same process at http://localhost:PORT)   |
 |                                                                       |
