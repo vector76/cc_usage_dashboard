@@ -92,11 +92,14 @@ func TestProcessHookInputFlow(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Build a transcript with two assistant messages and one user message
-	// (the user message must be skipped).
-	transcript := `{"type":"assistant","session_id":"sess-1","message_id":"msg-1","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":100,"output_tokens":50}}
-{"type":"user","session_id":"sess-1","content":"hi"}
-{"type":"assistant","session_id":"sess-1","message_id":"msg-2","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":200,"output_tokens":120,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}
+	// Real Claude Code transcripts have sessionId (camelCase) at the top
+	// level and nest model/id/usage under a "message" object. The earlier
+	// fixture used a flat snake_case schema that never existed in practice;
+	// keeping the test honest is what catches regressions like the one
+	// where every line was silently skipped because msgMap["usage"] was nil.
+	transcript := `{"type":"assistant","sessionId":"sess-1","message":{"id":"msg-1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":50}}}
+{"type":"user","sessionId":"sess-1","message":{"content":"hi"}}
+{"type":"assistant","sessionId":"sess-1","message":{"id":"msg-2","model":"claude-sonnet-4-6","usage":{"input_tokens":200,"output_tokens":120,"cache_creation_input_tokens":10,"cache_read_input_tokens":5}}}
 `
 
 	// Write the transcript under a projects/<encoded>/<file>.jsonl layout

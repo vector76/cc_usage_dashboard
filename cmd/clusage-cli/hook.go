@@ -49,19 +49,28 @@ func processHookInput(stdin io.Reader, hostURL string) {
 		}
 
 		// Parse the line as JSON to extract usage information
-		var msgMap map[string]interface{}
-		if err := json.Unmarshal(line, &msgMap); err != nil {
+		var record map[string]interface{}
+		if err := json.Unmarshal(line, &record); err != nil {
 			// Skip malformed lines
 			continue
 		}
 
-		// Only process assistant messages with usage
-		msgType, ok := msgMap["type"].(string)
+		// Only process assistant messages.
+		msgType, ok := record["type"].(string)
 		if !ok || msgType != "assistant" {
 			continue
 		}
 
-		usage, ok := msgMap["usage"].(map[string]interface{})
+		// Real Claude Code transcripts nest model/id/usage under a top-level
+		// "message" object, with "sessionId" (camelCase) as a sibling. The
+		// initial parser was written against a mock schema that didn't match
+		// any real transcript, so every line was silently skipped.
+		msg, ok := record["message"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		usage, ok := msg["usage"].(map[string]interface{})
 		if !ok {
 			continue
 		}
@@ -84,13 +93,13 @@ func processHookInput(stdin io.Reader, hostURL string) {
 		}
 
 		// Add optional fields if present
-		if sessionID, ok := msgMap["session_id"].(string); ok {
+		if sessionID, ok := record["sessionId"].(string); ok {
 			eventPayload["session_id"] = sessionID
 		}
-		if messageID, ok := msgMap["message_id"].(string); ok {
+		if messageID, ok := msg["id"].(string); ok {
 			eventPayload["message_id"] = messageID
 		}
-		if model, ok := msgMap["model"].(string); ok {
+		if model, ok := msg["model"].(string); ok {
 			eventPayload["model"] = model
 		}
 
