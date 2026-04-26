@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/usage-dashboard/internal/config"
-	"github.com/anthropics/usage-dashboard/internal/server"
-	"github.com/anthropics/usage-dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/config"
+	"github.com/vector76/cc_usage_dashboard/internal/server"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 // TestMain pins the package's local time zone to UTC. The server (and the

@@ -6,7 +6,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/anthropics/usage-dashboard/internal/server"
+	"github.com/vector76/cc_usage_dashboard/internal/server"
 )
 
 // StartTray is the non-Windows no-op implementation of the tray UI. The

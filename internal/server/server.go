@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/anthropics/usage-dashboard/internal/config"
-	"github.com/anthropics/usage-dashboard/internal/dashboard"
-	"github.com/anthropics/usage-dashboard/internal/ingest"
-	"github.com/anthropics/usage-dashboard/internal/slack"
-	"github.com/anthropics/usage-dashboard/internal/store"
-	"github.com/anthropics/usage-dashboard/internal/windows"
+	"github.com/vector76/cc_usage_dashboard/internal/config"
+	"github.com/vector76/cc_usage_dashboard/internal/dashboard"
+	"github.com/vector76/cc_usage_dashboard/internal/ingest"
+	"github.com/vector76/cc_usage_dashboard/internal/slack"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/windows"
 )
 
 // TailerStatus reports whether the tailer has caught up with all known

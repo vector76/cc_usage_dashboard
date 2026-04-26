@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/anthropics/usage-dashboard/internal/discount"
+	"github.com/vector76/cc_usage_dashboard/internal/discount"
 )
 
 // handleDiscount processes GET /discount requests.

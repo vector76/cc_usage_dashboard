@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/anthropics/usage-dashboard/internal/slack"
+	"github.com/vector76/cc_usage_dashboard/internal/slack"
 )
 
 // ReleaseRequest represents a POST /slack/release payload.

@@ -12,9 +12,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/anthropics/usage-dashboard/internal/slack"
-	"github.com/anthropics/usage-dashboard/internal/store"
-	"github.com/anthropics/usage-dashboard/internal/windows"
+	"github.com/vector76/cc_usage_dashboard/internal/slack"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/windows"
 )
 
 //go:embed static

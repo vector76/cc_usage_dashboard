@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anthropics/usage-dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 func TestIsTranscriptFile(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/usage-dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 	_ "github.com/mattn/go-sqlite3"
 )
 

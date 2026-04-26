@@ -2,30 +2,28 @@
 
 A self-hosted tool to track, visualize, and exploit your Claude Code subscription usage.
 
-## Why this exists
+## What it does
 
 Anthropic's Claude Code subscription enforces two rolling quotas:
 
 - A **5-hour rolling window** that begins on first use after a reset.
 - A **weekly quota** that caps total usage across all 5-hour windows.
 
-The official UI shows a current point-in-time view, but does not let you:
+The official UI shows a current point-in-time view. This project adds:
 
-- See the **history** of usage (how fast did you burn through the last window?).
-- Track the **effective discount** of the subscription (tokens billed at API-equivalent
-  dollar amounts vs. what the subscription actually costs).
-- Detect **slack** — when you are under-utilizing your allocation and have "free" capacity
-  that will otherwise expire at the window boundary.
-- Trigger **low-priority background jobs** opportunistically when slack is available.
+- **History** — burn-down charts for both the 5-hour and weekly windows.
+- **Effective discount** — what your subscription actually costs vs. the API-equivalent
+  dollar value of the tokens you ran through it.
+- **Slack signal** — when you are under-utilizing your allocation, an HTTP endpoint
+  surfaces the unused capacity that would otherwise expire at the window boundary, so a
+  job queue can opportunistically run cheap-but-not-worth-real-money work for free.
 
-This project records usage continuously, renders burn-down charts for both the 5-hour and
-weekly windows, computes effective discount, and exposes a slack signal that a job queue
-can consume to run cheap-but-not-worth-real-money work for free.
+## How it works
 
-## High-level architecture
-
-Single Windows host, no online backend. Docker containers on the same host POST per-invocation
-token usage to the host server.
+The trayapp is the server, the database (SQLite), and the dashboard, all in one Go binary
+that lives in your system tray. It tails Claude Code's session JSONL files in
+`~/.claude/projects/`, and also accepts HTTP POSTs from container-side Stop hooks and
+from a browser userscript.
 
 ```
 +---------------------------- Windows host -----------------------------+
@@ -38,124 +36,100 @@ token usage to the host server.
 |     - SQLite DB                                                       |
 |     - passive ingest: ~/.claude JSONL tail + container Stop hooks     |
 |     - tray UI (status, slack indicator)                               |
-|     - dashboard (served from same process at http://localhost:PORT)   |
+|     - dashboard (served from same process at http://localhost:27812)  |
 |                                                                       |
 +-----------------------------------------------------------------------+
 ```
 
-Containers reach the host via `host.docker.internal:PORT`. The trayapp binds `127.0.0.1`
-plus whichever local interface `host.docker.internal` resolves into (auto-detected at
-startup, since this varies between Docker Desktop on Windows, WSL, and native Linux).
-See `docs/architecture.md` for the precise binding strategy and the fallback rules.
+Containers reach the host via `host.docker.internal:27812`. See `docs/architecture.md`
+for binding details and `docs/data-sources.md` for the ingest tiers.
 
-## Data sources, in priority order
+## Getting started — Windows
 
-1. **Passive observation (primary).** Two paths, same tier:
-   - *Host JSONL tailing* — the trayapp tails Claude Code's session JSONL files in
-     `~/.claude/projects/`. Sees host sessions and any container that bind-mounts
-     `~/.claude`.
-   - *Container Stop hook* — a CLI Stop hook in containers without a shared
-     `~/.claude` POSTs the same per-message usage to the host. Same dedup key, same
-     "passive" property: never perturbs the quota.
-2. **Userscript snapshots (anchor).** Tampermonkey/Violentmonkey on `claude.ai/*`
-   posts the dashboard's reported quota numbers whenever the page is open. Used to
-   set/correct the baseline that Tier 1 burns down from.
-3. **Headless scrape (escalation only).** Playwright using a copy of the Chrome
-   profile, only if Tiers 1+2 drift in practice. Not built unless needed.
+The trayapp uses CGO for the system-tray integration, so you need a C toolchain on
+`PATH` before building. Either of these works:
 
-`clusage` (the existing CLI) is **not** used for automated polling because it triggers a
-new 5-hour window on cold start and would perturb what it measures. It remains useful for
-manual on-demand reads.
+- [TDM-GCC](https://jmeubank.github.io/tdm-gcc/)
+- [MSYS2](https://www.msys2.org/) with the `mingw-w64-x86_64-gcc` package
 
-## Components
+You also need [Go 1.26.2 or newer](https://go.dev/dl/).
 
-| Component         | Language | Runs on        | Purpose                                |
-|-------------------|----------|----------------|----------------------------------------|
-| Tray app + server | Go       | Windows host   | DB, HTTP API, dashboard, tray UI, in-process JSONL tailer |
-| Container CLI     | Go       | Linux (Docker) | POSTs token usage to host (Stop hook)  |
-| Userscript        | JS       | Browser        | Posts dashboard snapshots to host      |
-
-The tray app and CLI are built from the same Go module with different build targets.
-The session log tailer is a goroutine inside the tray app, not a separate binary.
-
-## Repository layout (planned)
-
-```
-.
-├── README.md                     # this file
-├── docs/                         # design docs
-│   ├── overview.md
-│   ├── architecture.md
-│   ├── data-sources.md
-│   ├── data-model.md
-│   ├── slack-indicator.md
-│   ├── discount-calculation.md
-│   ├── roadmap.md
-│   ├── tray-app.md
-│   ├── container-cli.md
-│   ├── userscript.md
-│   ├── design-decisions.md
-│   └── test-plan.md
-├── cmd/
-│   ├── trayapp/                  # Windows tray + server binary
-│   └── cli/                      # Linux container CLI
-├── internal/
-│   ├── store/                    # SQLite schema, queries
-│   ├── ingest/                   # session JSONL tailer, HTTP handlers
-│   ├── slack/                    # slack-indicator math
-│   └── dashboard/                # HTML/JS for the local dashboard
-├── userscript/
-│   └── claude-usage-snapshot.user.js
-├── config/
-│   └── prices.example.yaml       # model price table for cost computation
-└── go.mod
-```
-
-## Quick start (intended end state)
+### Option A — install with `go install`
 
 ```powershell
-# On the Windows host: starts server + tray icon, autostarts on logon
+go install github.com/vector76/cc_usage_dashboard/cmd/trayapp@latest
+```
+
+The binary lands in `%USERPROFILE%\go\bin\trayapp.exe`. Run it directly:
+
+```powershell
+& "$env:USERPROFILE\go\bin\trayapp.exe"
+```
+
+### Option B — clone and build from source
+
+Useful if you want to read or modify the code. No `make` required.
+
+```powershell
+git clone https://github.com/vector76/cc_usage_dashboard.git
+cd cc_usage_dashboard
+go build -ldflags="-H=windowsgui" -o trayapp.exe .\cmd\trayapp
 .\trayapp.exe
 ```
 
-```bash
-# In a Linux dev container: install the Stop hook once, then activity is logged
-# automatically. ~/.claude/settings.json:
-#   "Stop": [{ "hooks": [{ "type": "command", "command": "clusage-cli log --from-hook || true" }] }]
+The `-H=windowsgui` flag suppresses the console window so the app runs purely in the tray.
 
-# Or, for ad-hoc tests:
-clusage-cli log --input-tokens 1234 --output-tokens 567 --cost-usd 0.0123
+### Autostart on logon
+
+Once you have a `trayapp.exe` built, the included PowerShell script registers a per-user
+Task Scheduler entry that launches it at logon and bootstraps a default `prices.yaml` in
+`%APPDATA%\usage_dashboard\`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-The dashboard is then visible at `http://localhost:PORT` on the host.
+If `trayapp.exe` is not next to `install.ps1` (e.g. you used `go install` and it is in
+`%USERPROFILE%\go\bin\`), pass its location:
 
-## Status
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -ExePath "$env:USERPROFILE\go\bin\trayapp.exe"
+```
 
-**Phase 0-8 complete on Linux.** All code paths build and the full Go suite
-is green via `make test`. The Windows tray UI ships as a scaffold: the menu
-items, install path, and the Pause/Quit handlers are wired; the Open
-dashboard / About / Status submenu / icon color-state handlers are
-deliberate TODO stubs. Windows manual verification — including those
-deferred items — is tracked in `docs/test-plan.md`.
+### Confirming it works
 
-- ✅ **Phase 0-1**: Skeleton, persistence layer with all v1 tables
-- ✅ **Phase 2**: HTTP server, `/log` handler, cost resolution, CLI Mode A
-- ✅ **Phase 3**: Transcript parser, host tailer with fsnotify, CLI Mode B (hook mode)
-- ✅ **Phase 4**: Snapshots, windows engine, baseline derivation
-- ✅ **Phase 5**: Slack signal (`GET /slack`, `POST /slack/release`), release logging
-- ✅ **Phase 6**: Discount calculation, `/discount` endpoint
-- ✅ **Phase 7**: Tray UI scaffold (`fyne.io/systray`, build-tagged) with
-  Pause/Quit wired and other menu items as TODO stubs, config with
-  `%APPDATA%` resolution, rotating log file, graceful shutdown,
-  `install.ps1` autostart
-- ✅ **Phase 8**: End-to-end Go integration suite
-  (`internal/integration/e2e_test.go`), userscript
-  (`userscript/claude-usage-snapshot.user.js`)
+The dashboard is served from the same process at <http://localhost:27812>. Open it in a
+browser to confirm the trayapp is running and to see live usage.
 
-See `IMPLEMENTATION_STATUS.md` for component-by-component status,
-`docs/roadmap.md` for build-order rationale, `docs/design-decisions.md` for
-key decisions (transient pause state, build-tag isolation), and
-`docs/test-plan.md` for the Linux/Windows verification matrix.
+## Container CLI (optional)
+
+If you run Claude Code inside dev containers that don't bind-mount `~/.claude`, install
+the CLI in the container so its Stop hook POSTs per-message usage to the host:
+
+```bash
+go install github.com/vector76/cc_usage_dashboard/cmd/cli@latest
+
+# Wire it into ~/.claude/settings.json:
+#   "Stop": [{ "hooks": [{ "type": "command", "command": "cli log --from-hook || true" }] }]
+```
+
+For ad-hoc tests:
+
+```bash
+cli log --input-tokens 1234 --output-tokens 567 --cost-usd 0.0123
+```
+
+## Building on Linux
+
+The `Makefile` is the convenience entry point on Linux:
+
+```bash
+make build-trayapp   # headless server-mode binary
+make build-cli       # container CLI
+make test            # full Go test suite
+```
+
+The trayapp's tray UI is Windows-only; on Linux it builds as a headless server.
 
 ## Userscript installation
 
@@ -177,10 +151,7 @@ See `userscript/README.md` for troubleshooting and `docs/userscript.md` for
 the snapshot payload schema and the rationale (mixed content, CORS, Private
 Network Access).
 
-## Why no online backend
+## Documentation
 
-The user has exactly one always-on host (Windows desktop) which is the only place with
-a logged-in browser. Containers already need to reach this host. Adding a hosted DB
-would mean auth, hosting cost, sync logic, and a second source of truth for no added
-capability. If the deployment ever needs to span machines, the local HTTP API can be
-exposed via a Cloudflare tunnel without schema changes.
+Design and architecture docs live in [`docs/`](docs/) — start with `docs/overview.md`
+and `docs/architecture.md`.

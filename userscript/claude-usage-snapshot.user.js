@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
-// @namespace    https://github.com/anthropics/usage-dashboard
+// @namespace    https://github.com/vector76/cc_usage_dashboard
 // @version      0.1.0
 // @description  Reads quota numbers from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
@@ -8,8 +8,8 @@
 // @grant        GM.xmlHttpRequest
 // @connect      localhost
 // @connect      127.0.0.1
-// @updateURL    https://raw.githubusercontent.com/anthropics/usage-dashboard/main/userscript/claude-usage-snapshot.user.js
-// @downloadURL  https://raw.githubusercontent.com/anthropics/usage-dashboard/main/userscript/claude-usage-snapshot.user.js
+// @updateURL    https://raw.githubusercontent.com/vector76/cc_usage_dashboard/main/userscript/claude-usage-snapshot.user.js
+// @downloadURL  https://raw.githubusercontent.com/vector76/cc_usage_dashboard/main/userscript/claude-usage-snapshot.user.js
 // @run-at       document-idle
 // ==/UserScript==
 

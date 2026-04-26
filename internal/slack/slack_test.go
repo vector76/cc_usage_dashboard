@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/usage-dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 func newCalc(t *testing.T) (*Calculator, *store.Store) {

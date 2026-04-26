@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/usage-dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 // fixedNow returns a clock anchored at the given time, ignoring the

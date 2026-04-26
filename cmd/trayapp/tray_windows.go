@@ -8,7 +8,7 @@ import (
 
 	"fyne.io/systray"
 
-	"github.com/anthropics/usage-dashboard/internal/server"
+	"github.com/vector76/cc_usage_dashboard/internal/server"
 )
 
 // StartTray runs the Windows systray UI. It blocks until ctx is cancelled

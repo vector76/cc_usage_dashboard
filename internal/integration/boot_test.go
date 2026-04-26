@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/anthropics/usage-dashboard/internal/config"
-	"github.com/anthropics/usage-dashboard/internal/ingest"
-	"github.com/anthropics/usage-dashboard/internal/server"
-	"github.com/anthropics/usage-dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/config"
+	"github.com/vector76/cc_usage_dashboard/internal/ingest"
+	"github.com/vector76/cc_usage_dashboard/internal/server"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 // TestBootLoopsStartAndStopCleanly mirrors what cmd/trayapp/main does for the

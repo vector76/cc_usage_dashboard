@@ -1,4 +1,4 @@
-module github.com/anthropics/usage-dashboard
+module github.com/vector76/cc_usage_dashboard
 
 go 1.26.2
 
