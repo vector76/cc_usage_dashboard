@@ -5,7 +5,6 @@ package main
 import (
 	"bytes"
 	"context"
-	_ "embed"
 	"encoding/binary"
 	"fmt"
 	"image/png"
@@ -14,11 +13,9 @@ import (
 
 	"fyne.io/systray"
 
+	"github.com/vector76/cc_usage_dashboard/internal/icon"
 	"github.com/vector76/cc_usage_dashboard/internal/server"
 )
-
-//go:embed claude_clock.png
-var iconPNG []byte
 
 // StartTray runs the Windows systray UI. It blocks until ctx is cancelled
 // or the user picks Quit, at which point it tears down the tray and
@@ -26,11 +23,11 @@ var iconPNG []byte
 // should launch in the user's default browser.
 func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle() }, dashboardURL string) {
 	onReady := func() {
-		icon, err := buildTrayIcon(iconPNG)
+		ico, err := buildTrayIcon(icon.PNG)
 		if err != nil {
 			slog.Warn("tray: icon build failed; tray will appear without an icon", "err", err)
 		} else {
-			systray.SetIcon(icon)
+			systray.SetIcon(ico)
 		}
 		systray.SetTitle("Claude Usage")
 		systray.SetTooltip("Claude Usage Dashboard")

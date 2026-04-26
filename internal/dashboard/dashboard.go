@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/vector76/cc_usage_dashboard/internal/icon"
 	"github.com/vector76/cc_usage_dashboard/internal/slack"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 	"github.com/vector76/cc_usage_dashboard/internal/windows"
@@ -87,6 +88,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", h.handleIndex)
 	mux.HandleFunc("GET /dashboard", h.handleIndex)
 	mux.HandleFunc("GET /api/dashboard/state", h.handleState)
+	mux.HandleFunc("GET /favicon.png", h.handleFavicon)
+	mux.HandleFunc("GET /favicon.ico", h.handleFavicon)
+}
+
+func (h *Handler) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.WriteHeader(http.StatusOK)
+	w.Write(icon.PNG)
 }
 
 func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
