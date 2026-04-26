@@ -190,6 +190,31 @@ func (s *Store) GetTailerOffset(filePath string) (int64, error) {
 	return offset, nil
 }
 
+// LoadAllTailerOffsets returns every persisted (file_path -> byte_offset)
+// entry. Used by the tailer at startup to populate its in-memory map so
+// previously-tracked files resume at the correct position.
+func (s *Store) LoadAllTailerOffsets() (map[string]int64, error) {
+	rows, err := s.db.Query("SELECT file_path, byte_offset FROM tailer_offsets")
+	if err != nil {
+		return nil, fmt.Errorf("failed to load tailer offsets: %w", err)
+	}
+	defer rows.Close()
+
+	offsets := make(map[string]int64)
+	for rows.Next() {
+		var path string
+		var offset int64
+		if err := rows.Scan(&path, &offset); err != nil {
+			return nil, fmt.Errorf("failed to scan tailer offset row: %w", err)
+		}
+		offsets[path] = offset
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate tailer offsets: %w", err)
+	}
+	return offsets, nil
+}
+
 // SetTailerOffset records the byte offset for a transcript file.
 func (s *Store) SetTailerOffset(filePath string, offset int64) error {
 	_, err := s.db.Exec(`

@@ -39,7 +39,24 @@ func NewTailer(projectsDir string, s *store.Store, pt PriceTable) *Tailer {
 
 // Start begins watching for transcript changes (runs in a goroutine).
 func (t *Tailer) Start() {
+	t.loadPersistedOffsets()
 	go t.run()
+}
+
+// loadPersistedOffsets pre-populates the in-memory offset map from the
+// database so previously-tracked files resume at their last persisted
+// position rather than being re-read from the beginning.
+func (t *Tailer) loadPersistedOffsets() {
+	persisted, err := t.store.LoadAllTailerOffsets()
+	if err != nil {
+		slog.Warn("failed to load persisted tailer offsets", "err", err)
+		return
+	}
+	t.offsetMu.Lock()
+	for path, offset := range persisted {
+		t.offsets[path] = offset
+	}
+	t.offsetMu.Unlock()
 }
 
 // Stop stops the tailer.
@@ -171,7 +188,10 @@ func (t *Tailer) handleFileChange(filePath string) {
 // processFile reads new content from a transcript file starting at the saved
 // offset, ingests any usage events, and advances the offset by the number of
 // bytes the parser fully consumed (complete, newline-terminated lines —
-// including malformed lines whose errors were recorded).
+// including malformed lines whose errors were recorded). Event inserts and
+// the offset advance are committed in a single SQL transaction so a crash
+// mid-batch cannot leave the file half-ingested with the offset already
+// moved past the un-inserted events.
 func (t *Tailer) processFile(filePath string) {
 	t.offsetMu.Lock()
 	offset, cached := t.offsets[filePath]
@@ -201,7 +221,7 @@ func (t *Tailer) processFile(filePath string) {
 	}
 
 	parser := NewParser(file)
-
+	var events []*ParsedEvent
 	for {
 		event, err := parser.ParseNext()
 		if err != nil {
@@ -211,7 +231,30 @@ func (t *Tailer) processFile(filePath string) {
 		if event == nil {
 			break
 		}
+		events = append(events, event)
+	}
 
+	parseErrors := parser.Errors()
+	newOffset := offset + parser.BytesConsumed()
+
+	if newOffset == offset && len(events) == 0 && len(parseErrors) == 0 {
+		return
+	}
+
+	tx, err := t.store.DB().Begin()
+	if err != nil {
+		slog.Error("failed to begin tailer transaction", "path", filePath, "err", err)
+		return
+	}
+
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	for _, event := range events {
 		cost, costSource := ResolveCost(
 			event.ReportedCost,
 			event.Model,
@@ -221,41 +264,54 @@ func (t *Tailer) processFile(filePath string) {
 			event.CacheReadTokens,
 			t.priceTable,
 		)
-
-		_, err = t.store.InsertUsageEvent(
-			event.OccurredAt,
-			"tailer",
-			event.SessionID,
-			event.MessageID,
-			event.ProjectPath,
-			event.Model,
-			event.InputTokens,
-			event.OutputTokens,
-			event.CacheCreationTokens,
-			event.CacheReadTokens,
-			cost,
-			costSource,
-			event.RawJSON,
-		)
-		if err != nil {
+		if _, err := tx.Exec(`
+			INSERT INTO usage_events (
+				occurred_at, source, session_id, message_id, project_path,
+				input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+				cost_usd_equivalent, cost_source, model, raw_json
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`, event.OccurredAt, "tailer", event.SessionID, event.MessageID, event.ProjectPath,
+			event.InputTokens, event.OutputTokens, event.CacheCreationTokens, event.CacheReadTokens,
+			cost, costSource, event.Model, event.RawJSON); err != nil {
 			slog.Error("failed to insert event", "path", filePath, "err", err)
-			t.recordParseError("tailer", filePath, fmt.Sprintf("database insert failed: %v", err), event.RawJSON)
+			if _, perr := tx.Exec(
+				`INSERT INTO parse_errors (occurred_at, source, reason, payload) VALUES (?, ?, ?, ?)`,
+				time.Now(), "tailer", fmt.Sprintf("database insert failed: %v", err), event.RawJSON,
+			); perr != nil {
+				slog.Error("failed to record insert-error", "path", filePath, "err", perr)
+			}
 		}
 	}
 
-	for _, parseErr := range parser.Errors() {
-		t.recordParseError("tailer", filePath, parseErr.Reason, parseErr.Line)
+	for _, parseErr := range parseErrors {
+		if _, err := tx.Exec(
+			`INSERT INTO parse_errors (occurred_at, source, reason, payload) VALUES (?, ?, ?, ?)`,
+			time.Now(), "tailer", parseErr.Reason, parseErr.Line,
+		); err != nil {
+			slog.Error("failed to record parse error", "path", filePath, "err", err)
+		}
 	}
 
-	newOffset := offset + parser.BytesConsumed()
+	if _, err := tx.Exec(`
+		INSERT INTO tailer_offsets (file_path, byte_offset, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(file_path) DO UPDATE SET
+			byte_offset = excluded.byte_offset,
+			updated_at = excluded.updated_at
+	`, filePath, newOffset, time.Now()); err != nil {
+		slog.Error("failed to persist tailer offset", "path", filePath, "offset", newOffset, "err", err)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		slog.Error("failed to commit tailer transaction", "path", filePath, "err", err)
+		return
+	}
+	committed = true
 
 	t.offsetMu.Lock()
 	t.offsets[filePath] = newOffset
 	t.offsetMu.Unlock()
-
-	if err := t.store.SetTailerOffset(filePath, newOffset); err != nil {
-		slog.Error("failed to persist tailer offset", "path", filePath, "offset", newOffset, "err", err)
-	}
 }
 
 // recordParseError records a parse error in the database.

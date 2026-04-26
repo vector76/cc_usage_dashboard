@@ -331,6 +331,109 @@ func TestTailerOffsetAdvancesPastSkippedLines(t *testing.T) {
 	}
 }
 
+// TestTailerRestartFromPersistedOffset simulates a process restart by
+// writing half a transcript, processing it, then constructing a brand-new
+// Tailer (with empty in-memory state) and asking it to load offsets from
+// the database before processing the appended remainder. Asserts no
+// duplicate events and no missed events across the restart boundary.
+func TestTailerRestartFromPersistedOffset(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	pt := make(PriceTable)
+
+	tmpDir := t.TempDir()
+	transcriptPath := filepath.Join(tmpDir, "session-restart.jsonl")
+
+	firstHalf := []string{
+		`{"type":"assistant","session_id":"s","message_id":"m1","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","session_id":"s","message_id":"m2","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":200,"output_tokens":100}}`,
+	}
+	firstContent := strings.Join(firstHalf, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(firstContent), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// First lifetime: process the initial half.
+	tailer1 := NewTailer(tmpDir, s, pt)
+	tailer1.processFile(transcriptPath)
+
+	persisted, err := s.GetTailerOffset(transcriptPath)
+	if err != nil {
+		t.Fatalf("failed to read persisted offset: %v", err)
+	}
+	if persisted != int64(len(firstContent)) {
+		t.Fatalf("persisted offset=%d, want %d", persisted, len(firstContent))
+	}
+
+	// Append the remainder while the "process" is "down".
+	secondHalf := []string{
+		`{"type":"assistant","session_id":"s","message_id":"m3","timestamp":"2026-04-26T10:02:00Z","usage":{"input_tokens":300,"output_tokens":150}}`,
+		`{"type":"assistant","session_id":"s","message_id":"m4","timestamp":"2026-04-26T10:03:00Z","usage":{"input_tokens":400,"output_tokens":200}}`,
+	}
+	fullContent := firstContent + strings.Join(secondHalf, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(fullContent), 0644); err != nil {
+		t.Fatalf("failed to overwrite transcript: %v", err)
+	}
+
+	// Second lifetime: brand-new Tailer with empty in-memory map.
+	// Load persisted offsets from DB before processing.
+	tailer2 := NewTailer(tmpDir, s, pt)
+	tailer2.loadPersistedOffsets()
+
+	tailer2.offsetMu.Lock()
+	loadedOffset, ok := tailer2.offsets[transcriptPath]
+	tailer2.offsetMu.Unlock()
+	if !ok {
+		t.Fatalf("expected offset for %q to be loaded from DB", transcriptPath)
+	}
+	if loadedOffset != int64(len(firstContent)) {
+		t.Fatalf("loaded offset=%d, want %d", loadedOffset, len(firstContent))
+	}
+
+	tailer2.processFile(transcriptPath)
+
+	// Exactly the four message IDs, in order, with no duplicates.
+	rows, err := s.DB().Query(`
+		SELECT message_id FROM usage_events
+		WHERE source = 'tailer' ORDER BY message_id
+	`)
+	if err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		ids = append(ids, id)
+	}
+
+	want := []string{"m1", "m2", "m3", "m4"}
+	if len(ids) != len(want) {
+		t.Fatalf("got %d events (%v), want %d (%v)", len(ids), ids, len(want), want)
+	}
+	for i, id := range ids {
+		if id != want[i] {
+			t.Errorf("event %d: got %q, want %q", i, id, want[i])
+		}
+	}
+
+	finalOffset, err := s.GetTailerOffset(transcriptPath)
+	if err != nil {
+		t.Fatalf("failed to read final offset: %v", err)
+	}
+	if finalOffset != int64(len(fullContent)) {
+		t.Errorf("final persisted offset=%d, want %d", finalOffset, len(fullContent))
+	}
+}
+
 func TestTailerOffsetPersistence(t *testing.T) {
 	s, err := store.Open(":memory:")
 	if err != nil {
