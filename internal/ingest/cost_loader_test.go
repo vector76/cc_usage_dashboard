@@ -25,9 +25,13 @@ func TestLoadPriceTableExampleFile(t *testing.T) {
 		cacheCreation float64
 		cacheRead     float64
 	}{
+		// Spot check against Anthropic's published Messages API rates.
+		// Cache creation uses the 5-minute multiplier (1.25x input).
+		{"claude-opus-4-7", 5.00, 25.00, 6.25, 0.50},     // repriced from $15/$75
+		{"claude-sonnet-4-6", 3.00, 15.00, 3.75, 0.30},
+		{"claude-haiku-4-5", 1.00, 5.00, 1.25, 0.10},
+		{"claude-opus-4-1", 15.00, 75.00, 18.75, 1.50},   // pre-repricing tier
 		{"claude-3-5-sonnet-20241022", 3.00, 15.00, 3.75, 0.30},
-		{"claude-3-opus-20250219", 15.00, 75.00, 18.75, 1.50},
-		{"claude-3-haiku-20250307", 0.80, 4.00, 1.00, 0.08},
 	}
 
 	for _, tc := range cases {
