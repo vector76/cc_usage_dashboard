@@ -1,0 +1,293 @@
+// Package windows provides window derivation and baseline management.
+package windows
+
+import (
+	"database/sql"
+	"fmt"
+	"log/slog"
+	"time"
+)
+
+// Window represents a 5-hour or weekly quota window.
+type Window struct {
+	ID             int64
+	Kind           string    // "five_hour" or "weekly"
+	StartedAt      time.Time
+	EndsAt         time.Time
+	BaselineTotal  *float64
+	BaselineSource string
+	Closed         bool
+}
+
+// Engine maintains the windows table and derives baseline quotas.
+type Engine struct {
+	db *sql.DB
+	now func() time.Time // Allows injection of time for testing
+}
+
+// NewEngine creates a new windows engine.
+func NewEngine(db *sql.DB) *Engine {
+	return &Engine{
+		db:  db,
+		now: time.Now,
+	}
+}
+
+// SetNow sets the time function (for testing).
+func (e *Engine) SetNow(fn func() time.Time) {
+	e.now = fn
+}
+
+// UpdateWindows updates the windows table after an event or snapshot.
+// This should be called after inserting usage events or snapshots.
+func (e *Engine) UpdateWindows() error {
+	// Get or create the 5-hour window
+	if err := e.ensureFiveHourWindow(); err != nil {
+		return err
+	}
+
+	// Get or create the weekly window
+	if err := e.ensureWeeklyWindow(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ensureFiveHourWindow ensures a 5-hour window exists for the current period.
+func (e *Engine) ensureFiveHourWindow() error {
+	now := e.now()
+
+	// Get the most recent active 5-hour window
+	var window Window
+	err := e.db.QueryRow(`
+		SELECT id, started_at, ends_at, baseline_total, baseline_source
+		FROM windows
+		WHERE kind = 'five_hour' AND closed = 0
+		ORDER BY started_at DESC
+		LIMIT 1
+	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselineTotal, &window.BaselineSource)
+
+	if err == nil {
+		// Window exists, check if it's still valid
+		if window.EndsAt.After(now) {
+			// Current window is still active
+			return nil
+		}
+
+		// Window has expired, close it
+		_, err := e.db.Exec("UPDATE windows SET closed = 1 WHERE id = ?", window.ID)
+		if err != nil {
+			return fmt.Errorf("failed to close window: %w", err)
+		}
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("failed to query windows: %w", err)
+	}
+
+	// Create a new window starting from first event after gap
+	// For now, use "first event" detection logic
+	startTime, err := e.findFirstEventAfterGap("five_hour")
+	if err != nil || startTime.IsZero() {
+		// No events yet, start from now
+		startTime = now
+	}
+
+	endsAt := startTime.Add(5 * time.Hour)
+
+	// Get baseline from most recent snapshot at or before window start
+	baseline, baselineSource, err := e.findBaseline(startTime)
+	if err != nil {
+		slog.Error("failed to find baseline", "err", err)
+		baseline = nil
+		baselineSource = "default"
+	}
+
+	// Insert new window
+	_, err = e.db.Exec(`
+		INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
+		VALUES (?, ?, ?, ?, ?, 0)
+	`, "five_hour", startTime, endsAt, baseline, baselineSource)
+
+	if err != nil {
+		return fmt.Errorf("failed to insert window: %w", err)
+	}
+
+	return nil
+}
+
+// ensureWeeklyWindow ensures a weekly window exists for the current period.
+func (e *Engine) ensureWeeklyWindow() error {
+	now := e.now()
+
+	// Get the most recent active weekly window
+	var window Window
+	err := e.db.QueryRow(`
+		SELECT id, started_at, ends_at, baseline_total, baseline_source
+		FROM windows
+		WHERE kind = 'weekly' AND closed = 0
+		ORDER BY started_at DESC
+		LIMIT 1
+	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselineTotal, &window.BaselineSource)
+
+	if err == nil {
+		// Window exists, check if it's still valid
+		if window.EndsAt.After(now) {
+			return nil
+		}
+
+		// Window has expired, close it
+		_, err := e.db.Exec("UPDATE windows SET closed = 1 WHERE id = ?", window.ID)
+		if err != nil {
+			return fmt.Errorf("failed to close window: %w", err)
+		}
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("failed to query windows: %w", err)
+	}
+
+	// Try to get window boundary from the most recent snapshot
+	endsAt, err := e.findWeeklyBoundary()
+	if err != nil || endsAt.IsZero() {
+		// Default: Sunday midnight UTC of next week
+		endsAt = e.nextMondayMidnight(now).Add(-24 * time.Hour)
+	}
+
+	startTime := endsAt.Add(-7 * 24 * time.Hour)
+
+	// Get baseline from most recent snapshot at or before window start
+	baseline, baselineSource, err := e.findBaseline(startTime)
+	if err != nil {
+		slog.Error("failed to find baseline", "err", err)
+		baseline = nil
+		baselineSource = "default"
+	}
+
+	// Insert new window
+	_, err = e.db.Exec(`
+		INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
+		VALUES (?, ?, ?, ?, ?, 0)
+	`, "weekly", startTime, endsAt, baseline, baselineSource)
+
+	if err != nil {
+		return fmt.Errorf("failed to insert window: %w", err)
+	}
+
+	return nil
+}
+
+// findFirstEventAfterGap finds the timestamp of the first event after a gap.
+// Returns zero time if no events exist.
+func (e *Engine) findFirstEventAfterGap(windowKind string) (time.Time, error) {
+	// Get the most recent closed window
+	var lastEnds time.Time
+	err := e.db.QueryRow(`
+		SELECT MAX(ends_at) FROM windows
+		WHERE kind = ? AND closed = 1
+	`, windowKind).Scan(&lastEnds)
+
+	if err != nil || lastEnds.IsZero() {
+		// No closed windows, return zero time
+		return time.Time{}, nil
+	}
+
+	// Get the first event after the window ended
+	var firstEvent time.Time
+	err = e.db.QueryRow(`
+		SELECT MIN(occurred_at) FROM usage_events
+		WHERE occurred_at > ?
+	`, lastEnds).Scan(&firstEvent)
+
+	if err != nil || firstEvent.IsZero() {
+		return time.Time{}, nil
+	}
+
+	return firstEvent, nil
+}
+
+// findBaseline finds the baseline quota for a given timestamp.
+func (e *Engine) findBaseline(t time.Time) (*float64, string, error) {
+	var baselineTotal float64
+	err := e.db.QueryRow(`
+		SELECT five_hour_total
+		FROM quota_snapshots
+		WHERE observed_at <= ?
+		ORDER BY observed_at DESC
+		LIMIT 1
+	`, t).Scan(&baselineTotal)
+
+	if err == sql.ErrNoRows {
+		// No snapshot found, use default
+		return nil, "no_snapshot", nil
+	} else if err != nil {
+		return nil, "", fmt.Errorf("failed to query baseline: %w", err)
+	}
+
+	return &baselineTotal, "snapshot", nil
+}
+
+// findWeeklyBoundary extracts the weekly window boundary from the most recent snapshot.
+func (e *Engine) findWeeklyBoundary() (time.Time, error) {
+	var boundary time.Time
+	err := e.db.QueryRow(`
+		SELECT weekly_window_ends
+		FROM quota_snapshots
+		WHERE weekly_window_ends IS NOT NULL
+		ORDER BY observed_at DESC
+		LIMIT 1
+	`).Scan(&boundary)
+
+	if err == sql.ErrNoRows {
+		return time.Time{}, nil
+	} else if err != nil {
+		return time.Time{}, fmt.Errorf("failed to query boundary: %w", err)
+	}
+
+	return boundary, nil
+}
+
+// nextMondayMidnight returns the next Monday at midnight UTC.
+func (e *Engine) nextMondayMidnight(t time.Time) time.Time {
+	// Monday = 1
+	for t.Weekday() != time.Monday {
+		t = t.Add(24 * time.Hour)
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// Drift returns the drift between actual consumption and baseline.
+func (e *Engine) Drift(windowID int64) (*float64, error) {
+	// Get the window
+	var baseline *float64
+	var kind string
+	err := e.db.QueryRow(`
+		SELECT kind, baseline_total FROM windows WHERE id = ?
+	`, windowID).Scan(&kind, &baseline)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to query window: %w", err)
+	}
+
+	// Get the sum of costs for events in the window
+	var totalCost float64
+	err = e.db.QueryRow(`
+		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
+		FROM usage_events
+		WHERE cost_usd_equivalent IS NOT NULL
+		AND occurred_at >= (
+			SELECT started_at FROM windows WHERE id = ?
+		)
+		AND occurred_at < (
+			SELECT ends_at FROM windows WHERE id = ?
+		)
+	`, windowID, windowID).Scan(&totalCost)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to query costs: %w", err)
+	}
+
+	if baseline == nil {
+		return nil, nil
+	}
+
+	drift := *baseline - totalCost
+	return &drift, nil
+}

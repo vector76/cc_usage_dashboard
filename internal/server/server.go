@@ -33,6 +33,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("GET /healthz", srv.handleHealthz)
 	srv.mux.HandleFunc("POST /log", srv.handleLog)
 	srv.mux.HandleFunc("POST /parse_error", srv.handleParseError)
+	srv.mux.HandleFunc("POST /snapshot", srv.handleSnapshot)
 
 	return srv
 }
