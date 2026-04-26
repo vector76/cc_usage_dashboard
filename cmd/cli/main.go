@@ -89,9 +89,9 @@ func cmdLog() {
 	fs.Parse(os.Args[2:])
 
 	if *fromHook {
-		// Placeholder: Mode B (hook) will be implemented in Phase 3
-		fmt.Println("Placeholder: log --from-hook subcommand")
-		os.Exit(2)
+		// Mode B: process hook payload from stdin
+		processHookInput(os.Stdin)
+		return
 	}
 
 	// Mode A: explicit flags
