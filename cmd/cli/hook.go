@@ -18,7 +18,8 @@ type HookPayload struct {
 }
 
 // processHookInput reads the hook payload from stdin and posts events from the transcript.
-func processHookInput(stdin io.Reader) {
+// hostURL is the base URL of the trayapp (e.g., "http://127.0.0.1:27812").
+func processHookInput(stdin io.Reader, hostURL string) {
 	// Decode the hook payload
 	var payload HookPayload
 	if err := json.NewDecoder(stdin).Decode(&payload); err != nil {
@@ -102,27 +103,23 @@ func processHookInput(stdin io.Reader) {
 		}
 
 		// Add project path if we can infer it
-		if payload.SessionID != "" {
-			eventPayload["project_path"] = inferProjectPath(payload.TranscriptPath)
+		if projectPath := inferProjectPath(payload.TranscriptPath); projectPath != "" {
+			eventPayload["project_path"] = projectPath
 		}
 
 		// Post the event
-		if postEventPayload(eventPayload) {
+		if postEventPayloadTo(hostURL, eventPayload) {
 			successCount++
 		}
 	}
 
-	// Always exit 0 to not break the Claude Code session
-	// The user's `|| true` will handle our exit code
-	if successCount > 0 {
-		os.Exit(0)
-	}
-	// Even if nothing was posted, exit 0 (hook must not fail the session)
-	os.Exit(0)
+	// Hooks must not fail the Claude Code session; the caller exits 0
+	// regardless of whether any events were posted.
+	_ = successCount
 }
 
-// postEventPayload posts an event payload to the trayapp.
-func postEventPayload(eventPayload map[string]interface{}) bool {
+// postEventPayloadTo posts an event payload to the trayapp at hostURL.
+func postEventPayloadTo(hostURL string, eventPayload map[string]interface{}) bool {
 	body, err := json.Marshal(eventPayload)
 	if err != nil {
 		return false
@@ -132,7 +129,7 @@ func postEventPayload(eventPayload map[string]interface{}) bool {
 	client := &http.Client{Timeout: timeout}
 
 	resp, err := client.Post(
-		fmt.Sprintf("http://%s:%s/log", host, port),
+		hostURL+"/log",
 		"application/json",
 		bytes.NewReader(body),
 	)
@@ -145,16 +142,21 @@ func postEventPayload(eventPayload map[string]interface{}) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
-// inferProjectPath tries to infer the project path from the transcript path.
+// inferProjectPath extracts the encoded project segment from a transcript
+// path like ~/.claude/projects/<encoded>/<session>.jsonl. Returns the
+// <encoded> directory name (e.g., "-home-user-myproj"), or "" if the path
+// does not match the expected layout.
 func inferProjectPath(transcriptPath string) string {
-	// Typically Claude Code stores transcripts in:
-	// ~/.claude/projects/<project-id>/...
-	// Extract the project-id if possible
-	parts := filepath.SplitList(transcriptPath)
-	for i, part := range parts {
-		if part == "projects" && i+1 < len(parts) {
-			return filepath.Join(parts[:i+2]...)
-		}
+	// Walk up: parent of the transcript file is the project segment;
+	// its parent's basename should be "projects".
+	dir := filepath.Dir(transcriptPath)
+	if dir == "" || dir == "." || dir == string(filepath.Separator) {
+		return ""
 	}
-	return ""
+	segment := filepath.Base(dir)
+	parent := filepath.Base(filepath.Dir(dir))
+	if parent != "projects" {
+		return ""
+	}
+	return segment
 }

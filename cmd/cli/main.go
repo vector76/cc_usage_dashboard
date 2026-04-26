@@ -32,6 +32,10 @@ func main() {
 		cmdLog()
 	case "slack":
 		cmdSlack()
+	case "discount":
+		cmdDiscount()
+	case "release":
+		cmdRelease()
 	case "--version":
 		fmt.Printf("clusage-cli v%s\n", Version)
 	case "--help":
@@ -49,6 +53,8 @@ Usage:
   clusage-cli ping
   clusage-cli log [--from-hook | --input-tokens N --output-tokens N ...]
   clusage-cli slack [--format json|release-bool|fraction]
+  clusage-cli discount [--period 24h] [--format json|summary]
+  clusage-cli release --released-at TS --job-tag TAG --estimated-cost N --slack-at-release N [--window-kind five_hour|weekly]
 
 `, Version)
 }
@@ -90,8 +96,8 @@ func cmdLog() {
 
 	if *fromHook {
 		// Mode B: process hook payload from stdin
-		processHookInput(os.Stdin)
-		return
+		processHookInput(os.Stdin, hostURL())
+		os.Exit(0)
 	}
 
 	// Mode A: explicit flags
@@ -207,6 +213,119 @@ func postEvent(payload map[string]interface{}) {
 	default:
 		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
 		os.Exit(5) // Exit code 5: 5xx error
+	}
+}
+
+// hostURL returns the base URL of the trayapp.
+func hostURL() string {
+	return fmt.Sprintf("http://%s:%s", host, port)
+}
+
+func cmdDiscount() {
+	fs := flag.NewFlagSet("discount", flag.ExitOnError)
+	period := fs.String("period", "24h", "period (e.g. 24h, 7d, 30d)")
+	format := fs.String("format", "json", "output format: json|summary")
+	fs.Parse(os.Args[2:])
+
+	timeout := parseTimeout()
+	client := &http.Client{Timeout: timeout}
+
+	resp, err := client.Get(fmt.Sprintf("%s/discount?period=%s", hostURL(), *period))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		os.Exit(3)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
+		os.Exit(5)
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to parse response\n")
+		os.Exit(5)
+	}
+
+	switch *format {
+	case "json":
+		json.NewEncoder(os.Stdout).Encode(result)
+	case "summary":
+		fmt.Printf("period: %v\n", result["period"])
+		fmt.Printf("consumed_usd_equivalent: %v\n", result["consumed_usd_equivalent"])
+		fmt.Printf("subscription_cost_prorated_usd: %v\n", result["subscription_cost_prorated_usd"])
+		fmt.Printf("value_ratio: %v\n", result["value_ratio"])
+		fmt.Printf("discount_pct: %v\n", result["discount_pct"])
+		fmt.Printf("savings_usd: %v\n", result["savings_usd"])
+		fmt.Printf("cost_coverage_pct: %v\n", result["cost_coverage_pct"])
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown format %q\n", *format)
+		os.Exit(2)
+	}
+
+	os.Exit(0)
+}
+
+func cmdRelease() {
+	fs := flag.NewFlagSet("release", flag.ExitOnError)
+	releasedAt := fs.String("released-at", "", "RFC3339 timestamp of release decision (default: now)")
+	jobTag := fs.String("job-tag", "", "free-form job identifier (required)")
+	estimatedCost := fs.Float64("estimated-cost", 0, "estimated job cost in USD")
+	slackAtRelease := fs.Float64("slack-at-release", 0, "slack value seen at GET /slack")
+	windowKind := fs.String("window-kind", "five_hour", "window_kind: five_hour|weekly")
+	fs.Parse(os.Args[2:])
+
+	if *jobTag == "" {
+		fmt.Fprintf(os.Stderr, "error: --job-tag is required\n")
+		os.Exit(2)
+	}
+
+	releasedAtTS := *releasedAt
+	if releasedAtTS == "" {
+		releasedAtTS = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	payload := map[string]interface{}{
+		"released_at":      releasedAtTS,
+		"job_tag":          *jobTag,
+		"estimated_cost":   *estimatedCost,
+		"slack_at_release": *slackAtRelease,
+		"window_kind":      *windowKind,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to marshal payload\n")
+		os.Exit(2)
+	}
+
+	timeout := parseTimeout()
+	client := &http.Client{Timeout: timeout}
+
+	resp, err := client.Post(
+		fmt.Sprintf("%s/slack/release", hostURL()),
+		"application/json",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		os.Exit(3)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		fmt.Println(string(respBody))
+		os.Exit(0)
+	case resp.StatusCode >= 400 && resp.StatusCode < 500:
+		fmt.Fprintf(os.Stderr, "error: %d %s\n", resp.StatusCode, string(respBody))
+		os.Exit(4)
+	default:
+		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
+		os.Exit(5)
 	}
 }
 
