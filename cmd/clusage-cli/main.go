@@ -32,8 +32,8 @@ func main() {
 		cmdLog()
 	case "slack":
 		cmdSlack()
-	case "discount":
-		cmdDiscount()
+	case "consumption":
+		cmdConsumption()
 	case "release":
 		cmdRelease()
 	case "--version":
@@ -53,7 +53,7 @@ Usage:
   clusage-cli ping
   clusage-cli log [--from-hook | --input-tokens N --output-tokens N ...]
   clusage-cli slack [--format json|release-bool|fraction]
-  clusage-cli discount [--period 24h] [--format json|summary]
+  clusage-cli consumption [--period 24h] [--format json|summary]
   clusage-cli release --released-at TS --job-tag TAG --estimated-cost N --slack-at-release N [--window-kind session|weekly]
 
 `, Version)
@@ -221,8 +221,8 @@ func hostURL() string {
 	return fmt.Sprintf("http://%s:%s", host, port)
 }
 
-func cmdDiscount() {
-	fs := flag.NewFlagSet("discount", flag.ExitOnError)
+func cmdConsumption() {
+	fs := flag.NewFlagSet("consumption", flag.ExitOnError)
 	period := fs.String("period", "24h", "period (e.g. 24h, 7d, 30d)")
 	format := fs.String("format", "json", "output format: json|summary")
 	fs.Parse(os.Args[2:])
@@ -230,7 +230,7 @@ func cmdDiscount() {
 	timeout := parseTimeout()
 	client := &http.Client{Timeout: timeout}
 
-	resp, err := client.Get(fmt.Sprintf("%s/discount?period=%s", hostURL(), *period))
+	resp, err := client.Get(fmt.Sprintf("%s/consumption?period=%s", hostURL(), *period))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: connection refused\n")
 		os.Exit(3)
@@ -254,11 +254,9 @@ func cmdDiscount() {
 	case "summary":
 		fmt.Printf("period: %v\n", result["period"])
 		fmt.Printf("consumed_usd_equivalent: %v\n", result["consumed_usd_equivalent"])
-		fmt.Printf("subscription_cost_prorated_usd: %v\n", result["subscription_cost_prorated_usd"])
-		fmt.Printf("value_ratio: %v\n", result["value_ratio"])
-		fmt.Printf("discount_pct: %v\n", result["discount_pct"])
-		fmt.Printf("savings_usd: %v\n", result["savings_usd"])
-		fmt.Printf("cost_coverage_pct: %v\n", result["cost_coverage_pct"])
+		fmt.Printf("consumed_session_pct: %v\n", result["consumed_session_pct"])
+		fmt.Printf("consumed_weekly_pct: %v\n", result["consumed_weekly_pct"])
+		fmt.Printf("events_total: %v\n", result["events_total"])
 	default:
 		fmt.Fprintf(os.Stderr, "error: unknown format %q\n", *format)
 		os.Exit(2)

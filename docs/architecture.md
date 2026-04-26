@@ -20,7 +20,7 @@ and no cross-machine state.
 |  |    POST /parse_error      <- userscript / tailer parse failures        ||
 |  |    POST /slack/release    <- queue reports a released job              ||
 |  |    GET  /slack            <- current slack signal (for external queue) ||
-|  |    GET  /discount         <- effective-discount summary                ||
+|  |    GET  /consumption      <- USD + percent-of-quota over a period      ||
 |  |    GET  /healthz          <- liveness                                  ||
 |  |    GET  /metrics          <- counters                                  ||
 |  |    GET  /dashboard        <- HTML/JS UI                                ||
@@ -122,16 +122,14 @@ failure means that turn is lost. See the failure-modes table below.
    percentages — see `docs/userscript.md`.
 4. Trayapp inserts into `quota_snapshots` and uses the value to set or correct
    the `baseline_total` for the current session and weekly windows.
-5. If snapshot disagrees with derived state by more than the drift threshold,
-   an alert bit is set and surfaced in the tray UI.
 
 ### Slack consumption
 
 1. External queue process polls `GET /slack` periodically.
 2. Trayapp computes slack per `docs/slack-indicator.md` (clamped uniform-burn expected
-   consumption, applied independently to the session and weekly windows, combined via
-   `min`).
-3. Returns slack absolute and as a fraction of quota, plus gate states.
+   consumption, applied independently to the session and weekly windows).
+3. Returns per-window slack absolute and as a fraction of quota, plus gate states
+   (the session and weekly headroom gates are independent — see slack-indicator).
 4. The queue decides whether to release a job. The trayapp does not run jobs.
 
 ## Network and security
@@ -166,7 +164,7 @@ failure means that turn is lost. See the failure-modes table below.
 |                                     | lost; a future `/log` retry from the same hook would    |
 |                                     | succeed because dedup is by message ID.                 |
 | User never opens browser dashboard  | No snapshots. Derivation from passive logs continues.  |
-| Quota baseline becomes stale        | Drift surfaced in tray; user opens browser to refresh. |
+| Quota baseline becomes stale        | Snapshot age surfaced in dashboard status; user opens browser to refresh. |
 | Session JSONL format changes        | Tailer logs parse errors loudly; passive data drops    |
 |                                     | until parser updated. Userscript snapshots still work. |
 

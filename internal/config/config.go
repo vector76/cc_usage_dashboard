@@ -40,18 +40,13 @@ type Config struct {
 	} `yaml:"logging"`
 
 	Slack struct {
-		HeadroomThreshold      float64 `yaml:"headroom_threshold"`
-		QuietPeriodSeconds     int     `yaml:"quiet_period_seconds"`
-		FreshnessThresholdMs   int     `yaml:"freshness_threshold_ms"`
-		ReleaseThreshold       float64 `yaml:"release_threshold"`
-		BaselineMaxAgeHours    int     `yaml:"baseline_max_age_hours"`
-		BaselineDriftThreshold float64 `yaml:"baseline_drift_threshold"`
+		HeadroomThreshold       float64 `yaml:"headroom_threshold"`
+		QuietPeriodSeconds      int     `yaml:"quiet_period_seconds"`
+		FreshnessThresholdMs    int     `yaml:"freshness_threshold_ms"`
+		BaselineMaxAgeHours     int     `yaml:"baseline_max_age_hours"`
+		SessionSurplusThreshold float64 `yaml:"session_surplus_threshold"`
+		WeeklySurplusThreshold  float64 `yaml:"weekly_surplus_threshold"`
 	} `yaml:"slack"`
-
-	Subscription struct {
-		MonthlyUSD       float64 `yaml:"monthly_usd"`
-		BillingCycleDays int     `yaml:"billing_cycle_days"`
-	} `yaml:"subscription"`
 
 	Retention struct {
 		ParseErrorsDays  int `yaml:"parse_errors_days"`
@@ -78,11 +73,9 @@ func Load(path string) (*Config, error) {
 	cfg.Slack.HeadroomThreshold = 10.0
 	cfg.Slack.QuietPeriodSeconds = 300
 	cfg.Slack.FreshnessThresholdMs = 60000
-	cfg.Slack.ReleaseThreshold = 0.10
 	cfg.Slack.BaselineMaxAgeHours = 48
-	cfg.Slack.BaselineDriftThreshold = 0.25
-	cfg.Subscription.MonthlyUSD = 20.0
-	cfg.Subscription.BillingCycleDays = 30
+	cfg.Slack.SessionSurplusThreshold = 0.50
+	cfg.Slack.WeeklySurplusThreshold = 0.10
 	cfg.Retention.ParseErrorsDays = 30
 	cfg.Retention.SlackSamplesDays = 90
 	cfg.EnableSlackSampling = false

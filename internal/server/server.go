@@ -59,15 +59,15 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		priceTable: priceTable,
 		metrics:    NewMetrics(),
 		slackCalc: slack.NewCalculator(s.DB(), slack.Config{
-			QuietPeriodSeconds:     cfg.Slack.QuietPeriodSeconds,
-			ReleaseThreshold:       cfg.Slack.ReleaseThreshold,
-			BaselineMaxAgeHours:    cfg.Slack.BaselineMaxAgeHours,
-			BaselineDriftThreshold: cfg.Slack.BaselineDriftThreshold,
+			QuietPeriodSeconds:      cfg.Slack.QuietPeriodSeconds,
+			BaselineMaxAgeHours:     cfg.Slack.BaselineMaxAgeHours,
+			SessionSurplusThreshold: cfg.Slack.SessionSurplusThreshold,
+			WeeklySurplusThreshold:  cfg.Slack.WeeklySurplusThreshold,
 		}),
 		windowsEngine: windows.NewEngine(s.DB()),
 	}
 
-	dh, err := dashboard.NewHandler(s, srv.slackCalc, srv.windowsEngine, cfg.Slack.BaselineDriftThreshold)
+	dh, err := dashboard.NewHandler(s, srv.slackCalc)
 	if err != nil {
 		// Embedded asset failure is a build-time error in practice; fall back to
 		// nil handler so the rest of the server still starts. The dashboard
@@ -84,7 +84,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("POST /snapshot", srv.handleSnapshot)
 	srv.mux.HandleFunc("GET /slack", srv.handleSlackQuery)
 	srv.mux.HandleFunc("POST /slack/release", srv.handleSlackRelease)
-	srv.mux.HandleFunc("GET /discount", srv.handleDiscount)
+	srv.mux.HandleFunc("GET /consumption", srv.handleConsumption)
 	srv.mux.HandleFunc("GET /metrics", srv.handleMetrics)
 	if srv.dashboardHandler != nil {
 		srv.dashboardHandler.Register(srv.mux)

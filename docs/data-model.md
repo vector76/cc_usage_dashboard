@@ -120,7 +120,7 @@ without losing data.
 ## Units note
 
 `usage_events.cost_usd_equivalent` is in dollars (raw or computed from token × price
-table) — that's what enables the discount calculation.
+table) — it's the per-event dollar input the consumption report sums.
 
 `quota_snapshots.session_used` and `quota_snapshots.weekly_used` are **percentages**
 (0–100) scraped from the `claude.ai/settings/usage` page, since that's the only

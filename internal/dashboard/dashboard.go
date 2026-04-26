@@ -8,14 +8,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"math"
 	"net/http"
 	"time"
 
 	"github.com/vector76/cc_usage_dashboard/internal/icon"
 	"github.com/vector76/cc_usage_dashboard/internal/slack"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
-	"github.com/vector76/cc_usage_dashboard/internal/windows"
 )
 
 //go:embed static
@@ -60,35 +58,27 @@ type State struct {
 	LastSnapshotAgeSeconds *float64       `json:"last_snapshot_age_seconds"`
 	ParseErrors24h         int64          `json:"parse_errors_24h"`
 	Paused                 bool           `json:"paused"`
-	Drift                  *float64       `json:"drift"`
-	DriftAlert             bool           `json:"drift_alert"`
 	ConsumptionSeries      []SeriesBucket `json:"consumption_series"`
 }
 
 // Handler serves the dashboard UI and state endpoint.
 type Handler struct {
-	store                  *store.Store
-	slackCalc              *slack.Calculator
-	windowsEngine          *windows.Engine
-	baselineDriftThreshold float64
-	now                    func() time.Time
-	indexHTML              []byte
+	store     *store.Store
+	slackCalc *slack.Calculator
+	now       func() time.Time
+	indexHTML []byte
 }
 
-// NewHandler builds a Handler. baselineDriftThreshold is the
-// Slack.BaselineDriftThreshold config value used to compute drift_alert.
-func NewHandler(s *store.Store, sc *slack.Calculator, we *windows.Engine, baselineDriftThreshold float64) (*Handler, error) {
+func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
 	html, err := fs.ReadFile(staticFS, "static/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("dashboard: failed to load index.html: %w", err)
 	}
 	return &Handler{
-		store:                  s,
-		slackCalc:              sc,
-		windowsEngine:          we,
-		baselineDriftThreshold: baselineDriftThreshold,
-		now:                    func() time.Time { return time.Now().UTC() },
-		indexHTML:              html,
+		store:     s,
+		slackCalc: sc,
+		now:       func() time.Time { return time.Now().UTC() },
+		indexHTML: html,
 	}, nil
 }
 
@@ -167,20 +157,6 @@ func (h *Handler) computeState() (*State, error) {
 	state.ParseErrors24h = count
 
 	state.Paused = h.slackCalc.IsPaused()
-
-	if session != nil {
-		drift, err := h.windowsEngine.Drift(session.ID)
-		if err != nil {
-			return nil, fmt.Errorf("drift: %w", err)
-		}
-		state.Drift = drift
-		if drift != nil && session.BaselineTotal != nil && *session.BaselineTotal > 0 {
-			limit := h.baselineDriftThreshold * *session.BaselineTotal
-			if math.Abs(*drift) > limit {
-				state.DriftAlert = true
-			}
-		}
-	}
 
 	series, err := h.consumptionSeries(db, now)
 	if err != nil {

@@ -73,11 +73,11 @@ rows; `windows` rows correctly bracket recent activity.
 
 - Static HTML/JS served from trayapp.
 - Two burn-down charts (session and weekly).
-- `GET /discount` endpoint and the effective-discount widget that consumes it.
-- Health/status panel: last snapshot age, parse error count, drift.
+- `GET /consumption` endpoint and the consumption widget that consumes it
+  (USD + percent-of-session + percent-of-weekly over a chosen period).
+- Health/status panel: last snapshot age, parse error count.
 
-Exit criteria: opening `http://localhost:27812` shows charts that match observed reality
-within drift tolerance.
+Exit criteria: opening `http://localhost:27812` shows charts that match observed reality.
 
 ## Phase 5 — Slack indicator
 
@@ -97,7 +97,6 @@ release decisions in synthetic and real tests.
 ## Phase 6 — Polish and quality of life
 
 - Tray icon color states.
-- Drift alert in tray tooltip.
 - `install.ps1` for autostart and config bootstrap.
 - Userscript auto-update headers.
 - README updated with screenshots.

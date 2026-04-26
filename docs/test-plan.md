@@ -34,10 +34,10 @@ development; run the full suite before declaring done.
 | Cost resolution                     | `go test ./internal/ingest/...`                    | Reported vs. computed cost, cache token rates, unknown-model fallthrough         |
 | Transcript parser                   | `go test ./internal/ingest/...`                    | Valid/invalid JSONL, missing fields, timestamp parsing, parse-error capture     |
 | Tailer                              | `go test ./internal/ingest/...`                    | `.jsonl` matching, offset persistence, advance past skipped lines                |
-| Windows engine                      | `go test ./internal/windows/...`                   | session and weekly derivation, baseline assignment, drift, clock injection       |
-| Slack calculator                    | `go test ./internal/slack/...`                     | Combined fraction, gates (headroom, priority quiet, freshness, not-paused), pause |
-| Discount calculator                 | `go test ./internal/discount/...`                  | Documented field names (`savings_usd`, `value_ratio`, `consumed_usd_equivalent`) |
-| HTTP server (handlers + dashboard)  | `go test ./internal/server/...`                    | `/log`, `/parse_error`, `/snapshot`, `/slack`, `/slack/release`, `/discount`     |
+| Windows engine                      | `go test ./internal/windows/...`                   | session and weekly derivation, baseline assignment, clock injection              |
+| Slack calculator                    | `go test ./internal/slack/...`                     | Per-window slack fractions, gates (session/weekly headroom, priority quiet, freshness, not-paused), pause |
+| Consumption calculator              | `go test ./internal/consumption/...`               | Documented field names; snapshot-derived `consumed_session_pct` / `consumed_weekly_pct` with cross-window resets |
+| HTTP server (handlers + dashboard)  | `go test ./internal/server/...`                    | `/log`, `/parse_error`, `/snapshot`, `/slack`, `/slack/release`, `/consumption`  |
 | CLI hook payload parsing            | `go test ./cmd/clusage-cli/...`                    | Hook stdin payload → `/log` POST                                                 |
 | End-to-end integration              | `go test ./internal/integration/...`               | Six scenarios documented in `testdata/e2e_test.md`                                |
 
@@ -76,7 +76,7 @@ export CLUSAGE_HOST=127.0.0.1
 ./clusage-cli ping                                                                           # expect "ok"
 ./clusage-cli log --input-tokens 100 --output-tokens 50 --session-id s1 --message-id m1      # expect 200
 ./clusage-cli slack --format json                                                            # expect documented keys
-./clusage-cli discount --period 24h                                                          # expect documented keys
+./clusage-cli consumption --period 24h                                                       # expect documented keys
 kill %1
 ```
 

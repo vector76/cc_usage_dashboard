@@ -80,8 +80,6 @@ func TestDashboardStateJSONShape(t *testing.T) {
 		"last_snapshot_age_seconds",
 		"parse_errors_24h",
 		"paused",
-		"drift",
-		"drift_alert",
 		"consumption_series",
 	} {
 		if _, ok := raw[key]; !ok {
@@ -104,11 +102,6 @@ func TestDashboardStateJSONShape(t *testing.T) {
 	}
 	if paused {
 		t.Error("expected paused=false on fresh server")
-	}
-
-	var driftAlert bool
-	if err := json.Unmarshal(raw["drift_alert"], &driftAlert); err != nil {
-		t.Fatalf("drift_alert not a bool: %v", err)
 	}
 
 	var series []map[string]any

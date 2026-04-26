@@ -22,9 +22,10 @@ cost is constant.
 
 Two consequences follow:
 
-1. **The subscription's effective discount varies by usage.** If a user consumes the full
-   weekly quota, the discount vs. paying API rates is large. If they consume little, the
-   discount shrinks or inverts.
+1. **The subscription's effective value varies by usage.** Heavier consumers extract more
+   API-equivalent dollars per subscription dollar; light consumers extract less. The
+   tool reports the raw inputs (USD-equivalent consumed, percent of session/weekly
+   quota used) and leaves the subscription-cost arithmetic to the user.
 2. **Unused budget is forfeit at window boundaries.** Quota not consumed in a session window
    do not roll over. Underutilization is a true economic loss.
 
@@ -39,8 +40,10 @@ This project aims to:
 1. **Record** every Claude Code invocation's token usage and dollar-equivalent cost,
    continuously, with no perturbation of the quota itself.
 2. **Visualize** burn-down for both the session and weekly windows, with historical trends.
-3. **Compute** the effective subscription discount (sum of dollar-equivalent token cost
-   over a period vs. the prorated subscription cost over the same period).
+3. **Report** consumption over a period: dollar-equivalent token cost plus
+   percent-of-session and percent-of-weekly quota consumed (both can exceed 100%
+   over a multi-window period). The user reconciles those numbers against their
+   subscription cost, which the tool does not model.
 4. **Expose a slack signal** that a queueing system can poll to decide whether to release
    low-priority work — work that would not be worth doing at API rates but is worth doing
    for free.
@@ -82,16 +85,13 @@ This project aims to:
 - **Derived state, not stored state.** The session burn-down figure is *computed* from
   baseline snapshots plus passive usage logs. It is not stored as an authoritative number
   that must be kept in sync.
-- **Fail loud about calibration drift.** If passive accounting and snapshot data disagree
-  by more than a threshold, surface it in the tray UI rather than silently averaging.
-
 ## What "done" looks like for v1
 
 - Tray app runs on logon, shows current session and weekly burn percentages in tooltip.
 - Containers can register usage with a one-line Stop hook (`clusage-cli log --from-hook
   || true`); a bind-mount of `~/.claude` works too for hosts that prefer that path.
-- Local dashboard at `http://localhost:PORT` shows two burn-down charts and an effective
-  discount widget.
+- Local dashboard at `http://localhost:PORT` shows two burn-down charts and a
+  consumption widget (USD + percent-of-session + percent-of-weekly).
 - A `/slack` HTTP endpoint returns a numeric slack signal suitable for polling by an
   external queue.
 - Userscript posts a snapshot whenever the user loads the claude.ai dashboard.

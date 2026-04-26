@@ -5,28 +5,25 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/vector76/cc_usage_dashboard/internal/discount"
+	"github.com/vector76/cc_usage_dashboard/internal/consumption"
 )
 
-// handleDiscount processes GET /discount requests.
-func (s *Server) handleDiscount(w http.ResponseWriter, r *http.Request) {
+// handleConsumption processes GET /consumption?period=24h requests.
+func (s *Server) handleConsumption(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Get period from query string, default to 24h
 	period := r.URL.Query().Get("period")
 	if period == "" {
 		period = "24h"
 	}
 
-	// Calculate discount
-	calc := discount.NewCalculator(s.store.DB(), s.cfg.Subscription.MonthlyUSD, s.cfg.Subscription.BillingCycleDays)
+	calc := consumption.NewCalculator(s.store.DB())
 	result, err := calc.Calculate(period)
-
 	if err != nil {
-		slog.Error("failed to calculate discount", "err", err)
+		slog.Error("failed to calculate consumption", "err", err)
 		http.Error(w, `{"error":"calculation error"}`, http.StatusInternalServerError)
 		w.Header().Set("Content-Type", "application/json")
 		return

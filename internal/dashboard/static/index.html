@@ -43,9 +43,9 @@
   </div>
 </section>
 
-<section id="discount">
-  <h2>Discount (last 24h)</h2>
-  <dl class="kv" id="discount-kv"><dd class="muted">Loading…</dd></dl>
+<section id="consumption">
+  <h2>Consumption (last 24h)</h2>
+  <dl class="kv" id="consumption-kv"><dd class="muted">Loading…</dd></dl>
 </section>
 
 <script>
@@ -86,14 +86,6 @@ function renderStatus(s) {
   lines.push(["Last snapshot age", s.last_snapshot_age_seconds == null ? "no snapshots yet" : fmt(s.last_snapshot_age_seconds, 0) + " s"]);
   lines.push(["Parse errors (24h)", s.parse_errors_24h]);
   lines.push(["Paused", s.paused ? "yes" : "no"]);
-  let driftHTML;
-  if (s.drift == null) {
-    driftHTML = "—";
-  } else {
-    const cls = s.drift_alert ? "alert" : "ok";
-    driftHTML = '<span class="' + cls + '">' + fmt(s.drift, 4) + (s.drift_alert ? " (alert)" : "") + "</span>";
-  }
-  lines.push(["Drift (session)", driftHTML]);
   kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
 }
 
@@ -228,17 +220,14 @@ function renderBurnDown(svgID, win) {
   svg.appendChild(el("text", { x: 4, y: PCT_BOTTOM, "font-size": "10", fill: "#444" }, "0"));
 }
 
-function renderDiscount(d) {
-  const kv = document.getElementById("discount-kv");
+function renderConsumption(d) {
+  const kv = document.getElementById("consumption-kv");
   if (!d || d.error) { kv.innerHTML = '<dd class="muted">unavailable</dd>'; return; }
   const lines = [];
   lines.push(["Period", d.period]);
   lines.push(["Consumed (USD eq.)", "$" + fmt(d.consumed_usd_equivalent)]);
-  lines.push(["Subscription prorated", "$" + fmt(d.subscription_cost_prorated_usd)]);
-  lines.push(["Savings", "$" + fmt(d.savings_usd)]);
-  lines.push(["Value ratio", fmt(d.value_ratio)]);
-  lines.push(["Discount %", d.discount_pct == null ? "—" : fmt(d.discount_pct) + "%"]);
-  lines.push(["Cost coverage", fmt(d.cost_coverage_pct) + "%"]);
+  lines.push(["Consumed % session", d.consumed_session_pct == null ? "—" : fmt(d.consumed_session_pct) + "%"]);
+  lines.push(["Consumed % weekly", d.consumed_weekly_pct == null ? "—" : fmt(d.consumed_weekly_pct) + "%"]);
   lines.push(["Events (total / reported / computed / none)",
     d.events_total + " / " + d.events_with_reported_cost + " / " + d.events_with_computed_cost + " / " + d.events_without_cost]);
   kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
@@ -253,10 +242,10 @@ async function refresh() {
     renderBurnDown("chart-weekly", s.weekly);
   } catch (e) { console.error("state error", e); }
   try {
-    const dResp = await fetch("/discount?period=24h");
+    const dResp = await fetch("/consumption?period=24h");
     const d = await dResp.json();
-    renderDiscount(d);
-  } catch (e) { console.error("discount error", e); }
+    renderConsumption(d);
+  } catch (e) { console.error("consumption error", e); }
 }
 
 refresh();

@@ -16,7 +16,7 @@ as the runnable spec.
 
 ## Scenario 1: CLI Mode A posts events
 
-Go test: `TestE2E_CLIModeA_DiscountAndSlack`
+Go test: `TestE2E_CLIModeA_ConsumptionAndSlack`
 
 ```bash
 # Start the server
@@ -29,8 +29,8 @@ sleep 1
 ./clusage-cli log --input-tokens 200 --output-tokens 100 --session-id s1 --message-id m2
 ./clusage-cli log --input-tokens 150 --output-tokens 75 --session-id s2 --message-id m1
 
-# Verify /discount works
-./clusage-cli discount --period 24h
+# Verify /consumption works
+./clusage-cli consumption --period 24h
 
 # Verify /slack works
 ./clusage-cli slack --format json
@@ -41,13 +41,15 @@ kill $SERVER_PID
 
 **Expected:**
 - All CLI posts succeed (exit 0)
-- /discount returns the documented fields including `events_total`,
-  `consumed_usd_equivalent`, `events_with_reported_cost`,
-  `events_with_computed_cost`, `events_without_cost`, `cost_coverage_pct`,
-  `savings_usd`
+- /consumption returns the documented fields: `consumed_usd_equivalent`,
+  `consumed_session_pct`, `consumed_weekly_pct`, `events_total`,
+  `events_with_reported_cost`, `events_with_computed_cost`,
+  `events_without_cost`
 - /slack returns documented top-level keys (`now`, `session`, `weekly`,
   `slack_combined_fraction`, `priority_quiet_for_seconds`, `paused`,
-  `release_recommended`, `gates`) with the four documented gate keys
+  `release_recommended`, `gates`) with the documented gate keys
+  (`session_headroom`, `weekly_headroom`, `priority_quiet`,
+  `baseline_freshness`, `not_paused`)
 
 ## Scenario 2: Duplicate detection
 

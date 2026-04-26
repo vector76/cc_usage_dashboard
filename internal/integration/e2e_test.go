@@ -59,12 +59,10 @@ func newTestEnv(t *testing.T, pricingPath string) *testEnv {
 	cfg.Database.Path = ":memory:"
 	cfg.HTTP.Port = 0
 	cfg.Pricing.TablePath = pricingPath
-	cfg.Subscription.MonthlyUSD = 20.0
-	cfg.Subscription.BillingCycleDays = 30
 	cfg.Slack.QuietPeriodSeconds = 300
-	cfg.Slack.ReleaseThreshold = 0.10
 	cfg.Slack.BaselineMaxAgeHours = 48
-	cfg.Slack.BaselineDriftThreshold = 0.25
+	cfg.Slack.SessionSurplusThreshold = 0.50
+	cfg.Slack.WeeklySurplusThreshold = 0.10
 
 	return &testEnv{srv: server.New(s, cfg), store: s}
 }
@@ -92,9 +90,9 @@ func (e *testEnv) do(t *testing.T, method, path string, body any) *httptest.Resp
 	return w
 }
 
-// Scenario 1: CLI Mode A posts events, /discount and /slack respond with the
-// documented shapes.
-func TestE2E_CLIModeA_DiscountAndSlack(t *testing.T) {
+// Scenario 1: CLI Mode A posts events, /consumption and /slack respond
+// with the documented shapes.
+func TestE2E_CLIModeA_ConsumptionAndSlack(t *testing.T) {
 	env := newTestEnv(t, "")
 
 	events := []map[string]any{
@@ -109,39 +107,32 @@ func TestE2E_CLIModeA_DiscountAndSlack(t *testing.T) {
 		}
 	}
 
-	// /discount: documented top-level fields per docs/discount-calculation.md.
-	w := env.do(t, "GET", "/discount?period=24h", nil)
+	w := env.do(t, "GET", "/consumption?period=24h", nil)
 	if w.Code != http.StatusOK {
-		t.Fatalf("GET /discount: status=%d body=%s", w.Code, w.Body.String())
+		t.Fatalf("GET /consumption: status=%d body=%s", w.Code, w.Body.String())
 	}
-	var disc map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &disc); err != nil {
-		t.Fatalf("decode /discount: %v", err)
+	var cons map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &cons); err != nil {
+		t.Fatalf("decode /consumption: %v", err)
 	}
 	for _, k := range []string{
 		"period", "period_start", "period_end",
-		"consumed_usd_equivalent", "subscription_cost_prorated_usd",
-		"savings_usd", "events_total",
+		"consumed_usd_equivalent",
+		"consumed_session_pct", "consumed_weekly_pct",
+		"events_total",
 		"events_with_reported_cost", "events_with_computed_cost", "events_without_cost",
-		"cost_coverage_pct",
 	} {
-		if _, ok := disc[k]; !ok {
-			t.Errorf("/discount missing field %q: %s", k, w.Body.String())
+		if _, ok := cons[k]; !ok {
+			t.Errorf("/consumption missing field %q: %s", k, w.Body.String())
 		}
 	}
-	if got := disc["events_total"].(float64); got != 3 {
+	if got := cons["events_total"].(float64); got != 3 {
 		t.Errorf("events_total=%v, want 3", got)
 	}
-	if got := disc["events_with_reported_cost"].(float64); got != 3 {
+	if got := cons["events_with_reported_cost"].(float64); got != 3 {
 		t.Errorf("events_with_reported_cost=%v, want 3", got)
 	}
-	if got := disc["events_with_computed_cost"].(float64); got != 0 {
-		t.Errorf("events_with_computed_cost=%v, want 0", got)
-	}
-	if got := disc["events_without_cost"].(float64); got != 0 {
-		t.Errorf("events_without_cost=%v, want 0", got)
-	}
-	consumed, _ := disc["consumed_usd_equivalent"].(float64)
+	consumed, _ := cons["consumed_usd_equivalent"].(float64)
 	if math.Abs(consumed-0.045) > 1e-9 {
 		t.Errorf("consumed_usd_equivalent=%v, want ~0.045", consumed)
 	}
@@ -167,7 +158,7 @@ func TestE2E_CLIModeA_DiscountAndSlack(t *testing.T) {
 	if err := json.Unmarshal(slackResp["gates"], &gates); err != nil {
 		t.Fatalf("decode gates: %v", err)
 	}
-	for _, k := range []string{"headroom", "priority_quiet", "baseline_freshness", "not_paused"} {
+	for _, k := range []string{"session_headroom", "weekly_headroom", "priority_quiet", "baseline_freshness", "not_paused"} {
 		if _, ok := gates[k]; !ok {
 			t.Errorf("/slack missing gate %q", k)
 		}

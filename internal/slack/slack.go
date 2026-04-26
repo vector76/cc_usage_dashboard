@@ -36,10 +36,10 @@ type WindowMetrics struct {
 
 // Config holds slack calculation configuration.
 type Config struct {
-	QuietPeriodSeconds     int
-	ReleaseThreshold       float64
-	BaselineMaxAgeHours    int
-	BaselineDriftThreshold float64
+	QuietPeriodSeconds      int
+	BaselineMaxAgeHours     int
+	SessionSurplusThreshold float64
+	WeeklySurplusThreshold  float64
 }
 
 // Calculator computes the slack signal. It is safe for concurrent use; a
@@ -126,20 +126,25 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 	quietThreshold := time.Duration(c.config.QuietPeriodSeconds) * time.Second
 	priorityQuietOk := !hasEvent || quietFor >= quietThreshold
 
-	headroomOk := resp.SlackCombinedFraction != nil &&
-		*resp.SlackCombinedFraction >= c.config.ReleaseThreshold
+	sessionHeadroomOk := resp.Session != nil &&
+		resp.Session.SlackFraction != nil &&
+		*resp.Session.SlackFraction >= c.config.SessionSurplusThreshold
+	weeklyHeadroomOk := resp.Weekly != nil &&
+		resp.Weekly.SlackFraction != nil &&
+		*resp.Weekly.SlackFraction >= c.config.WeeklySurplusThreshold
 
 	freshOk, err := c.baselineFreshnessOk(now)
 	if err != nil {
 		return nil, err
 	}
 
-	resp.Gates["headroom"] = headroomOk
+	resp.Gates["session_headroom"] = sessionHeadroomOk
+	resp.Gates["weekly_headroom"] = weeklyHeadroomOk
 	resp.Gates["priority_quiet"] = priorityQuietOk
 	resp.Gates["baseline_freshness"] = freshOk
 	resp.Gates["not_paused"] = !paused
 
-	resp.ReleaseRecommended = headroomOk && priorityQuietOk && freshOk && !paused
+	resp.ReleaseRecommended = sessionHeadroomOk && weeklyHeadroomOk && priorityQuietOk && freshOk && !paused
 
 	return resp, nil
 }
@@ -282,10 +287,6 @@ func (c *Calculator) quietFor(now time.Time) (time.Duration, bool, error) {
 // baselineFreshnessOk implements the freshness gate from
 // docs/slack-indicator.md: the gate passes iff a snapshot exists and is no
 // older than BaselineMaxAgeHours. Missing snapshot fails the gate.
-//
-// The previous formulation also evaluated "drift since stale snapshot" against
-// a dollar-denominated quota. With the switch to percent-used snapshots there
-// is no per-window dollar quota to compare against, so the drift leg is gone.
 func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
 	var receivedAt time.Time
 	err := c.db.QueryRow(`

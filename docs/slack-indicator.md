@@ -65,21 +65,27 @@ the queue is expected to apply one client-side gate of its own.
 
 ### Server-side gates (set `release_recommended`)
 
-1. **Headroom gate.** Release work only if `slack_fraction >= release_threshold`
-   (suggested default: `0.10`). Note: this threshold is in *quota-fraction* units, not
-   "% below pace." The relationship between the two is
-   `slack_fraction = progress(t) * (1 - U/E)`, so the same threshold demands more
-   underutilization early in a window than late. This is the desired behavior: early
-   on we don't yet know the user's intent; late on, unspent budget is about to expire
-   and is genuinely safe to consume.
+1. **Session headroom gate.** Release work only if
+   `session.slack_fraction >= session_surplus_threshold` (suggested default: `0.50`).
+2. **Weekly headroom gate.** Release work only if
+   `weekly.slack_fraction >= weekly_surplus_threshold` (suggested default: `0.10`).
 
-2. **Priority quiet gate.** If the user has issued a Claude Code request in the last
+   Two independent thresholds, not a `min(session, weekly)` combined fraction, because
+   the two windows have very different time horizons: a 5-hour session can recover
+   from over-burn within hours, while a weekly over-burn lingers for days. A high
+   bar on the session and a low bar on the weekly captures "leave the user enough
+   short-term headroom to do real work, but don't sit on excess long-term capacity."
+   Both thresholds are in *quota-fraction* units. The relationship to pace is
+   `slack_fraction = progress(t) * (1 - U/E)`, so the same threshold demands more
+   underutilization early in a window than late.
+
+3. **Priority quiet gate.** If the user has issued a Claude Code request in the last
    `priority_quiet_period` (suggested default: 5 minutes), refuse release. Prevents
    racing the user's interactive loop and stealing their headroom.
 
-3. **Baseline freshness gate.** See dedicated section below.
+4. **Baseline freshness gate.** See dedicated section below.
 
-4. **Not-paused gate.** The user can pause the slack signal from the tray menu (see
+5. **Not-paused gate.** The user can pause the slack signal from the tray menu (see
    `docs/tray-app.md`). When paused, the endpoint still computes and returns the
    numeric fields so dashboards keep working, but `paused: true` and the gate fails.
    A queue distinguishing "paused" from "below threshold" can read `paused` directly.
@@ -126,10 +132,11 @@ Response:
   "paused": false,
   "release_recommended": true,
   "gates": {
-    "headroom":          true,
-    "priority_quiet":    true,
+    "session_headroom":   true,
+    "weekly_headroom":    true,
+    "priority_quiet":     true,
     "baseline_freshness": true,
-    "not_paused":        true
+    "not_paused":         true
   }
 }
 ```
@@ -141,13 +148,6 @@ fractions and apply its own logic.
 
 The gate passes iff a snapshot exists and is no older than `baseline_max_age`
 (suggested 48 hours). Missing snapshot fails the gate.
-
-The previous formulation also had a "drift since stale snapshot" leg comparing
-dollar consumption against a dollar-denominated quota_total. With the v0.2 switch
-to percent-used snapshots there is no per-window dollar quota to compare against,
-so the drift leg has been retired. `BaselineDriftThreshold` config remains in
-place because the dashboard's `drift_alert` still uses it; the slack endpoint no
-longer does.
 
 ## Why uniform burn for `E(t)`
 

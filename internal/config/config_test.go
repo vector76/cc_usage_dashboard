@@ -30,23 +30,17 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Logging.File != "" {
 		t.Errorf("expected logging file empty by default, got %q", cfg.Logging.File)
 	}
-	if cfg.Slack.ReleaseThreshold != 0.10 {
-		t.Errorf("expected release_threshold 0.10, got %f", cfg.Slack.ReleaseThreshold)
+	if cfg.Slack.SessionSurplusThreshold != 0.50 {
+		t.Errorf("expected session_surplus_threshold 0.50, got %f", cfg.Slack.SessionSurplusThreshold)
+	}
+	if cfg.Slack.WeeklySurplusThreshold != 0.10 {
+		t.Errorf("expected weekly_surplus_threshold 0.10, got %f", cfg.Slack.WeeklySurplusThreshold)
 	}
 	if cfg.Slack.BaselineMaxAgeHours != 48 {
 		t.Errorf("expected baseline_max_age_hours 48, got %d", cfg.Slack.BaselineMaxAgeHours)
 	}
-	if cfg.Slack.BaselineDriftThreshold != 0.25 {
-		t.Errorf("expected baseline_drift_threshold 0.25, got %f", cfg.Slack.BaselineDriftThreshold)
-	}
 	if cfg.Tailer.PollIntervalMs != 1000 {
 		t.Errorf("expected poll_interval_ms 1000, got %d", cfg.Tailer.PollIntervalMs)
-	}
-	if cfg.Subscription.MonthlyUSD != 20.0 {
-		t.Errorf("expected monthly_usd 20.0, got %f", cfg.Subscription.MonthlyUSD)
-	}
-	if cfg.Subscription.BillingCycleDays != 30 {
-		t.Errorf("expected billing_cycle_days 30, got %d", cfg.Subscription.BillingCycleDays)
 	}
 	if cfg.Retention.ParseErrorsDays != 30 {
 		t.Errorf("expected parse_errors retention 30 days, got %d", cfg.Retention.ParseErrorsDays)
@@ -78,12 +72,9 @@ logging:
   level: debug
   file: "/tmp/trayapp.log"
 slack:
-  release_threshold: 0.20
+  session_surplus_threshold: 0.75
+  weekly_surplus_threshold: 0.05
   baseline_max_age_hours: 24
-  baseline_drift_threshold: 0.5
-subscription:
-  monthly_usd: 50.0
-  billing_cycle_days: 31
 `
 
 	if _, err := tmpFile.WriteString(content); err != nil {
@@ -117,20 +108,14 @@ subscription:
 	if cfg.Logging.File != "/tmp/trayapp.log" {
 		t.Errorf("expected logging file '/tmp/trayapp.log', got %q", cfg.Logging.File)
 	}
-	if cfg.Slack.ReleaseThreshold != 0.20 {
-		t.Errorf("expected release_threshold 0.20, got %f", cfg.Slack.ReleaseThreshold)
+	if cfg.Slack.SessionSurplusThreshold != 0.75 {
+		t.Errorf("expected session_surplus_threshold 0.75, got %f", cfg.Slack.SessionSurplusThreshold)
+	}
+	if cfg.Slack.WeeklySurplusThreshold != 0.05 {
+		t.Errorf("expected weekly_surplus_threshold 0.05, got %f", cfg.Slack.WeeklySurplusThreshold)
 	}
 	if cfg.Slack.BaselineMaxAgeHours != 24 {
 		t.Errorf("expected baseline_max_age_hours 24, got %d", cfg.Slack.BaselineMaxAgeHours)
-	}
-	if cfg.Slack.BaselineDriftThreshold != 0.5 {
-		t.Errorf("expected baseline_drift_threshold 0.5, got %f", cfg.Slack.BaselineDriftThreshold)
-	}
-	if cfg.Subscription.MonthlyUSD != 50.0 {
-		t.Errorf("expected monthly_usd 50.0, got %f", cfg.Subscription.MonthlyUSD)
-	}
-	if cfg.Subscription.BillingCycleDays != 31 {
-		t.Errorf("expected billing_cycle_days 31, got %d", cfg.Subscription.BillingCycleDays)
 	}
 }
 

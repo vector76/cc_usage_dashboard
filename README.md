@@ -12,8 +12,9 @@ Anthropic's Claude Code subscription enforces two rolling quotas:
 The official UI shows a current point-in-time view. This project adds:
 
 - **History** — burn-down charts for both the 5-hour and weekly windows.
-- **Effective discount** — what your subscription actually costs vs. the API-equivalent
-  dollar value of the tokens you ran through it.
+- **Consumption report** — dollar-equivalent value of the tokens you ran through it
+  over a chosen period, plus how much of the session and weekly quotas you consumed
+  in that same period (both can exceed 100% over a multi-window period).
 - **Slack signal** — when you are under-utilizing your allocation, an HTTP endpoint
   surfaces the unused capacity that would otherwise expire at the window boundary, so a
   job queue can opportunistically run cheap-but-not-worth-real-money work for free.

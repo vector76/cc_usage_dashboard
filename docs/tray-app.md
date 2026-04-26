@@ -72,10 +72,10 @@ subscription:
 price_table_path: "%APPDATA%\\usage_dashboard\\prices.yaml"
 
 slack:
-  release_threshold: 0.10
+  session_surplus_threshold: 0.50
+  weekly_surplus_threshold: 0.10
   priority_quiet_period_seconds: 300
   baseline_max_age_hours: 48
-  baseline_drift_threshold: 0.25
 
 logging:
   level: info

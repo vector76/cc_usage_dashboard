@@ -17,10 +17,10 @@ func newCalc(t *testing.T) (*Calculator, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	cfg := Config{
-		QuietPeriodSeconds:     300,
-		ReleaseThreshold:       0.10,
-		BaselineMaxAgeHours:    48,
-		BaselineDriftThreshold: 0.25,
+		QuietPeriodSeconds:      300,
+		BaselineMaxAgeHours:     48,
+		SessionSurplusThreshold: 0.50,
+		WeeklySurplusThreshold:  0.10,
 	}
 	return NewCalculator(s.DB(), cfg), s
 }
@@ -377,67 +377,125 @@ func seedFreshSnapshot(t *testing.T, s *store.Store, receivedAt time.Time, sessi
 	}
 }
 
-// (g) Headroom gate fires off ReleaseThreshold, not the historical
-// HeadroomThreshold. Boundary: gate passes at exactly threshold and below
-// threshold fails.
-func TestHeadroomGate_ReleaseThresholdBoundary(t *testing.T) {
+// newCalcWithThresholds builds a Calculator with custom surplus thresholds.
+// Used by TestHeadroomGates_DualThresholdsBoundaries to put both gates near
+// their boundaries with the same window/event setup.
+func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh float64) (*Calculator, *store.Store) {
+	t.Helper()
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	cfg := Config{
+		QuietPeriodSeconds:      300,
+		BaselineMaxAgeHours:     48,
+		SessionSurplusThreshold: sessionThresh,
+		WeeklySurplusThreshold:  weeklyThresh,
+	}
+	return NewCalculator(s.DB(), cfg), s
+}
+
+// (g) session_headroom and weekly_headroom gates fire independently against
+// their own configured surplus thresholds. The session gate uses the
+// session window's slack_fraction; the weekly gate uses the weekly's.
+// release_recommended requires both to pass (plus the other gates).
+//
+// Setup: session window started_at=now-1h, ends_at=now+4h, baseline=1000
+//
+//	progress=0.2, expected=200, slack_fraction(session) = (200-Cs)/1000
+//
+// weekly window started_at=now-24h, ends_at=now+6*24h, baseline=10000
+//
+//	progress≈0.1428, expected≈1428.6, slack_fraction(weekly) = (1428.6-Cw)/10000
+//
+// Cs = consumption charged inside session window (event in [now-1h, now+4h]).
+// Cw = total consumption inside weekly window (any event in last 24h fits).
+// Thresholds chosen so both gates sit near 0.10 with realistic loads.
+func TestHeadroomGates_DualThresholdsBoundaries(t *testing.T) {
 	tests := []struct {
-		name     string
-		consumed float64 // dollars consumed in 5h window (baseline=1000)
-		// Window: started_at = now-1h, ends_at = now+4h, baseline=1000.
-		// progress=0.2, expected=200, slack=200-consumed,
-		// slack_fraction(5h) = (200-consumed)/1000.
-		// Weekly: started_at = now-24h, ends_at = now+6*24h, baseline=10000.
-		// progress=24/(7*24)=1/7≈0.1428, expected=1428.6,
-		// slack=1428.6-consumed, slack_fraction(weekly)≈0.1428 - consumed/10000.
-		// 5h is the binding (smaller) fraction in this layout.
-		wantHeadroom bool
+		name                                  string
+		sessionEventCost, weeklyOnlyEventCost float64
+		wantSession, wantWeekly, wantRelease  bool
 	}{
-		// Threshold = 0.10. consumed=100 → 5h slack_fraction = (200-100)/1000 = 0.10.
-		{"exactly at threshold", 100.0, true},
-		// consumed=101 → 5h slack_fraction = 0.099 < 0.10.
-		{"just below threshold", 101.0, false},
+		{
+			// Cs=50 → session_frac = 0.15 ≥ 0.10 ✓
+			// Cw=50 → weekly_frac ≈ 0.138 ≥ 0.10 ✓
+			name:             "both pass",
+			sessionEventCost: 50.0, weeklyOnlyEventCost: 0.0,
+			wantSession: true, wantWeekly: true, wantRelease: true,
+		},
+		{
+			// Cs=150 → session_frac = 0.05 < 0.10 ✗
+			// Cw=150 → weekly_frac ≈ 0.128 ≥ 0.10 ✓
+			name:             "session fails, weekly passes",
+			sessionEventCost: 150.0, weeklyOnlyEventCost: 0.0,
+			wantSession: false, wantWeekly: true, wantRelease: false,
+		},
+		{
+			// Cs=50 (in-session) → session_frac = 0.15 ≥ 0.10 ✓
+			// Cw=50 + 600 (out-of-session, in-weekly) = 650 → weekly_frac
+			//   ≈ (1428.6-650)/10000 ≈ 0.078 < 0.10 ✗
+			name:             "weekly fails, session passes",
+			sessionEventCost: 50.0, weeklyOnlyEventCost: 600.0,
+			wantSession: true, wantWeekly: false, wantRelease: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, s := newCalc(t)
+			c, s := newCalcWithThresholds(t, 0.10, 0.10)
 			defer s.Close()
 
 			now := time.Now().UTC()
 			insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
 			insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 10000.0, "snapshot:1")
 
-			cost := tt.consumed
-			if _, err := s.InsertUsageEvent(
-				now.Add(-30*time.Minute), "api",
-				"sess-h", "msg-h", "", "claude-3-5-sonnet-20241022",
-				1, 1, 0, 0,
-				&cost, "reported", "{}",
-			); err != nil {
-				t.Fatalf("insert event: %v", err)
+			if tt.sessionEventCost > 0 {
+				cost := tt.sessionEventCost
+				if _, err := s.InsertUsageEvent(
+					now.Add(-30*time.Minute), "api",
+					"sess-h", "msg-h", "", "claude-3-5-sonnet-20241022",
+					1, 1, 0, 0,
+					&cost, "reported", "{}",
+				); err != nil {
+					t.Fatalf("insert in-session event: %v", err)
+				}
 			}
-			// Fresh snapshot so freshness gate doesn't interfere.
+			if tt.weeklyOnlyEventCost > 0 {
+				cost := tt.weeklyOnlyEventCost
+				// Place this event before the session window starts so it
+				// counts toward weekly only, not session.
+				if _, err := s.InsertUsageEvent(
+					now.Add(-3*time.Hour), "api",
+					"sess-w", "msg-w", "", "claude-3-5-sonnet-20241022",
+					1, 1, 0, 0,
+					&cost, "reported", "{}",
+				); err != nil {
+					t.Fatalf("insert weekly-only event: %v", err)
+				}
+			}
+			// Fresh snapshot so freshness gate doesn't interfere with the
+			// release_recommended decision.
 			seedFreshSnapshot(t, s, now, 5.0)
 
 			resp, err := c.GetSlack()
 			if err != nil {
 				t.Fatalf("GetSlack: %v", err)
 			}
-			if resp.SlackCombinedFraction == nil {
-				t.Fatal("expected non-nil slack_combined_fraction")
+			if got := resp.Gates["session_headroom"]; got != tt.wantSession {
+				t.Errorf("session_headroom: got %v want %v", got, tt.wantSession)
 			}
-			if got := resp.Gates["headroom"]; got != tt.wantHeadroom {
-				t.Errorf("headroom gate: got %v, want %v (combined=%v)",
-					got, tt.wantHeadroom, *resp.SlackCombinedFraction)
+			if got := resp.Gates["weekly_headroom"]; got != tt.wantWeekly {
+				t.Errorf("weekly_headroom: got %v want %v", got, tt.wantWeekly)
+			}
+			if resp.ReleaseRecommended != tt.wantRelease {
+				t.Errorf("ReleaseRecommended: got %v want %v", resp.ReleaseRecommended, tt.wantRelease)
 			}
 		})
 	}
 }
 
-// (h) Baseline freshness gate is purely an age check now: passes iff a
-// snapshot exists and is no older than BaselineMaxAgeHours. The pre-rewrite
-// "drift threshold once stale" leg has been retired alongside the dollar-
-// denominated quota_total — there is no per-window dollar quota anymore.
+// (h) Baseline freshness gate is purely an age check: passes iff a snapshot
+// exists and is no older than BaselineMaxAgeHours.
 func TestBaselineFreshness_AgeBoundary(t *testing.T) {
 	tests := []struct {
 		name     string

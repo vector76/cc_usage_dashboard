@@ -7,14 +7,11 @@ import (
 	"testing"
 )
 
-func TestHandleDiscount_ResponseShape(t *testing.T) {
+func TestHandleConsumption_ResponseShape(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()
 
-	srv.cfg.Subscription.MonthlyUSD = 200
-	srv.cfg.Subscription.BillingCycleDays = 30
-
-	req := httptest.NewRequest("GET", "/discount?period=7d", nil)
+	req := httptest.NewRequest("GET", "/consumption?period=7d", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -29,11 +26,10 @@ func TestHandleDiscount_ResponseShape(t *testing.T) {
 
 	required := []string{
 		"period", "period_start", "period_end",
-		"consumed_usd_equivalent", "subscription_cost_prorated_usd",
-		"value_ratio", "discount_pct", "savings_usd",
+		"consumed_usd_equivalent",
+		"consumed_session_pct", "consumed_weekly_pct",
 		"events_total", "events_with_reported_cost",
 		"events_with_computed_cost", "events_without_cost",
-		"cost_coverage_pct",
 	}
 	for _, k := range required {
 		if _, ok := got[k]; !ok {
@@ -44,24 +40,20 @@ func TestHandleDiscount_ResponseShape(t *testing.T) {
 	if got["period"] != "7d" {
 		t.Errorf("period: got %v, want \"7d\"", got["period"])
 	}
-
-	// With no events, ratios must be null and savings must equal -S.
-	if got["value_ratio"] != nil {
-		t.Errorf("value_ratio: got %v, want null", got["value_ratio"])
+	// With no snapshots, percent fields must be null ("couldn't measure").
+	if got["consumed_session_pct"] != nil {
+		t.Errorf("consumed_session_pct: got %v, want null", got["consumed_session_pct"])
 	}
-	if got["discount_pct"] != nil {
-		t.Errorf("discount_pct: got %v, want null", got["discount_pct"])
+	if got["consumed_weekly_pct"] != nil {
+		t.Errorf("consumed_weekly_pct: got %v, want null", got["consumed_weekly_pct"])
 	}
 }
 
-func TestHandleDiscount_DefaultPeriod(t *testing.T) {
+func TestHandleConsumption_DefaultPeriod(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()
 
-	srv.cfg.Subscription.MonthlyUSD = 200
-	srv.cfg.Subscription.BillingCycleDays = 30
-
-	req := httptest.NewRequest("GET", "/discount", nil)
+	req := httptest.NewRequest("GET", "/consumption", nil)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
