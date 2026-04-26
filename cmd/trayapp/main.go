@@ -78,7 +78,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
 		os.Exit(1)
 	}
-	defer db.Close()
+	// db.Close is invoked explicitly during graceful shutdown after the
+	// WAL checkpoint, so we don't defer it here.
 
 	slog.Info("Claude Usage Dashboard starting", "version", Version, "db", cfg.Database.Path)
 
@@ -166,22 +167,47 @@ waitLoop:
 		}
 	}
 
-	shutdownDone := make(chan struct{})
+	slog.Info("shutting down gracefully")
+
+	// Phase 1: drain in-flight HTTP requests with a 10s deadline so
+	// long-running handlers (e.g. dashboard fetches) can complete.
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := srv.Shutdown(httpCtx); err != nil {
+		slog.Error("HTTP shutdown error", "err", err)
+	}
+	cancelHTTP()
+
+	// Phase 2: stop background goroutines (retention pruner, windows
+	// ticker, tailer, tray UI). tailer.Stop is invoked inside the
+	// goroutine so a stuck tailer is also bounded by the 10s timeout
+	// — otherwise a hung tailer blocks process exit indefinitely.
+	close(stop)
+	cancelTray()
+
+	bgDone := make(chan struct{})
 	go func() {
-		slog.Info("shutting down gracefully")
-		close(stop)
-		cancelTray()
 		tailer.Stop()
 		wg.Wait()
-		close(shutdownDone)
+		close(bgDone)
 	}()
-
 	select {
-	case <-shutdownDone:
-		slog.Info("shutdown complete")
-	case <-time.After(5 * time.Second):
-		slog.Warn("shutdown timeout, forcing exit")
+	case <-bgDone:
+	case <-time.After(10 * time.Second):
+		slog.Warn("background goroutines did not exit within 10s, continuing shutdown")
 	}
+
+	// Phase 3: consolidate the WAL into the main DB file so the on-disk
+	// state is fully durable and the -wal sidecar is shrunk before we
+	// close the connection.
+	if err := db.Checkpoint(); err != nil {
+		slog.Error("wal checkpoint failed", "err", err)
+	}
+
+	if err := db.Close(); err != nil {
+		slog.Error("db close failed", "err", err)
+	}
+
+	slog.Info("shutdown complete")
 }
 
 // runRetentionLoop prunes parse_errors and slack_samples on a 5-minute cadence

@@ -2,9 +2,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/anthropics/usage-dashboard/internal/config"
@@ -33,6 +36,13 @@ type Server struct {
 	windowsEngine *windows.Engine
 	dashboardHandler *dashboard.Handler
 	tailerStatus TailerStatus
+
+	// httpServers tracks every *http.Server this Server is currently
+	// running so Shutdown can drain them all. The trayapp binds to
+	// multiple addresses (loopback + detected interfaces), so each
+	// ListenAndServe/Serve call appends one entry.
+	mu          sync.Mutex
+	httpServers []*http.Server
 }
 
 // New creates a new HTTP server.
@@ -272,8 +282,53 @@ func (s *Server) handleParseError(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ListenAndServe starts the HTTP server.
+// ListenAndServe starts the HTTP server bound to addr. The underlying
+// *http.Server is recorded so Shutdown(ctx) can drain it. Returns
+// http.ErrServerClosed when Shutdown completes cleanly.
 func (s *Server) ListenAndServe(addr string) error {
 	slog.Info("starting HTTP server", "addr", addr)
-	return http.ListenAndServe(addr, s)
+	hs := &http.Server{Addr: addr, Handler: s}
+	s.registerHTTPServer(hs)
+	return hs.ListenAndServe()
+}
+
+// Serve runs the HTTP server on a pre-bound listener. Used by tests that
+// need to discover the actual port (Listen with :0). The underlying
+// *http.Server is recorded so Shutdown(ctx) can drain it.
+func (s *Server) Serve(ln net.Listener) error {
+	hs := &http.Server{Handler: s}
+	s.registerHTTPServer(hs)
+	return hs.Serve(ln)
+}
+
+func (s *Server) registerHTTPServer(hs *http.Server) {
+	s.mu.Lock()
+	s.httpServers = append(s.httpServers, hs)
+	s.mu.Unlock()
+}
+
+// Shutdown gracefully stops all registered HTTP servers, allowing
+// in-flight requests to complete until ctx is cancelled. Servers are
+// drained concurrently so the worst-case wait is the slowest server,
+// not the sum across servers (the trayapp binds to multiple
+// interfaces). Returns the first non-nil error encountered.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	servers := append([]*http.Server(nil), s.httpServers...)
+	s.mu.Unlock()
+
+	errs := make(chan error, len(servers))
+	for _, hs := range servers {
+		go func(hs *http.Server) {
+			errs <- hs.Shutdown(ctx)
+		}(hs)
+	}
+
+	var firstErr error
+	for range servers {
+		if err := <-errs; err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }

@@ -52,6 +52,17 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// Checkpoint runs PRAGMA wal_checkpoint(TRUNCATE) to flush the WAL into
+// the main DB file and shrink the -wal sidecar back to zero bytes.
+// Called during shutdown so the on-disk DB is fully consolidated before
+// the process exits.
+func (s *Store) Checkpoint() error {
+	if _, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		return fmt.Errorf("failed to run wal_checkpoint: %w", err)
+	}
+	return nil
+}
+
 // DB returns the underlying sql.DB for direct access when needed.
 func (s *Store) DB() *sql.DB {
 	return s.db
