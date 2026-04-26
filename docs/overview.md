@@ -1,0 +1,97 @@
+# Overview
+
+## Problem statement
+
+Claude Code subscriptions are billed as a flat monthly fee, but consumption is governed by
+two rolling quotas:
+
+- **5-hour window**: a quota that resets 5 hours after first use following a previous
+  reset. The window only begins ticking when the user makes a request, so the start
+  time is user-driven, not wall-clock.
+- **Weekly quota**: a 7-day quota with a fixed end time exposed by the dashboard.
+  Whether Anthropic implements this as a calendar week, a billing-day-aligned week, or
+  something else is opaque to us; the snapshot's `weekly_window_ends` tells us where
+  the boundary is, and we model it as a fixed `[t0, t1]` window for burn-down purposes.
+
+Both quotas are denominated internally in something approximating "API-equivalent token
+cost in USD." The subscription effectively grants the user a fixed dollar-equivalent budget
+per 5-hour window and per week. The actual on-paper subscription cost is constant.
+
+Two consequences follow:
+
+1. **The subscription's effective discount varies by usage.** If a user consumes the full
+   weekly quota, the discount vs. paying API rates is large. If they consume little, the
+   discount shrinks or inverts.
+2. **Unused budget is forfeit at window boundaries.** Tokens not spent in a 5-hour window
+   do not roll over. Underutilization is a true economic loss.
+
+Today the user can see a single point-in-time number in the browser dashboard or via
+`clusage`. There is no history, no burn-down visualization, no slack signal, and no way to
+opportunistically consume slack with low-priority background work.
+
+## Goals
+
+This project aims to:
+
+1. **Record** every Claude Code invocation's token usage and dollar-equivalent cost,
+   continuously, with no perturbation of the quota itself.
+2. **Visualize** burn-down for both the 5-hour and weekly windows, with historical trends.
+3. **Compute** the effective subscription discount (sum of dollar-equivalent token cost
+   over a period vs. the prorated subscription cost over the same period).
+4. **Expose a slack signal** that a queueing system can poll to decide whether to release
+   low-priority work — work that would not be worth doing at API rates but is worth doing
+   for free.
+5. **Remain self-hosted and credential-light.** No online backend, no cloud account, no
+   shared secrets beyond what already lives on the user's host.
+
+## Non-goals
+
+- **Multi-user / multi-tenant.** This is a personal tool.
+- **Replacing the official dashboard.** Anthropic's UI remains authoritative for current
+  quota state; this tool provides history and derived signals.
+- **Billing reconciliation against Anthropic invoices.** The dollar-equivalent figures are
+  whatever Claude Code reports; we treat them as opaque inputs.
+- **Acting as a job runner itself.** The slack signal is a *signal*. A separate queue
+  consumes it. The dashboard does not execute user jobs.
+
+## Constraints
+
+- **Windows host** is the primary always-on machine and the only place with a logged-in
+  browser session for `claude.ai`.
+- **Docker containers** on the same host are where most Claude Code work happens. They
+  must be able to register usage cheaply.
+- **Polling perturbs the quota.** `clusage` and any wrapper that calls Claude Code to read
+  state will start a new 5-hour window if one is not active, contaminating the very thing
+  being measured. Therefore the primary data source must be passive.
+- **Browser snapshots are intermittent.** The dashboard page is only loaded when the user
+  chooses to load it. Any architecture that requires authoritative snapshots on a fixed
+  cadence is fragile.
+
+## Design principles
+
+- **Passive over active.** Prefer reading state that is already produced as a side
+  effect of normal usage (session JSONL on disk; the transcript referenced by Stop
+  hooks) over actively polling.
+- **One process, one file on Windows.** A single Go `.exe` containing tray UI, HTTP server,
+  SQLite DB, log tailer, and dashboard. Easy to autostart, easy to uninstall.
+- **Clean HTTP API.** The container CLI, the userscript, and a future Cloudflare tunnel
+  all speak the same JSON-over-HTTP protocol. No bespoke transports.
+- **Derived state, not stored state.** The 5-hour-remaining figure is *computed* from
+  baseline snapshots plus passive usage logs. It is not stored as an authoritative number
+  that must be kept in sync.
+- **Fail loud about calibration drift.** If passive accounting and snapshot data disagree
+  by more than a threshold, surface it in the tray UI rather than silently averaging.
+
+## What "done" looks like for v1
+
+- Tray app runs on logon, shows current 5-hour and weekly burn percentages in tooltip.
+- Containers can register usage with a one-line Stop hook (`clusage-cli log --from-hook
+  || true`); a bind-mount of `~/.claude` works too for hosts that prefer that path.
+- Local dashboard at `http://localhost:PORT` shows two burn-down charts and an effective
+  discount widget.
+- A `/slack` HTTP endpoint returns a numeric slack signal suitable for polling by an
+  external queue.
+- Userscript posts a snapshot whenever the user loads the claude.ai dashboard.
+
+Anything beyond this — headless scraping, a job runner, multi-machine sync — is explicitly
+deferred to v2+.
