@@ -54,6 +54,20 @@ function fmt(x, d) {
   return Number(x).toFixed(d == null ? 2 : d);
 }
 function fmtTime(s) { return s ? new Date(s).toLocaleString() : "—"; }
+// fmtAxisTime renders a short time label for the burn-down X axis. For
+// short windows (session, ≤24h) we show "HH:MM" in local time; for longer
+// windows (weekly) we prefix the weekday so "Thu 23:00" is unambiguous.
+function fmtAxisTime(ms, durationMs) {
+  const d = new Date(ms);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const time = `${hh}:${mm}`;
+  if (durationMs > 24 * 60 * 60 * 1000) {
+    const day = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
+    return `${day} ${time}`;
+  }
+  return time;
+}
 function el(tag, attrs, text) {
   const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
   for (const k in attrs) e.setAttribute(k, attrs[k]);
@@ -146,8 +160,9 @@ function renderBurnDown(svgID, win) {
   }
 
   // axis labels
-  svg.appendChild(el("text", { x: P, y: H - 8, "font-size": "10", fill: "#444" }, "start"));
-  svg.appendChild(el("text", { x: W - P, y: H - 8, "font-size": "10", fill: "#444", "text-anchor": "end" }, "end"));
+  const dur = end - start;
+  svg.appendChild(el("text", { x: P, y: H - 8, "font-size": "10", fill: "#444" }, fmtAxisTime(start, dur)));
+  svg.appendChild(el("text", { x: W - P, y: H - 8, "font-size": "10", fill: "#444", "text-anchor": "end" }, fmtAxisTime(end, dur)));
   svg.appendChild(el("text", { x: 4, y: P + 4, "font-size": "10", fill: "#444" }, "100%"));
   svg.appendChild(el("text", { x: 4, y: H - P, "font-size": "10", fill: "#444" }, "0"));
 }
