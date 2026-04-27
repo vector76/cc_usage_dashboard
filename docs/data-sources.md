@@ -110,6 +110,26 @@ the implementation plan.
 - Recovering from a multi-day gap in passive data.
 - Cross-checking when the slack indicator looks suspicious.
 
+### Limbo signal: `session_active`
+
+When Anthropic's UI shows "Starts when a message is sent" instead of a
+"Resets in …" hint on the Current session row, no 5-hour window is
+currently open. The userscript detects this DOM cue and reports it on
+the snapshot POST as `session_active: false`. The convention is:
+
+- **Field absent** ⇒ unknown. The script could not positively decide,
+  so it does not include the key. The server records `NULL`.
+- **`session_active: false`** ⇒ positively-detected limbo. The script
+  matched the "Starts when a message is sent" hint.
+- **`session_active: true`** is never sent by the userscript. Absence
+  already covers "the script saw a normal Resets hint"; the server
+  must not infer truth from omission.
+
+This three-valued convention lets downstream consumers distinguish "we
+have no information" from "we know there is no active session." See
+`docs/no-active-session.md` for what the trayapp does with the
+signal.
+
 ## Tier 3 — Headless browser scrape (deferred)
 
 **Status: not built. Escalation only.**

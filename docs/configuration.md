@@ -50,6 +50,36 @@ logging:
   file: ""                          # empty -> stdout; otherwise rotated file path
 ```
 
+## Slack absolute thresholds
+
+`session_absolute_threshold` and `weekly_absolute_threshold` parameterise
+the absolute-floor leg of each headroom gate. They share a single
+convention:
+
+- Units are a **fraction in `[0, 1]`** of the full quota, not a
+  percentage. The gate passes when `percent_used <= 100 * (1 - T)`.
+  So `0.98` means "release while at most 2% of the window is used,"
+  and `0.80` means "release while at most 20% is used."
+- **`1.0` disables the absolute branch.** With `T = 1.0` the comparison
+  becomes `percent_used <= 0`, which is unreachable in practice — only
+  the pace-relative surplus leg can fire the gate. Use this when the
+  absolute floor is unwanted (e.g. for tuning experiments where only
+  surplus-relative behaviour is being measured).
+- `0.0` would mean "release at any usage level," which collapses the
+  gate to "always pass" via the absolute leg. This is allowed but
+  rarely useful.
+
+Defaults match the values shown in the YAML block above:
+`session_absolute_threshold: 0.98` and `weekly_absolute_threshold: 0.80`.
+The threshold meanings and the disjunctive structure of the headroom
+gates are documented in full in `docs/slack-indicator.md`.
+
+The session headroom gate also has a third disjunct unrelated to this
+threshold — "session window absent entirely" — which short-circuits to
+true when there is no active session window. That leg is independent of
+`session_absolute_threshold`; setting the threshold to `1.0` does not
+suppress it. See `docs/no-active-session.md` for the wiring.
+
 ## Path placeholders
 
 `%APPDATA%`, `%LOCALAPPDATA%`, `%USERPROFILE%`, and `%HOME%` placeholders

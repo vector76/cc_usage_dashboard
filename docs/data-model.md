@@ -52,7 +52,25 @@ later, headless scrape).
 | session_window_ends   | TIMESTAMP    | When the current 5-hour session resets.        |
 | weekly_used           | REAL         | "All models" weekly % used (0–100). Nullable.  |
 | weekly_window_ends    | TIMESTAMP    | When the weekly window resets.                 |
+| session_active        | INTEGER      | Tri-state limbo signal. Nullable. See below.   |
 | raw_json              | TEXT         | Full payload for replay.                       |
+
+`session_active` is a tri-state column added by migration v4
+(`add_quota_snapshots_session_active`) as a nullable `INTEGER`:
+
+- `NULL` — the source did not report the field. Treat as "unknown"; do
+  not infer presence or absence of an active session window from this.
+- `0` (false) — the source positively detected "no active session"
+  limbo (Anthropic's UI shows "Starts when a message is sent" instead
+  of a "Resets in …" hint).
+- `1` (true) — reserved. The userscript never asserts true; absence
+  encodes "unknown" instead. Other ingestion sources may set 1
+  explicitly if they have a positive signal.
+
+The window engine consumes this column to refuse minting phantom
+session windows, to early-close an active window when limbo is
+confirmed, and to gate event-anchored re-opening. See
+`docs/no-active-session.md` for the end-to-end flow.
 
 ### `windows`
 

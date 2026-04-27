@@ -112,6 +112,14 @@ they're omitted when the hint is in a format the parser doesn't recognize (e.g.
 "Resets May 1" when the boundary is far enough out that Anthropic switches to a
 date), in which case the server falls back to its calendar default.
 
+`session_active` is an optional boolean the script emits **only** when it
+positively detects "no active session" limbo (the row's "Resets …" hint
+is replaced by "Starts when a message is sent"). In that case the body
+includes `"session_active": false`. The script never emits
+`"session_active": true`; absence of the key means "unknown." See
+`docs/data-sources.md` and `docs/no-active-session.md` for how the
+server uses the tri-state signal.
+
 ## CORS
 
 Because the userscript uses `GM.xmlHttpRequest` (which bypasses CORS), the trayapp does
