@@ -10,6 +10,10 @@
   h2 { margin-top: 0; font-size: 1.1rem; }
   h3 { margin: 0 0 0.5rem 0; font-size: 0.95rem; color: #444; }
   section { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 4px; }
+  section:last-child { margin-bottom: 0; }
+  .info-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .info-row > section { margin-bottom: 0; }
+  @media (max-width: 700px) { .info-row { grid-template-columns: 1fr; } }
   .chart-block { margin-bottom: 1rem; }
   .chart-block:last-child { margin-bottom: 0; }
   .kv { display: grid; grid-template-columns: max-content auto; column-gap: 1rem; row-gap: 0.25rem; margin: 0; }
@@ -22,26 +26,27 @@
 <body>
 <h1>Claude Usage Dashboard</h1>
 
-<section id="status">
-  <h2>Status</h2>
-  <dl class="kv" id="status-kv"><dd class="muted">Loading…</dd></dl>
-</section>
+<div class="info-row">
+  <section id="status">
+    <h2>Status</h2>
+    <dl class="kv" id="status-kv"><dd class="muted">Loading…</dd></dl>
+  </section>
+  <section id="consumption">
+    <h2>Consumption (last 24h)</h2>
+    <dl class="kv" id="consumption-kv"><dd class="muted">Loading…</dd></dl>
+  </section>
+</div>
 
 <section>
   <h2>Burn-down</h2>
   <div class="chart-block">
     <h3>Session window (last 15h, current window in rightmost third)</h3>
-    <svg id="chart-session" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+    <svg id="chart-session" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
   </div>
   <div class="chart-block">
     <h3>Weekly window</h3>
-    <svg id="chart-weekly" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+    <svg id="chart-weekly" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
   </div>
-</section>
-
-<section id="consumption">
-  <h2>Consumption (last 24h)</h2>
-  <dl class="kv" id="consumption-kv"><dd class="muted">Loading…</dd></dl>
 </section>
 
 <script>
@@ -73,6 +78,20 @@ function el(tag, attrs, text) {
   for (const k in attrs) e.setAttribute(k, attrs[k]);
   if (text != null) e.textContent = text;
   return e;
+}
+// fmtTooltipTime renders a "Mon Day h:mm AM/PM" stamp in local time —
+// always carries the date so weekly tooltips spanning midnight stay
+// unambiguous. Used in volume-bar hover titles.
+function fmtTooltipTime(ms) {
+  const d = new Date(ms);
+  const month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+  let h = d.getHours();
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${month} ${d.getDate()} ${h}:${mm} ${ampm}`;
 }
 
 function renderStatus(s) {
@@ -113,7 +132,7 @@ function renderBurnDown(svgID, win, opts) {
   opts = opts || {};
   const svg = document.getElementById(svgID);
   while (svg.firstChild) svg.removeChild(svg.firstChild);
-  const W = 400, H = 200, P = 32;
+  const W = 800, H = 200, P = 40;
   const PCT_TOP = 8, PCT_BOTTOM = 132;
   const VOL_TOP = 140, VOL_BOTTOM = 184;
   const AXIS_Y = 196;
@@ -224,7 +243,7 @@ function renderBurnDown(svgID, win, opts) {
     const lx = sx(lt);
     const remaining = 100 - latest.percent_used;
     const ly = syPct(remaining);
-    svg.appendChild(el("circle", { cx: lx, cy: ly, r: "4", fill: "#06c" }));
+    svg.appendChild(el("circle", { cx: lx, cy: ly, r: "3", fill: "#06c" }));
 
     const baseLabel = fmt(remaining) + "%";
     if (lt >= start && lt < end) {
@@ -256,7 +275,7 @@ function renderBurnDown(svgID, win, opts) {
       x1: sx(start), y1: syPct(remaining), x2: sx(now), y2: syPct(remaining),
       stroke: "#06c", "stroke-width": "2"
     }));
-    svg.appendChild(el("circle", { cx: sx(now), cy: syPct(remaining), r: "4", fill: "#06c" }));
+    svg.appendChild(el("circle", { cx: sx(now), cy: syPct(remaining), r: "3", fill: "#06c" }));
     svg.appendChild(el("text", {
       x: sx(now), y: syPct(remaining) - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
     }, fmt(remaining) + "%"));
@@ -305,10 +324,17 @@ function renderBurnDown(svgID, win, opts) {
         const x = x0 + inset / 2;
         const w = Math.max(1, span - inset);
         const h = (b.cost_usd / maxVol) * volH;
-        svg.appendChild(el("rect", {
+        const rect = el("rect", {
           x: x, y: VOL_BOTTOM - h, width: w, height: h,
           fill: "#06c", opacity: "0.7"
-        }));
+        });
+        // Native browser tooltip on hover. Multi-line via newline; the
+        // first line carries the date so weekly buckets crossing midnight
+        // remain unambiguous.
+        const startLabel = fmtTooltipTime(t);
+        const endLabel = fmtTooltipTime(t + bucketMs);
+        rect.appendChild(el("title", {}, startLabel + " – " + endLabel + "\n$" + fmt(b.cost_usd)));
+        svg.appendChild(rect);
       }
       // Max-volume label on the volume panel
       svg.appendChild(el("text", {
