@@ -203,18 +203,30 @@ func (e *Engine) ensureSessionWindow() error {
 	}
 
 	// Prefer the snapshot's authoritative reset time ("Resets in N hr M min"
-	// parsed by the userscript). Falls back to event-based detection only
-	// when no snapshot has supplied an end yet.
+	// parsed by the userscript). When no future snapshot boundary is
+	// available, fall back to usage-event evidence: open a window only if a
+	// usage_event exists that postdates the most recent closed session
+	// window's ends_at (or no closed session window exists at all). This
+	// covers both natural expiration and early-closure (where ends_at is
+	// snapshot.observed_at) without minting phantom windows on snapshot-only
+	// activity.
 	var startTime, endsAt time.Time
 	if t, err := e.findSessionBoundary(); err == nil && !t.IsZero() && t.After(now) {
 		endsAt = t
 		startTime = endsAt.Add(-5 * time.Hour)
 	} else {
-		startTime, err = e.findFirstEventAfterGap("session")
-		if err != nil || startTime.IsZero() {
-			startTime = now
+		eventTime, lastClosedEnds, err := e.findEventEvidenceForOpen()
+		if err != nil {
+			return err
 		}
-		endsAt = startTime.Add(5 * time.Hour)
+		if eventTime.IsZero() {
+			return nil
+		}
+		if !lastClosedEnds.IsZero() && !eventTime.After(lastClosedEnds) {
+			return nil
+		}
+		startTime = eventTime
+		endsAt = eventTime.Add(5 * time.Hour)
 	}
 
 	// Get baseline from most recent session snapshot at or before window start
@@ -305,33 +317,30 @@ func (e *Engine) ensureWeeklyWindow() error {
 	return nil
 }
 
-// findFirstEventAfterGap finds the timestamp of the first event after a gap.
-// Returns zero time if no events exist.
-func (e *Engine) findFirstEventAfterGap(windowKind string) (time.Time, error) {
-	// Get the most recent closed window
-	var lastEnds time.Time
-	err := e.db.QueryRow(`
-		SELECT MAX(ends_at) FROM windows
-		WHERE kind = ? AND closed = 1
-	`, windowKind).Scan(&lastEnds)
-
-	if err != nil || lastEnds.IsZero() {
-		// No closed windows, return zero time
-		return time.Time{}, nil
+// findEventEvidenceForOpen returns the timestamp of the most recent usage_event
+// (zero if none) and the ends_at of the most recent closed session window
+// (zero if none). The caller decides whether to open a new session window
+// based on the event-evidence rule: open iff an event exists AND either no
+// closed session window exists or the event is strictly newer than the most
+// recent closed window's ends_at.
+func (e *Engine) findEventEvidenceForOpen() (time.Time, time.Time, error) {
+	var eventTime time.Time
+	err := e.db.QueryRow(
+		`SELECT occurred_at FROM usage_events ORDER BY occurred_at DESC LIMIT 1`,
+	).Scan(&eventTime)
+	if err != nil && err != sql.ErrNoRows {
+		return time.Time{}, time.Time{}, fmt.Errorf("failed to query latest usage event: %w", err)
 	}
 
-	// Get the first event after the window ended
-	var firstEvent time.Time
-	err = e.db.QueryRow(`
-		SELECT MIN(occurred_at) FROM usage_events
-		WHERE occurred_at > ?
-	`, store.FormatTime(lastEnds)).Scan(&firstEvent)
-
-	if err != nil || firstEvent.IsZero() {
-		return time.Time{}, nil
+	var lastClosedEnds time.Time
+	err = e.db.QueryRow(
+		`SELECT ends_at FROM windows WHERE kind = 'session' AND closed = 1 ORDER BY ends_at DESC LIMIT 1`,
+	).Scan(&lastClosedEnds)
+	if err != nil && err != sql.ErrNoRows {
+		return time.Time{}, time.Time{}, fmt.Errorf("failed to query last closed session window: %w", err)
 	}
 
-	return firstEvent, nil
+	return eventTime, lastClosedEnds, nil
 }
 
 // findBaseline finds the baseline (latest known % used) for the given window

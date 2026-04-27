@@ -105,10 +105,12 @@ func TestSnapshotCreatesWindow(t *testing.T) {
 	srv.SetNow(func() time.Time { return fixed })
 
 	used := 20.0
+	sessionEnds := fixed.Add(5 * time.Hour)
 	payload := SnapshotRequest{
-		ObservedAt:  fixed,
-		Source:      "userscript",
-		SessionUsed: &used,
+		ObservedAt:        fixed,
+		Source:            "userscript",
+		SessionUsed:       &used,
+		SessionWindowEnds: &sessionEnds,
 	}
 
 	body, _ := json.Marshal(payload)
@@ -144,10 +146,12 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 	// First snapshot: establishes the active window. Observed at the same
 	// instant as the engine's now() so that it falls within [startedAt, endsAt).
 	first := 5.0
+	sessionEnds := fixed.Add(5 * time.Hour)
 	firstPayload := SnapshotRequest{
-		ObservedAt:  fixed,
-		Source:      "userscript",
-		SessionUsed: &first,
+		ObservedAt:        fixed,
+		Source:            "userscript",
+		SessionUsed:       &first,
+		SessionWindowEnds: &sessionEnds,
 	}
 	body, _ := json.Marshal(firstPayload)
 	req := jsonPOST("/snapshot", body)

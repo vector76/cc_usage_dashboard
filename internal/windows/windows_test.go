@@ -317,8 +317,8 @@ func TestWindowExpiry(t *testing.T) {
 		t.Errorf("expected 1 open window, got %d", openCount)
 	}
 
-	// And that it starts at the post-gap event (not just at `now`) — i.e.
-	// findFirstEventAfterGap picked up the event.
+	// And that it starts at the post-gap event (the event-evidence rule
+	// anchors the new window at the most recent usage_event timestamp).
 	var newStart time.Time
 	row = s.DB().QueryRow(`SELECT started_at FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&newStart); err != nil {
@@ -468,11 +468,12 @@ func TestExpiredSessionInactiveSnapshotSuppressesPhantomWindow(t *testing.T) {
 	}
 }
 
-// TestExpiredSessionNullSessionActivePreservesLegacyBehavior confirms that
-// when the most recent snapshot's session_active is NULL (the legacy case),
-// the engine still creates a replacement session window after the prior
-// expired — i.e. the new suppression path does not trigger on NULL.
-func TestExpiredSessionNullSessionActivePreservesLegacyBehavior(t *testing.T) {
+// TestExpiredSessionNullSessionActiveNoFreshEventLeavesWindowClosed confirms
+// that under the event-evidence rule, a NULL session_active snapshot after an
+// expired window does NOT mint a phantom replacement when there is no
+// usage_event after the window's ends_at. The phantom-creation path that
+// older code took on NULL has been replaced by event-evidence-only opening.
+func TestExpiredSessionNullSessionActiveNoFreshEventLeavesWindowClosed(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()
 
@@ -513,8 +514,18 @@ func TestExpiredSessionNullSessionActivePreservesLegacyBehavior(t *testing.T) {
 	).Scan(&openCount); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
-	if openCount != 1 {
-		t.Errorf("expected 1 open session window (legacy phantom replacement) when session_active is NULL, got %d", openCount)
+	if openCount != 0 {
+		t.Errorf("expected 0 open session windows (no fresh event after expiry), got %d", openCount)
+	}
+
+	var closedCount int
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM windows WHERE kind = 'session' AND closed = 1`,
+	).Scan(&closedCount); err != nil {
+		t.Fatalf("query failed: %v", err)
+	}
+	if closedCount != 1 {
+		t.Errorf("expected 1 closed session window, got %d", closedCount)
 	}
 }
 
@@ -911,6 +922,355 @@ func TestBaselineCorrection(t *testing.T) {
 	wantSource := fmt.Sprintf("snapshot:%d", snapshotID)
 	if baselineSource != wantSource {
 		t.Errorf("expected baseline_source %q, got %q", wantSource, baselineSource)
+	}
+}
+
+// TestEventAfterNaturalExpiryOpensEventAnchoredWindow verifies the
+// event-evidence rule for a naturally-expired session window: a usage_event
+// arriving after the prior window's ends_at, with no recent inactive
+// snapshot, opens a new window anchored at the event's timestamp.
+func TestEventAfterNaturalExpiryOpensEventAnchoredWindow(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert seeding event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("first UpdateWindows: %v", err)
+	}
+
+	// Advance well past the original window's ends_at = now+5h.
+	postExpiry := now.Add(5*time.Hour + 30*time.Minute)
+	engine.SetNow(func() time.Time { return postExpiry })
+
+	// Fresh event arrives after expiry. No snapshot exists, so neither
+	// findSessionBoundary nor phantom-suppression has anything to say.
+	eventTime := postExpiry
+	if _, err := s.InsertUsageEvent(
+		eventTime, "test", "session-2", "msg-2", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert post-expiry event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("second UpdateWindows: %v", err)
+	}
+
+	var startedAt, endsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT started_at, ends_at FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&startedAt, &endsAt); err != nil {
+		t.Fatalf("query new window: %v", err)
+	}
+	if !startedAt.Equal(eventTime) {
+		t.Errorf("expected started_at=%v (event time), got %v", eventTime, startedAt)
+	}
+	wantEnds := eventTime.Add(5 * time.Hour)
+	if !endsAt.Equal(wantEnds) {
+		t.Errorf("expected ends_at=%v (event+5h), got %v", wantEnds, endsAt)
+	}
+}
+
+// TestEventAfterEarlyClosedWindowOpensEventAnchoredWindow verifies the
+// event-evidence rule for an early-closed window (closed=1, ends_at = the
+// snapshot's observed_at, in the past). A usage_event newer than that
+// ends_at — and no inactive snapshot more recent than the event — opens a
+// new window anchored at the event.
+func TestEventAfterEarlyClosedWindowOpensEventAnchoredWindow(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	// Open initial session window via an event.
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert seeding event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("first UpdateWindows: %v", err)
+	}
+
+	// Inactive+zero-used snapshot arrives well within the original window;
+	// the engine early-closes the window at this snapshot's observed_at.
+	closeTime := now.Add(2 * time.Hour)
+	engine.SetNow(func() time.Time { return closeTime })
+	inactive := false
+	usedZero := 0.0
+	if _, err := s.InsertQuotaSnapshot(
+		closeTime, closeTime, "userscript",
+		&usedZero, nil,
+		nil, nil,
+		&inactive,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert inactive snapshot: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("early-close UpdateWindows: %v", err)
+	}
+
+	// Confirm the early-close happened so the test is exercising the
+	// post-closure-event path, not natural expiry.
+	var closedCount int
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM windows WHERE kind = 'session' AND closed = 1`,
+	).Scan(&closedCount); err != nil {
+		t.Fatalf("query closed count: %v", err)
+	}
+	if closedCount != 1 {
+		t.Fatalf("expected 1 closed session window after early-close, got %d", closedCount)
+	}
+
+	// Resume: an active snapshot (no session_window_ends) supersedes the
+	// inactive one — required to clear phantom suppression — and a fresh
+	// event arrives. With no future session boundary in any snapshot, the
+	// event-evidence path runs and must open at the event timestamp.
+	eventTime := closeTime.Add(15 * time.Minute)
+	engine.SetNow(func() time.Time { return eventTime })
+	active := true
+	if _, err := s.InsertQuotaSnapshot(
+		eventTime, eventTime, "userscript",
+		nil, nil,
+		nil, nil,
+		&active,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert active snapshot: %v", err)
+	}
+	if _, err := s.InsertUsageEvent(
+		eventTime, "test", "session-2", "msg-2", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert post-close event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("post-close UpdateWindows: %v", err)
+	}
+
+	var startedAt, endsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT started_at, ends_at FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&startedAt, &endsAt); err != nil {
+		t.Fatalf("query new window: %v", err)
+	}
+	if !startedAt.Equal(eventTime) {
+		t.Errorf("expected started_at=%v (event time), got %v", eventTime, startedAt)
+	}
+	wantEnds := eventTime.Add(5 * time.Hour)
+	if !endsAt.Equal(wantEnds) {
+		t.Errorf("expected ends_at=%v (event+5h), got %v", wantEnds, endsAt)
+	}
+}
+
+// TestEventAnchoredWindowReanchorsOnSnapshotBoundary verifies that an
+// event-anchored window subsequently re-anchors via reanchorIfStale once a
+// snapshot supplies a real future session_window_ends.
+func TestEventAnchoredWindowReanchorsOnSnapshotBoundary(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	// Event creates an event-anchored window: [now, now+5h).
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("first UpdateWindows: %v", err)
+	}
+
+	var windowID int64
+	if err := s.DB().QueryRow(
+		`SELECT id FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&windowID); err != nil {
+		t.Fatalf("query event-anchored window: %v", err)
+	}
+
+	// Snapshot with a real authoritative session_window_ends differing by
+	// well more than the 2-minute tolerance.
+	snapTime := now.Add(30 * time.Minute)
+	engine.SetNow(func() time.Time { return snapTime })
+	authoritativeEnds := now.Add(4*time.Hour + 12*time.Minute)
+	active := true
+	if _, err := s.InsertQuotaSnapshot(
+		snapTime, snapTime, "userscript",
+		nil, &authoritativeEnds,
+		nil, nil,
+		&active,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("re-anchor UpdateWindows: %v", err)
+	}
+
+	var newStart, newEnds time.Time
+	var newID int64
+	if err := s.DB().QueryRow(
+		`SELECT id, started_at, ends_at FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&newID, &newStart, &newEnds); err != nil {
+		t.Fatalf("query re-anchored window: %v", err)
+	}
+	if newID != windowID {
+		t.Errorf("expected re-anchor in place (id=%d), got new id=%d", windowID, newID)
+	}
+	if !newEnds.Equal(authoritativeEnds) {
+		t.Errorf("re-anchored ends_at: got %v, want %v", newEnds, authoritativeEnds)
+	}
+	wantStart := authoritativeEnds.Add(-5 * time.Hour)
+	if !newStart.Equal(wantStart) {
+		t.Errorf("re-anchored started_at: got %v, want %v", newStart, wantStart)
+	}
+}
+
+// TestEventAnchoredWindowSeedsBaselineFromPriorSnapshot verifies that
+// findBaseline picks up the latest pre-window snapshot to seed the
+// event-anchored window's baseline_percent_used.
+func TestEventAnchoredWindowSeedsBaselineFromPriorSnapshot(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	// Seed-then-expire an initial window to exercise the post-expiry
+	// event-evidence path (rather than the no-prior-window path covered by
+	// TestBaselineFromSnapshot).
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert seeding event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("first UpdateWindows: %v", err)
+	}
+
+	postExpiry := now.Add(5*time.Hour + 30*time.Minute)
+
+	// Two pre-window snapshots — engine should pick the more recent one.
+	older := 8.0
+	if _, err := s.InsertQuotaSnapshot(
+		postExpiry.Add(-30*time.Minute), postExpiry.Add(-30*time.Minute), "userscript",
+		&older, nil,
+		nil, nil,
+		nil,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert older snapshot: %v", err)
+	}
+	newer := 22.5
+	if _, err := s.InsertQuotaSnapshot(
+		postExpiry.Add(-1*time.Minute), postExpiry.Add(-1*time.Minute), "userscript",
+		&newer, nil,
+		nil, nil,
+		nil,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert newer snapshot: %v", err)
+	}
+
+	// Fresh event after expiry → opens an event-anchored window.
+	engine.SetNow(func() time.Time { return postExpiry })
+	if _, err := s.InsertUsageEvent(
+		postExpiry, "test", "session-2", "msg-2", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert post-expiry event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("second UpdateWindows: %v", err)
+	}
+
+	var baseline sql.NullFloat64
+	var source string
+	if err := s.DB().QueryRow(
+		`SELECT baseline_percent_used, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&baseline, &source); err != nil {
+		t.Fatalf("query baseline: %v", err)
+	}
+	if !baseline.Valid || baseline.Float64 != newer {
+		t.Errorf("expected baseline=%v (latest pre-window snapshot), got %v", newer, baseline)
+	}
+	if source != "snapshot" {
+		t.Errorf("expected baseline_source=%q, got %q", "snapshot", source)
+	}
+}
+
+// TestEventEvidenceSuppressedByInactiveSnapshot verifies that phantom
+// suppression remains authoritative: when the most recent snapshot has
+// session_active=false, the engine must not open a window even if a
+// usage_event would otherwise satisfy the event-evidence rule.
+func TestEventEvidenceSuppressedByInactiveSnapshot(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	// Seed-then-expire an initial window.
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert seeding event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("first UpdateWindows: %v", err)
+	}
+
+	postExpiry := now.Add(5*time.Hour + 30*time.Minute)
+	engine.SetNow(func() time.Time { return postExpiry })
+
+	// Fresh event after expiry — would normally open a new window …
+	if _, err := s.InsertUsageEvent(
+		postExpiry, "test", "session-2", "msg-2", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("insert post-expiry event: %v", err)
+	}
+
+	// … but the most recent snapshot reports session_active=false, so
+	// phantom suppression must win.
+	inactive := false
+	if _, err := s.InsertQuotaSnapshot(
+		postExpiry, postExpiry, "userscript",
+		nil, nil,
+		nil, nil,
+		&inactive,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert inactive snapshot: %v", err)
+	}
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows: %v", err)
+	}
+
+	var openCount int
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&openCount); err != nil {
+		t.Fatalf("query open count: %v", err)
+	}
+	if openCount != 0 {
+		t.Errorf("expected 0 open session windows (phantom suppression wins over event evidence), got %d", openCount)
 	}
 }
 
