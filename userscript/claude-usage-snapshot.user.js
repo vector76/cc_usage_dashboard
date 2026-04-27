@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.4.0
+// @version      0.5.0
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -106,6 +106,23 @@
         return null;
     }
 
+    // Detect the "no active session" limbo label on the session row. When no
+    // session window is open, Anthropic replaces the "Resets in …" hint with
+    // copy like "Starts when a message is sent". We scope the walk to the
+    // session row's ancestors (same shape as findRowResetText) so similar
+    // marketing/help text elsewhere on the page can't trigger a false match.
+    function isSessionLimbo(bar) {
+        const needle = 'starts when a message is sent';
+        let node = bar.parentElement;
+        for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
+            for (const p of node.querySelectorAll(':scope p')) {
+                const t = (p.textContent || '').toLowerCase();
+                if (t.includes(needle)) return true;
+            }
+        }
+        return false;
+    }
+
     // "Resets in 3 hr 33 min" / "Resets in 19 min" / "Resets in 5 hr".
     // baseMs is the wall-clock time the reset string was current — typically
     // Date.now() minus the page's "Last updated: N minutes ago" staleness, so
@@ -175,10 +192,12 @@
         return target.toISOString();
     }
 
-    // Returns { sessionUsed, weeklyUsed, sessionWindowEnds, weeklyWindowEnds, observedAtMs }
+    // Returns { sessionUsed, weeklyUsed, sessionWindowEnds, weeklyWindowEnds, sessionActive, observedAtMs }
     // or null when neither section yields a usable bar. observedAtMs is the
     // wall-clock time the page's numbers were accurate (Date.now() minus the
     // "Last updated" staleness, or Date.now() when the indicator is missing).
+    // sessionActive is false only when the limbo label is positively detected;
+    // it is left undefined otherwise (we never assert it is true).
     function extractQuota() {
         const headings = Array.from(document.querySelectorAll('h2'))
             .map(h => ({ node: h, text: (h.textContent || '').trim() }));
@@ -189,6 +208,7 @@
 
         let sessionUsed = null, weeklyUsed = null;
         let sessionEnds = null, weeklyEnds = null;
+        let sessionActive;
 
         for (const bar of bars) {
             const heading = precedingHeading(bar, headings);
@@ -200,6 +220,7 @@
             if (heading === SESSION_HEADING && sessionUsed === null) {
                 sessionUsed = value;
                 sessionEnds = parseSessionEnds(findRowResetText(bar), observedAtMs);
+                if (isSessionLimbo(bar)) sessionActive = false;
             } else if (heading === WEEKLY_HEADING && weeklyUsed === null) {
                 weeklyUsed = value;
                 // Weekly hint is an absolute clock time ("Resets Thu 11:00 PM"),
@@ -209,7 +230,7 @@
         }
 
         if (sessionUsed === null && weeklyUsed === null) return null;
-        return { sessionUsed, weeklyUsed, sessionWindowEnds: sessionEnds, weeklyWindowEnds: weeklyEnds, observedAtMs };
+        return { sessionUsed, weeklyUsed, sessionWindowEnds: sessionEnds, weeklyWindowEnds: weeklyEnds, sessionActive, observedAtMs };
     }
 
     // ---------- diagnostics ----------
@@ -253,6 +274,9 @@
         if (extracted.weeklyUsed !== null) body.weekly_used = extracted.weeklyUsed;
         if (extracted.sessionWindowEnds) body.session_window_ends = extracted.sessionWindowEnds;
         if (extracted.weeklyWindowEnds) body.weekly_window_ends = extracted.weeklyWindowEnds;
+        // Limbo signal: only emit when positively detected. We never assert
+        // session_active=true — absence of the field means "unknown".
+        if (extracted.sessionActive === false) body.session_active = false;
         return body;
     }
 
