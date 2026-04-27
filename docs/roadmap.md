@@ -120,6 +120,28 @@ Exit criteria: a fresh user can install in <10 minutes from the README alone.
   Saves bandwidth in long sessions; not needed for v1 since the server dedupes.
 - **Per-project breakdown.** Use `project_path` on events to chart cost per project.
 - **Export.** CSV/Parquet dump of `usage_events` for external analysis.
+- **Calibrated quota-cost model.** Regress `quota_snapshots` percent-deltas
+  against the `usage_events` tokens (by model) that fell between each
+  snapshot pair, to solve for "% of session/weekly quota per token, per
+  model." Both data streams already exist; this finally bridges the two
+  unconnected currencies the dashboard tracks (Anthropic's opaque "% used"
+  and our own `cost_usd_equivalent`). Outputs: (a) a concrete
+  API-rate-equivalent value vs subscription cost ratio, (b) snapshot-free
+  burn-down forecasts, (c) automatic price-table drift detection when
+  Anthropic changes rates, (d) per-project quota attribution without a
+  published price. Tradeoff: needs enough snapshot density to be
+  well-conditioned, and the regression has to be defended against the
+  userscript's integer-percent rounding (~1% resolution per snapshot —
+  fine across many pairs, lossy on any single one).
+- **Local MCP server.** Expose the trayapp's signals (`get_slack`,
+  `get_burn_rate`, `get_consumption`) as an MCP server bound to
+  `127.0.0.1`, so Claude Code itself can query its own remaining quota
+  mid-session and self-throttle or defer expensive sub-tasks. Closes the
+  measurement loop the rest of the project opens. More speculative than
+  the calibration model — value depends on users wiring agent behaviors
+  around the signal — but architecturally cheap (the data is already
+  served over HTTP; an MCP wrapper is a thin adapter). Auth/trust story
+  is the same as the rest of the API: localhost-only, no secrets.
 
 ## Things explicitly not on the roadmap
 
