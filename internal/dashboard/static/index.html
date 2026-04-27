@@ -90,7 +90,7 @@ function renderStatus(s) {
 //
 // Layout (200 tall):
 //   y=8..132    upper panel — % remaining (100 at top, 0 at bottom)
-//   y=140..184  lower panel — $ consumption per bucket (bars from baseline)
+//   y=140..184  lower panel — $ consumption per bucket (bars grow upward from VOL_BOTTOM)
 //   y=192       x-axis time labels shared across both panels
 //
 // X-axis spans [domainStart, end). The current window is always
@@ -160,10 +160,16 @@ function renderBurnDown(svgID, win, opts) {
     stroke: "#888", "stroke-dasharray": "3 3"
   }));
 
-  // Observed % remaining series, grouped by snapshot.window_ends so the
-  // line breaks at session resets instead of drawing a sawtooth jump.
-  // Snapshots without a window_ends fall in their own bucket and won't
-  // group with anything else — fine, they're rare.
+  // Observed % remaining series, grouped into one polyline per session.
+  // Two snapshots are considered "same session" when their window_ends
+  // agree within WINDOW_MATCH_TOLERANCE_MS (10 min). Userscript computes
+  // window_ends as `Date.now() + minutesUntilReset` and re-reads
+  // "Resets in X hr X min" from the DOM (which Anthropic refreshes on a
+  // few-minute cadence), so adjacent same-session snapshots can drift
+  // several minutes; actually-different windows are 5h+ apart, so a
+  // generous tolerance has no false-merge risk. Mirrors sameWindow() in
+  // internal/consumption/consumption.go.
+  const WINDOW_MATCH_TOLERANCE_MS = 10 * 60 * 1000;
   const series = (win.series || []).filter(p => {
     const t = new Date(p.observed_at).getTime();
     return t >= domainStart && t < domainEnd;
@@ -173,9 +179,20 @@ function renderBurnDown(svgID, win, opts) {
     const groups = [];
     let cur = null;
     for (const p of series) {
-      const key = p.window_ends || "_none_" + groups.length;
-      if (!cur || cur.key !== key) {
-        cur = { key, points: [] };
+      const we = p.window_ends ? new Date(p.window_ends).getTime() : null;
+      let sameAsPrev = false;
+      if (cur) {
+        const prevWe = cur.windowEndsMs;
+        if (we == null || prevWe == null) {
+          // Missing hint shouldn't manufacture a phantom reset; treat
+          // adjacent snapshots as same-session in that case.
+          sameAsPrev = true;
+        } else {
+          sameAsPrev = Math.abs(we - prevWe) <= WINDOW_MATCH_TOLERANCE_MS;
+        }
+      }
+      if (!sameAsPrev) {
+        cur = { windowEndsMs: we, points: [] };
         groups.push(cur);
       }
       cur.points.push(p);
@@ -249,10 +266,16 @@ function renderBurnDown(svgID, win, opts) {
     }, "No data yet"));
   }
 
-  // Lower panel: $ volume bars over the full domain.
+  // Lower panel: $ volume bars over the full domain. Buckets are
+  // UTC-aligned, so the leftmost bucket's start can sit slightly before
+  // domainStart (e.g. window starts 12:34, 15-min bucket starts 12:30).
+  // We keep any bucket that overlaps the domain and clip the rendered
+  // bar's x extent to the chart, rather than dropping the bucket entirely
+  // — otherwise events in the first partial bucket render as nothing.
+  const bucketMs = (win.bucket_secs || 900) * 1000;
   const volume = (win.volume || []).filter(b => {
     const t = new Date(b.bucket_start).getTime();
-    return t >= domainStart && t < domainEnd;
+    return t + bucketMs > domainStart && t < domainEnd;
   });
   // Volume panel border (baseline only)
   svg.appendChild(el("line", { x1: P, y1: VOL_BOTTOM, x2: W - P, y2: VOL_BOTTOM, stroke: "#444" }));
@@ -264,20 +287,23 @@ function renderBurnDown(svgID, win, opts) {
       // Each bar covers its actual bucket duration on the X axis —
       // [bucket_start, bucket_start + bucket_secs) — so bar width
       // reflects time, not the count of populated buckets. SQL GROUP BY
-      // only returns buckets with data, so a 15h chart with 10 active
-      // 5-min buckets must still render bars at 5-min width (~2 px), not
-      // 1/10 of the chart wide.
-      const bucketMs = (win.bucket_secs || 300) * 1000;
+      // only returns buckets with data, so a 15h session chart with 10
+      // active 15-min buckets still renders bars at 15-min width (~5 px),
+      // not 1/10 of the chart wide.
       const volH = VOL_BOTTOM - VOL_TOP;
+      const xMin = P, xMax = W - P;
       for (const b of volume) {
         const t = new Date(b.bucket_start).getTime();
-        const x0 = sx(t);
-        const x1 = sx(t + bucketMs);
-        // Left-align to the bucket's start; small inset so adjacent
-        // populated buckets don't visually merge.
-        const inset = Math.max(0.5, (x1 - x0) * 0.1);
+        // Clip the rendered bar to the chart extent so a partial leftmost
+        // bucket doesn't draw outside the panel.
+        const x0 = Math.max(xMin, sx(t));
+        const x1 = Math.min(xMax, sx(t + bucketMs));
+        const span = x1 - x0;
+        if (span <= 0) continue;
+        // Small inset so adjacent populated buckets don't visually merge.
+        const inset = Math.max(0.5, span * 0.1);
         const x = x0 + inset / 2;
-        const w = Math.max(1, (x1 - x0) - inset);
+        const w = Math.max(1, span - inset);
         const h = (b.cost_usd / maxVol) * volH;
         svg.appendChild(el("rect", {
           x: x, y: VOL_BOTTOM - h, width: w, height: h,

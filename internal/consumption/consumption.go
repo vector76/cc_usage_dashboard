@@ -15,10 +15,13 @@ import (
 )
 
 // windowMatchTolerance treats two snapshots as belonging to the same window
-// when their *_window_ends timestamps agree within this slack — same value
-// used by windows.reanchorIfStale to absorb the minute-level rounding in
-// snapshot reset hints.
-const windowMatchTolerance = 2 * time.Minute
+// when their *_window_ends timestamps agree within this slack. The
+// userscript computes window_ends as `Date.now() + minutesUntilReset`,
+// so two snapshots in the same session can drift by minutes between
+// sends; meanwhile actually-different windows are at least multiple
+// hours apart, so the only failure mode of a generous tolerance is
+// theoretical, not practical.
+const windowMatchTolerance = 10 * time.Minute
 
 // Result is the JSON response from GET /consumption.
 type Result struct {

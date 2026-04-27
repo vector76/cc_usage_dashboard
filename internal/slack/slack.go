@@ -159,7 +159,6 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 
 // activeWindow holds the fields we need from the windows table.
 type activeWindow struct {
-	id            int64
 	startedAt     time.Time
 	endsAt        time.Time
 	baselineTotal *float64
@@ -169,15 +168,14 @@ type activeWindow struct {
 func (c *Calculator) getActiveWindow(kind string) (*activeWindow, error) {
 	var w activeWindow
 	var baselineTotal sql.NullFloat64
-	var baselineSource sql.NullString
 
 	err := c.db.QueryRow(`
-		SELECT id, started_at, ends_at, baseline_total, baseline_source
+		SELECT started_at, ends_at, baseline_total
 		FROM windows
 		WHERE kind = ? AND closed = 0
 		ORDER BY started_at DESC
 		LIMIT 1
-	`, kind).Scan(&w.id, &w.startedAt, &w.endsAt, &baselineTotal, &baselineSource)
+	`, kind).Scan(&w.startedAt, &w.endsAt, &baselineTotal)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -249,11 +247,8 @@ func (c *Calculator) combineSlackFractions(session, weekly *WindowMetrics) *floa
 	if weekly == nil || weekly.SlackFraction == nil {
 		return nil
 	}
-	min := *session.SlackFraction
-	if *weekly.SlackFraction < min {
-		min = *weekly.SlackFraction
-	}
-	return &min
+	combined := min(*session.SlackFraction, *weekly.SlackFraction)
+	return &combined
 }
 
 // quietFor returns the time since the most recent usage event and a flag

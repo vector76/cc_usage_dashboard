@@ -26,7 +26,6 @@ type WindowState struct {
 	StartedAt     time.Time         `json:"started_at"`
 	EndsAt        time.Time         `json:"ends_at"`
 	BaselineTotal *float64          `json:"baseline_total"`
-	Consumed      float64           `json:"consumed"`
 	Series        []UsedSeriesPoint `json:"series"`
 	Volume        []SeriesBucket    `json:"volume"`
 	// BucketSecs is the width of each Volume bucket in seconds. The
@@ -47,7 +46,11 @@ type UsedSeriesPoint struct {
 	WindowEnds  *time.Time `json:"window_ends,omitempty"`
 }
 
-// SeriesBucket is a 15-minute consumption bucket.
+// SeriesBucket is one bucket of summed consumption. Width is set by the
+// caller (see bucketSecsForKind) and reported to the client via
+// WindowState.BucketSecs. BucketStart is UTC-aligned to multiples of the
+// bucket width; the leftmost bucket can therefore start slightly before
+// the chart's domain when the window doesn't begin on a bucket boundary.
 type SeriesBucket struct {
 	BucketStart time.Time `json:"bucket_start"`
 	CostUSD     float64   `json:"cost_usd"`
@@ -191,17 +194,6 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 		v := baselineTotal.Float64
 		ws.BaselineTotal = &v
 	}
-
-	var consumed float64
-	err = db.QueryRow(`
-		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
-		FROM usage_events
-		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
-	`, store.FormatTime(startedAt), store.FormatTime(endsAt)).Scan(&consumed)
-	if err != nil {
-		return nil, err
-	}
-	ws.Consumed = consumed
 
 	// The session chart shows 10h of pre-window history alongside the
 	// current 5h window so the user can compare today's burn rate against

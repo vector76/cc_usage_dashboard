@@ -270,7 +270,7 @@ func cmdRelease() {
 	releasedAt := fs.String("released-at", "", "RFC3339 timestamp of release decision (default: now)")
 	jobTag := fs.String("job-tag", "", "free-form job identifier (required)")
 	estimatedCost := fs.Float64("estimated-cost", 0, "estimated job cost in USD")
-	slackAtRelease := fs.Float64("slack-at-release", 0, "slack value seen at GET /slack")
+	slackAtRelease := fs.Float64("slack-at-release", 0, "slack_fraction (range [-1, +1]) seen at GET /slack at the moment of release")
 	windowKind := fs.String("window-kind", "session", "window_kind: session|weekly")
 	fs.Parse(os.Args[2:])
 
