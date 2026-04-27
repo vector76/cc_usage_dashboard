@@ -101,6 +101,15 @@ function renderStatus(s) {
   lines.push(["Last snapshot age", s.last_snapshot_age_seconds == null ? "no snapshots yet" : fmt(s.last_snapshot_age_seconds, 0) + " s"]);
   lines.push(["Parse errors (24h)", s.parse_errors_24h]);
   lines.push(["Paused", s.paused ? "yes" : "no"]);
+  let slackHTML;
+  if (s.slack_release_recommended == null) {
+    slackHTML = '<span class="muted">—</span>';
+  } else if (s.slack_release_recommended) {
+    slackHTML = '<span style="color:#060;font-weight:bold;">yes</span>';
+  } else {
+    slackHTML = '<span style="color:#888;">no</span>';
+  }
+  lines.push(["Slack release", slackHTML]);
   kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
 }
 
@@ -110,7 +119,7 @@ function renderStatus(s) {
 // Layout (200 tall):
 //   y=8..132    upper panel — % remaining (100 at top, 0 at bottom)
 //   y=140..184  lower panel — $ consumption per bucket (bars grow upward from VOL_BOTTOM)
-//   y=192       x-axis time labels shared across both panels
+//   y=196       x-axis time labels shared across both panels
 //
 // X-axis spans [domainStart, end). The current window is always
 // [start, end); domainStart can sit further back when opts.lookbackMs > 0
@@ -170,6 +179,38 @@ function renderBurnDown(svgID, win, opts) {
     svg.appendChild(el("line", {
       x1: sx(start), y1: PCT_TOP, x2: sx(start), y2: VOL_BOTTOM,
       stroke: "#bbb", "stroke-dasharray": "2 3"
+    }));
+  }
+
+  // Slack-activation zone: faint green polygon covering where the
+  // headroom gate would pass for this window. Drawn beneath the pace
+  // line and the data series so they remain readable on top.
+  //   - opts.slackSurplusPct: pace-relative threshold in percentage
+  //     points (e.g. 50 for session = "50pp above pace remaining").
+  //   - opts.slackFloorPct: optional absolute percent_remaining floor
+  //     (e.g. 80 for weekly). Above this, the gate passes regardless of
+  //     pace. Pass 100 (or omit) to make the zone purely pace-relative —
+  //     the polygon then degenerates to the upper-right triangle.
+  if (opts.slackSurplusPct != null) {
+    const surplus = opts.slackSurplusPct;
+    const floor = opts.slackFloorPct != null ? opts.slackFloorPct : 100;
+    const dur = end - start;
+    // t where the offset pace line crosses the absolute floor (or the
+    // chart top, when floor=100).
+    const tFloorCross = start + ((100 - floor + surplus) / 100) * dur;
+    // Vertices clockwise from top-left. When floor=100 the leftmost two
+    // vertices both sit at y=100 → the polygon collapses to the triangle
+    // (tFloorCross, 100), (end, 100), (end, surplus).
+    const verts = [
+      [start, 100],
+      [end, 100],
+      [end, surplus],
+      [tFloorCross, floor],
+      [start, floor],
+    ];
+    const points = verts.map(([t, pct]) => `${sx(t)},${syPct(pct)}`).join(" ");
+    svg.appendChild(el("polygon", {
+      points: points, fill: "#6c6", opacity: "0.18", stroke: "none"
     }));
   }
 
@@ -377,9 +418,17 @@ async function refresh() {
     renderStatus(s);
     // Session: extend domain 10h backwards so the current 5h window
     // sits in the rightmost third and the prior two sessions are
-    // visible for context.
-    renderBurnDown("chart-session", s.session, { lookbackMs: 10 * 3600 * 1000 });
-    renderBurnDown("chart-weekly", s.weekly);
+    // visible for context. Slack zone = "50pp above pace" (pure
+    // triangle).
+    renderBurnDown("chart-session", s.session, {
+      lookbackMs: 10 * 3600 * 1000,
+      slackSurplusPct: 50,
+    });
+    // Weekly slack zone = "10pp above pace" UNION "≥80% remaining".
+    renderBurnDown("chart-weekly", s.weekly, {
+      slackSurplusPct: 10,
+      slackFloorPct: 80,
+    });
   } catch (e) { console.error("state error", e); }
   try {
     const dResp = await fetch("/consumption?period=24h");

@@ -384,10 +384,11 @@ func seedFreshSnapshot(t *testing.T, s *store.Store, receivedAt time.Time, sessi
 	}
 }
 
-// newCalcWithThresholds builds a Calculator with custom surplus thresholds.
-// Used by TestHeadroomGates_DualThresholdsBoundaries to put both gates near
-// their boundaries with the same window/event setup.
-func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh float64) (*Calculator, *store.Store) {
+// newCalcWithThresholds builds a Calculator with custom surplus + absolute
+// thresholds. weeklyAbsolute is in fraction units (0–1) — pass 1.0 to
+// effectively disable the absolute-floor branch (percent_used must be ≤ 0
+// to satisfy it, which won't happen with non-negative test inputs).
+func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh, weeklyAbsolute float64) (*Calculator, *store.Store) {
 	t.Helper()
 	s, err := store.Open(":memory:")
 	if err != nil {
@@ -398,6 +399,7 @@ func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh float64) (*
 		BaselineMaxAgeHours:     48,
 		SessionSurplusThreshold: sessionThresh,
 		WeeklySurplusThreshold:  weeklyThresh,
+		WeeklyAbsoluteThreshold: weeklyAbsolute,
 	}
 	return NewCalculator(s.DB(), cfg), s
 }
@@ -446,7 +448,10 @@ func TestHeadroomGates_DualThresholdsBoundaries(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c, s := newCalcWithThresholds(t, 0.10, 0.10)
+			// Absolute floor disabled (1.0) so this test exercises only
+			// the pace-relative branch — the absolute-floor branch has
+			// its own dedicated test below.
+			c, s := newCalcWithThresholds(t, 0.10, 0.10, 1.0)
 			defer s.Close()
 
 			now := time.Now().UTC()
@@ -468,6 +473,57 @@ func TestHeadroomGates_DualThresholdsBoundaries(t *testing.T) {
 			}
 			if resp.ReleaseRecommended != tt.wantRelease {
 				t.Errorf("ReleaseRecommended: got %v want %v", resp.ReleaseRecommended, tt.wantRelease)
+			}
+		})
+	}
+}
+
+// (g2) The weekly absolute-floor branch passes weekly_headroom whenever
+// percent_used is at or below (100 - 100*WeeklyAbsoluteThreshold), even
+// when the pace-relative slack_fraction would have failed. Lets the
+// gate fire early in the week before pace-relative surplus accrues.
+//
+// Setup: weekly window started_at=now-24h, ends_at=now+6*24h
+//
+//	progress=1/7≈0.1428, percent_expected≈14.28
+//	slack_fraction = (14.28 - percent_used) / 100
+//
+// With WeeklyAbsoluteThreshold=0.80, the absolute branch passes when
+// percent_used ≤ 20.
+func TestWeeklyHeadroom_AbsoluteFloorBranch(t *testing.T) {
+	tests := []struct {
+		name          string
+		weeklyPctUsed float64
+		wantWeekly    bool
+	}{
+		// percent_used=18: pace_ok = (14.28-18)/100 = -0.037 < 0.10 ✗
+		//                  absolute_ok: 18 ≤ 20 ✓
+		{"under floor passes via absolute branch", 18.0, true},
+		// percent_used=21: pace_ok still ✗; absolute_ok: 21 > 20 ✗
+		{"just above floor fails", 21.0, false},
+		// percent_used=10: both branches pass — but only one needed.
+		{"deep below floor passes", 10.0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Surplus threshold deliberately set above what pace can
+			// supply so the only way to pass is via the absolute branch.
+			c, s := newCalcWithThresholds(t, 0.10, 0.10, 0.80)
+			defer s.Close()
+
+			now := time.Now().UTC()
+			// Session set to 0% used so the session gate stays out of
+			// the way; this test only checks weekly behaviour.
+			insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 0.0, "snapshot:1")
+			insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), tt.weeklyPctUsed, "snapshot:1")
+			seedFreshSnapshot(t, s, now, tt.weeklyPctUsed)
+
+			resp, err := c.GetSlack()
+			if err != nil {
+				t.Fatalf("GetSlack: %v", err)
+			}
+			if got := resp.Gates["weekly_headroom"]; got != tt.wantWeekly {
+				t.Errorf("weekly_headroom: got %v want %v (percent_used=%v)", got, tt.wantWeekly, tt.weeklyPctUsed)
 			}
 		})
 	}

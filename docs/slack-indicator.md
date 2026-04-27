@@ -65,15 +65,23 @@ the queue is expected to apply one client-side gate of its own.
 
 1. **Session headroom gate.** Release work only if
    `session.slack_fraction >= session_surplus_threshold` (suggested default: `0.50`).
-2. **Weekly headroom gate.** Release work only if
-   `weekly.slack_fraction >= weekly_surplus_threshold` (suggested default: `0.10`).
+2. **Weekly headroom gate.** Release work if EITHER:
+   - `weekly.slack_fraction >= weekly_surplus_threshold` (default `0.10`), or
+   - `weekly.percent_used <= 100 * (1 - weekly_absolute_threshold)` (default
+     `0.80` → percent_used ≤ 20).
 
-   Two independent thresholds, not a `min(session, weekly)` combined fraction, because
-   the two windows have very different time horizons: a 5-hour session can recover
-   from over-burn within hours, while a weekly over-burn lingers for days. A high
-   bar on the session and a low bar on the weekly captures "leave the user enough
-   short-term headroom to do real work, but don't sit on excess long-term capacity."
-   Both thresholds are in fraction-of-quota units (range [-1, +1]).
+   Two independent thresholds (instead of a `min(session, weekly)` combined
+   fraction) because the two windows have very different time horizons: a
+   5-hour session can recover from over-burn within hours, while a weekly
+   over-burn lingers for days. A high bar on the session and a low bar on
+   the weekly captures "leave the user enough short-term headroom to do
+   real work, but don't sit on excess long-term capacity." `slack_fraction`
+   is in fraction-of-quota units (range [-1, +1]).
+
+   The absolute-threshold leg lets weekly slack activate early in the week
+   before pace-relative surplus has accrued. Without it the gate would
+   stay closed for the first day or two of every week even with no usage,
+   defeating the purpose of harvesting unused capacity.
 
 3. **Priority quiet gate.** If the user has issued a Claude Code request in the last
    `priority_quiet_period` (suggested default: 5 minutes), refuse release. Prevents

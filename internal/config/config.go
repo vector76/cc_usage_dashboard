@@ -46,6 +46,10 @@ type Config struct {
 		BaselineMaxAgeHours     int     `yaml:"baseline_max_age_hours"`
 		SessionSurplusThreshold float64 `yaml:"session_surplus_threshold"`
 		WeeklySurplusThreshold  float64 `yaml:"weekly_surplus_threshold"`
+		// Weekly headroom additionally passes when percent_remaining is at
+		// or above this fraction (0–1). Lets the gate fire early in the
+		// week before pace-relative surplus has accumulated.
+		WeeklyAbsoluteThreshold float64 `yaml:"weekly_absolute_threshold"`
 	} `yaml:"slack"`
 
 	Retention struct {
@@ -76,6 +80,7 @@ func Load(path string) (*Config, error) {
 	cfg.Slack.BaselineMaxAgeHours = 48
 	cfg.Slack.SessionSurplusThreshold = 0.50
 	cfg.Slack.WeeklySurplusThreshold = 0.10
+	cfg.Slack.WeeklyAbsoluteThreshold = 0.80
 	cfg.Retention.ParseErrorsDays = 30
 	cfg.Retention.SlackSamplesDays = 90
 	cfg.EnableSlackSampling = false

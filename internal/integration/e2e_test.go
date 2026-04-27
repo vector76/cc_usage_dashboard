@@ -63,6 +63,7 @@ func newTestEnv(t *testing.T, pricingPath string) *testEnv {
 	cfg.Slack.BaselineMaxAgeHours = 48
 	cfg.Slack.SessionSurplusThreshold = 0.50
 	cfg.Slack.WeeklySurplusThreshold = 0.10
+	cfg.Slack.WeeklyAbsoluteThreshold = 0.80
 
 	return &testEnv{srv: server.New(s, cfg), store: s}
 }

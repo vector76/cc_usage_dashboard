@@ -48,6 +48,10 @@ type Config struct {
 	BaselineMaxAgeHours     int
 	SessionSurplusThreshold float64
 	WeeklySurplusThreshold  float64
+	// WeeklyAbsoluteThreshold is the percent_remaining floor (0–1) at or
+	// above which the weekly headroom gate also passes, regardless of
+	// pace. Lets the gate fire early in the week.
+	WeeklyAbsoluteThreshold float64
 }
 
 // Calculator computes the slack signal. It is safe for concurrent use; a
@@ -137,9 +141,16 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 	sessionHeadroomOk := resp.Session != nil &&
 		resp.Session.SlackFraction != nil &&
 		*resp.Session.SlackFraction >= c.config.SessionSurplusThreshold
-	weeklyHeadroomOk := resp.Weekly != nil &&
-		resp.Weekly.SlackFraction != nil &&
-		*resp.Weekly.SlackFraction >= c.config.WeeklySurplusThreshold
+	// Weekly passes if EITHER the pace-relative surplus is met OR the
+	// absolute remaining-quota floor is met. The latter lets slack
+	// activate early in the week before pace-relative surplus accrues.
+	weeklyHeadroomOk := false
+	if resp.Weekly != nil && resp.Weekly.SlackFraction != nil {
+		paceOk := *resp.Weekly.SlackFraction >= c.config.WeeklySurplusThreshold
+		usedCeiling := (1 - c.config.WeeklyAbsoluteThreshold) * 100
+		absoluteOk := resp.Weekly.PercentUsed != nil && *resp.Weekly.PercentUsed <= usedCeiling
+		weeklyHeadroomOk = paceOk || absoluteOk
+	}
 
 	freshOk, err := c.baselineFreshnessOk(now)
 	if err != nil {

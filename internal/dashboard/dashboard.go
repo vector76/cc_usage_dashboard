@@ -64,6 +64,11 @@ type State struct {
 	LastSnapshotAgeSeconds *float64     `json:"last_snapshot_age_seconds"`
 	ParseErrors24h         int64        `json:"parse_errors_24h"`
 	Paused                 bool         `json:"paused"`
+	// SlackReleaseRecommended mirrors the /slack endpoint's
+	// release_recommended bit so the dashboard status panel can show
+	// "release: yes/no" without a separate HTTP poll. Null if the slack
+	// calculator errors (rare; surfaced in logs).
+	SlackReleaseRecommended *bool `json:"slack_release_recommended"`
 }
 
 // Handler serves the dashboard UI and state endpoint.
@@ -159,6 +164,15 @@ func (h *Handler) computeState() (*State, error) {
 	state.ParseErrors24h = count
 
 	state.Paused = h.slackCalc.IsPaused()
+
+	if slackResp, err := h.slackCalc.GetSlack(); err != nil {
+		// Don't fail the entire state response over a slack-calc hiccup;
+		// log and leave SlackReleaseRecommended nil so the UI shows "—".
+		slog.Warn("slack signal unavailable for dashboard state", "err", err)
+	} else {
+		v := slackResp.ReleaseRecommended
+		state.SlackReleaseRecommended = &v
+	}
 
 	return state, nil
 }

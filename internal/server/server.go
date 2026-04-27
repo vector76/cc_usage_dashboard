@@ -63,6 +63,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 			BaselineMaxAgeHours:     cfg.Slack.BaselineMaxAgeHours,
 			SessionSurplusThreshold: cfg.Slack.SessionSurplusThreshold,
 			WeeklySurplusThreshold:  cfg.Slack.WeeklySurplusThreshold,
+			WeeklyAbsoluteThreshold: cfg.Slack.WeeklyAbsoluteThreshold,
 		}),
 		windowsEngine: windows.NewEngine(s.DB()),
 	}

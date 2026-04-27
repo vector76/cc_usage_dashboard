@@ -80,6 +80,7 @@ func TestDashboardStateJSONShape(t *testing.T) {
 		"last_snapshot_age_seconds",
 		"parse_errors_24h",
 		"paused",
+		"slack_release_recommended",
 	} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("response missing documented field %q", key)
