@@ -17,20 +17,26 @@ which the dashboard doesn't model.
 ## Percent-consumed derivation
 
 The session and weekly numbers are the per-snapshot increases in
-`*_used` summed over the period, with one twist: when the
-`*_window_ends` timestamp differs between two adjacent snapshots
-(i.e. the window reset between them), the contribution is
-`(100 - prev) + curr` so a multi-window period naturally exceeds 100%.
+`*_used` summed over the period. When the `*_window_ends` timestamp
+differs between two adjacent snapshots (i.e. the window reset between
+them), the new window contributes only `curr.used`; the unobserved
+tail of the prior window — between its last snapshot and the reset —
+is treated as zero. This under-reports if the prior session kept
+growing after the last snapshot, but in practice snapshots arrive
+right up to window end, so the missed tail is small.
 
 ```
 walk = [snapshot_at_or_before(period_start), ...snapshots in period]
 total = 0
 for prev, curr in pairs(walk):
-    if same_window(prev.ends, curr.ends):    # within 2 min tolerance
+    if same_window(prev.ends, curr.ends):    # within 10 min tolerance
         total += max(0, curr.used - prev.used)
     else:
-        total += (100 - prev.used) + curr.used
+        total += curr.used
 ```
+
+A multi-window period can still exceed 100% — each fully-used session
+contributes ~100% to the running total — but ordinary days won't.
 
 If no snapshots exist for the kind in or before the period, the percent
 field is `null` (couldn't measure), not `0`.

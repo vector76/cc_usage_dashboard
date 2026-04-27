@@ -126,15 +126,18 @@ type snapshot struct {
 }
 
 // percentConsumed walks the snapshots for the requested window kind and
-// sums the per-snapshot increases in `*_used`, treating a window reset
-// (different *_window_ends, beyond windowMatchTolerance) as
-// "(100 - prev) + curr" so a multi-window period can exceed 100%.
+// sums the per-snapshot increases in `*_used`. When a window reset is
+// detected between snapshots (different *_window_ends, beyond
+// windowMatchTolerance) the new window contributes only `curr.used`; the
+// unobserved tail of the previous window — between its last snapshot and
+// the reset — is treated as zero. Snapshots typically arrive right up to
+// window end, so any missed tail is small; in exchange we avoid inflating
+// the total by charging for usage that may not have happened.
 //
 // Anchor: the most recent snapshot at or before periodStart, if any.
 // Without an anchor, the first in-period snapshot establishes the baseline
 // and contributes nothing — under-reporting in that case is preferred over
-// inventing data, since we'd otherwise have to assume a fictitious "0% at
-// period start" prior anchor.
+// inventing a fictitious "0% at period start" prior anchor.
 //
 // Returns nil if no snapshots exist for the kind anywhere on or before
 // periodEnd, signalling "couldn't measure" rather than 0.
@@ -174,7 +177,7 @@ func (c *Calculator) percentConsumed(kind string, startTime, endTime time.Time) 
 			}
 			total += delta
 		} else {
-			total += (100 - prev.used) + curr.used
+			total += curr.used
 		}
 	}
 	return &total, nil
@@ -233,7 +236,7 @@ func (c *Calculator) snapshotsInRange(usedCol, endsCol string, startTime, endTim
 // sameWindow reports whether two snapshot window-end hints refer to the same
 // window. Snapshot reset times have minute resolution, so we tolerate a small
 // jitter. If either side lacks a hint we conservatively assume the same
-// window — a missing hint shouldn't manufacture a phantom 100% reset.
+// window — a missing hint shouldn't manufacture a phantom reset.
 func sameWindow(a, b *time.Time) bool {
 	if a == nil || b == nil {
 		return true

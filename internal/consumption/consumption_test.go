@@ -115,9 +115,10 @@ func TestPercent_AnchorAndDeltaSameWindow(t *testing.T) {
 	}
 }
 
-// TestPercent_WindowResetsAccumulate: a window reset between snapshots means
-// the prior window finished (treat as +remaining) and the new one starts at
-// curr.used. The 24h period spanning ~5 sessions may exceed 100%.
+// TestPercent_WindowResetsAccumulate: at a window reset the new window
+// contributes only its curr.used; the unobserved tail of the prior window
+// is dropped. The 24h period spanning multiple sessions can still exceed
+// 100% when each session is heavily used.
 func TestPercent_WindowResetsAccumulate(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
 	c, s := newCalc(t, now)
@@ -143,12 +144,12 @@ func TestPercent_WindowResetsAccumulate(t *testing.T) {
 		t.Fatal("expected non-nil session pct")
 	}
 	// Walk:
-	//  anchor(80,end1) → (10,end2): reset → (100-80)+10 = 30
-	//  (10,end2)       → (90,end2): same   → 90-10       = 80
-	//  (90,end2)       → (25,end3): reset → (100-90)+25 = 35
-	// Total = 145 (>100% confirms multi-window accumulation).
-	if !near(*res.ConsumedSessionPct, 145, 1e-9) {
-		t.Errorf("session pct: got %v want 145", *res.ConsumedSessionPct)
+	//  anchor(80,end1) → (10,end2): reset → curr.used = 10
+	//  (10,end2)       → (90,end2): same  → 90-10     = 80
+	//  (90,end2)       → (25,end3): reset → curr.used = 25
+	// Total = 115.
+	if !near(*res.ConsumedSessionPct, 115, 1e-9) {
+		t.Errorf("session pct: got %v want 115", *res.ConsumedSessionPct)
 	}
 }
 
@@ -207,7 +208,7 @@ func TestPercent_ToleranceMatchesNearbyEnds(t *testing.T) {
 	defer s.Close()
 
 	endA := now.Add(2 * time.Hour)
-	endB := endA.Add(60 * time.Second) // 1 min jitter, within 2-min tolerance
+	endB := endA.Add(60 * time.Second) // 1 min jitter, within windowMatchTolerance
 
 	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(20), nil, ptrT(endA), nil)
 	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(30), nil, ptrT(endB), nil)
