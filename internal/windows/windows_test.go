@@ -573,6 +573,212 @@ func TestExpiredSessionActiveSnapshotOpensNewWindow(t *testing.T) {
 	}
 }
 
+// TestActiveSessionInactiveSnapshotZeroUsedClosesWindowEarly is a regression
+// test for the case where Anthropic's UI declares the session inactive AND
+// reports zero usage in the current window — the window is effectively over
+// before its calendar boundary, and the engine must close it early so
+// event-anchored opening can later distinguish post-closure events.
+func TestActiveSessionInactiveSnapshotZeroUsedClosesWindowEarly(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var windowID int64
+	if err := s.DB().QueryRow(
+		`SELECT id FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&windowID); err != nil {
+		t.Fatalf("query initial window: %v", err)
+	}
+
+	// Still inside the original 5-hour window. Snapshot reports inactive
+	// with 0% used: early-close.
+	snapshotTime := now.Add(2 * time.Hour)
+	engine.SetNow(func() time.Time { return snapshotTime })
+
+	inactive := false
+	usedZero := 0.0
+	if _, err := s.InsertQuotaSnapshot(
+		snapshotTime, snapshotTime, "userscript",
+		&usedZero, nil,
+		nil, nil,
+		&inactive,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var closed int
+	var endsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT closed, ends_at FROM windows WHERE id = ?`, windowID,
+	).Scan(&closed, &endsAt); err != nil {
+		t.Fatalf("query updated window: %v", err)
+	}
+	if closed != 1 {
+		t.Errorf("expected window closed=1, got %d", closed)
+	}
+	if !endsAt.Equal(snapshotTime) {
+		t.Errorf("expected ends_at=%v (snapshot observed_at), got %v", snapshotTime, endsAt)
+	}
+}
+
+// TestActiveSessionInactiveSnapshotNonzeroUsedKeepsWindowOpen is the defensive
+// contradiction case: Anthropic briefly flickers session_active=false while a
+// session is opening. If used > 0, the window is not really closed; leave it.
+func TestActiveSessionInactiveSnapshotNonzeroUsedKeepsWindowOpen(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var windowID int64
+	var origEndsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT id, ends_at FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&windowID, &origEndsAt); err != nil {
+		t.Fatalf("query initial window: %v", err)
+	}
+
+	snapshotTime := now.Add(2 * time.Hour)
+	engine.SetNow(func() time.Time { return snapshotTime })
+
+	inactive := false
+	usedNonzero := 2.0
+	if _, err := s.InsertQuotaSnapshot(
+		snapshotTime, snapshotTime, "userscript",
+		&usedNonzero, nil,
+		nil, nil,
+		&inactive,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var closed int
+	var endsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT closed, ends_at FROM windows WHERE id = ?`, windowID,
+	).Scan(&closed, &endsAt); err != nil {
+		t.Fatalf("query updated window: %v", err)
+	}
+	if closed != 0 {
+		t.Errorf("expected window to remain open (closed=0), got closed=%d", closed)
+	}
+	if !endsAt.Equal(origEndsAt) {
+		t.Errorf("expected original ends_at=%v preserved, got %v", origEndsAt, endsAt)
+	}
+}
+
+// TestActiveSessionMostRecentRulePrefersNewerActiveSnapshot confirms the
+// most-recent-snapshot rule: an older inactive snapshot followed by a newer
+// active snapshot must NOT close the window. The early-close decision is tied
+// to the most recent snapshot, not any arbitrary inactive one.
+func TestActiveSessionMostRecentRulePrefersNewerActiveSnapshot(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return now })
+
+	if _, err := s.InsertUsageEvent(
+		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var windowID int64
+	var origEndsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT id, ends_at FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&windowID, &origEndsAt); err != nil {
+		t.Fatalf("query initial window: %v", err)
+	}
+
+	// Older inactive snapshot with 0% used — would trigger early-close on
+	// its own, but is superseded by the newer active snapshot below.
+	olderTime := now.Add(1 * time.Hour)
+	inactive := false
+	usedZero := 0.0
+	if _, err := s.InsertQuotaSnapshot(
+		olderTime, olderTime, "userscript",
+		&usedZero, nil,
+		nil, nil,
+		&inactive,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert older snapshot: %v", err)
+	}
+
+	// Newer active snapshot — the most-recent rule means this is what the
+	// engine consults.
+	newerTime := now.Add(2 * time.Hour)
+	engine.SetNow(func() time.Time { return newerTime })
+	active := true
+	usedNewer := 5.0
+	if _, err := s.InsertQuotaSnapshot(
+		newerTime, newerTime, "userscript",
+		&usedNewer, nil,
+		nil, nil,
+		&active,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert newer snapshot: %v", err)
+	}
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var closed int
+	var endsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT closed, ends_at FROM windows WHERE id = ?`, windowID,
+	).Scan(&closed, &endsAt); err != nil {
+		t.Fatalf("query updated window: %v", err)
+	}
+	if closed != 0 {
+		t.Errorf("expected window to remain open (closed=0) under most-recent rule, got closed=%d", closed)
+	}
+	if !endsAt.Equal(origEndsAt) {
+		t.Errorf("expected original ends_at=%v preserved, got %v", origEndsAt, endsAt)
+	}
+}
+
 func TestBaselineFromSnapshot(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()

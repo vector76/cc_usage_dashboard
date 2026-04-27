@@ -153,6 +153,29 @@ func (e *Engine) ensureSessionWindow() error {
 		// reset. We re-anchor when the snapshot end differs by more than
 		// the rounding tolerance below.
 		if window.EndsAt.After(now) {
+			// Early-close path: if Anthropic's UI now reports the session
+			// as inactive AND no usage in the current session window, the
+			// window is over even though our calendar/snapshot boundary
+			// hasn't elapsed yet. Close on the snapshot's observed_at so
+			// downstream event-anchored opening can distinguish post-
+			// closure events from in-window events.
+			active, used, observedAt, err := e.findMostRecentSessionActive()
+			if err != nil {
+				return err
+			}
+			// Defensive contradiction: if the snapshot says inactive but
+			// reports nonzero usage, leave the window alone — Anthropic
+			// briefly flickers session_active=false while a session is
+			// opening.
+			if active != nil && !*active && used != nil && *used == 0 {
+				if _, err := e.db.Exec(
+					`UPDATE windows SET closed = 1, ends_at = ? WHERE id = ?`,
+					store.FormatTime(observedAt), window.ID,
+				); err != nil {
+					return fmt.Errorf("failed to close window early: %w", err)
+				}
+				return nil
+			}
 			if err := e.reanchorIfStale(window.ID, window.EndsAt, "session", 5*time.Hour); err != nil {
 				return err
 			}
@@ -171,7 +194,7 @@ func (e *Engine) ensureSessionWindow() error {
 	// If the most recent snapshot reports the session as inactive, do not
 	// mint a phantom replacement window. Anthropic considers there to be no
 	// active session, and zero open session rows is a permitted state.
-	active, err := e.findMostRecentSessionActive()
+	active, _, _, err := e.findMostRecentSessionActive()
 	if err != nil {
 		return err
 	}
@@ -418,29 +441,39 @@ func (e *Engine) findSessionBoundary() (time.Time, error) {
 	return boundary, nil
 }
 
-// findMostRecentSessionActive reads session_active from the most recent
-// quota_snapshots row by observed_at. Returns (nil, nil) when the column is
-// NULL or no snapshots exist.
-func (e *Engine) findMostRecentSessionActive() (*bool, error) {
+// findMostRecentSessionActive reads session_active, session_used, and
+// observed_at from the same most-recent quota_snapshots row (by observed_at).
+// Both columns are guaranteed to come from the SAME row so callers can
+// reason about contradictions (e.g. session_active=false but session_used>0).
+// Returns nil pointers for columns that are NULL; observedAt is zero when no
+// snapshots exist.
+func (e *Engine) findMostRecentSessionActive() (*bool, *float64, time.Time, error) {
 	var active sql.NullInt64
+	var used sql.NullFloat64
+	var observedAt time.Time
 	err := e.db.QueryRow(`
-		SELECT session_active
+		SELECT session_active, session_used, observed_at
 		FROM quota_snapshots
 		ORDER BY observed_at DESC
 		LIMIT 1
-	`).Scan(&active)
+	`).Scan(&active, &used, &observedAt)
 
 	if err == sql.ErrNoRows {
-		return nil, nil
+		return nil, nil, time.Time{}, nil
 	} else if err != nil {
-		return nil, fmt.Errorf("failed to query session_active: %w", err)
+		return nil, nil, time.Time{}, fmt.Errorf("failed to query session snapshot: %w", err)
 	}
 
-	if !active.Valid {
-		return nil, nil
+	var activePtr *bool
+	if active.Valid {
+		v := active.Int64 != 0
+		activePtr = &v
 	}
-	v := active.Int64 != 0
-	return &v, nil
+	var usedPtr *float64
+	if used.Valid {
+		usedPtr = &used.Float64
+	}
+	return activePtr, usedPtr, observedAt, nil
 }
 
 // findWeeklyBoundary extracts the weekly window boundary from the most recent snapshot.
