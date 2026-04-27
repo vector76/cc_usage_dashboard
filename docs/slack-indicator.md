@@ -83,13 +83,9 @@ the queue is expected to apply one client-side gate of its own.
    stay closed for the first day or two of every week even with no usage,
    defeating the purpose of harvesting unused capacity.
 
-3. **Priority quiet gate.** If the user has issued a Claude Code request in the last
-   `priority_quiet_period` (suggested default: 5 minutes), refuse release. Prevents
-   racing the user's interactive loop and stealing their headroom.
+3. **Baseline freshness gate.** See dedicated section below.
 
-4. **Baseline freshness gate.** See dedicated section below.
-
-5. **Not-paused gate.** The user can pause the slack signal from the tray menu (see
+4. **Not-paused gate.** The user can pause the slack signal from the tray menu (see
    `docs/tray-app.md`). When paused, the endpoint still computes and returns the
    numeric fields so dashboards keep working, but `paused: true` and the gate fails.
    A queue distinguishing "paused" from "below threshold" can read `paused` directly.
@@ -128,13 +124,11 @@ Response:
     "slack_fraction":   0.266
   },
   "slack_combined_fraction": 0.132,
-  "priority_quiet_for_seconds": 432,
   "paused": false,
   "release_recommended": true,
   "gates": {
     "session_headroom":   true,
     "weekly_headroom":    true,
-    "priority_quiet":     true,
     "baseline_freshness": true,
     "not_paused":         true
   }
@@ -149,7 +143,14 @@ corresponding headroom gate fails.
 ## Baseline freshness gate
 
 The gate passes iff a snapshot exists and is no older than `baseline_max_age`
-(suggested 48 hours). Missing snapshot fails the gate.
+(default 8 minutes — userscript posts every 5 minutes, so this gives ~1.5×
+headroom for jitter). Missing snapshot fails the gate.
+
+This is the only thing keeping `release_recommended` honest when the
+userscript stops posting (page closed, tampermonkey down, browser killed).
+Without it, queued work would keep draining quota against a frozen
+`percent_used` snapshot. The threshold is deliberately tight because
+"believe the snapshot" is the entire premise of the slack signal.
 
 ## Why uniform burn for `E(t)`
 

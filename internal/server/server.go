@@ -59,8 +59,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		priceTable: priceTable,
 		metrics:    NewMetrics(),
 		slackCalc: slack.NewCalculator(s.DB(), slack.Config{
-			QuietPeriodSeconds:      cfg.Slack.QuietPeriodSeconds,
-			BaselineMaxAgeHours:     cfg.Slack.BaselineMaxAgeHours,
+			BaselineMaxAgeSeconds:   cfg.Slack.BaselineMaxAgeSeconds,
 			SessionSurplusThreshold: cfg.Slack.SessionSurplusThreshold,
 			WeeklySurplusThreshold:  cfg.Slack.WeeklySurplusThreshold,
 			WeeklyAbsoluteThreshold: cfg.Slack.WeeklyAbsoluteThreshold,

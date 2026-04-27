@@ -13,14 +13,13 @@ import (
 // SlackResponse is the response from GET /slack endpoint. JSON keys match
 // docs/slack-indicator.md.
 type SlackResponse struct {
-	Now                     time.Time       `json:"now"`
-	Session                *WindowMetrics  `json:"session"`
-	Weekly                  *WindowMetrics  `json:"weekly"`
-	SlackCombinedFraction   *float64        `json:"slack_combined_fraction"`
-	PriorityQuietForSeconds int             `json:"priority_quiet_for_seconds"`
-	Paused                  bool            `json:"paused"`
-	ReleaseRecommended      bool            `json:"release_recommended"`
-	Gates                   map[string]bool `json:"gates"`
+	Now                   time.Time       `json:"now"`
+	Session               *WindowMetrics  `json:"session"`
+	Weekly                *WindowMetrics  `json:"weekly"`
+	SlackCombinedFraction *float64        `json:"slack_combined_fraction"`
+	Paused                bool            `json:"paused"`
+	ReleaseRecommended    bool            `json:"release_recommended"`
+	Gates                 map[string]bool `json:"gates"`
 }
 
 // WindowMetrics holds the computed metrics for a single window.
@@ -44,8 +43,7 @@ type WindowMetrics struct {
 
 // Config holds slack calculation configuration.
 type Config struct {
-	QuietPeriodSeconds      int
-	BaselineMaxAgeHours     int
+	BaselineMaxAgeSeconds   int
 	SessionSurplusThreshold float64
 	WeeklySurplusThreshold  float64
 	// WeeklyAbsoluteThreshold is the percent_remaining floor (0–1) at or
@@ -129,15 +127,6 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 
 	resp.SlackCombinedFraction = c.combineSlackFractions(resp.Session, resp.Weekly)
 
-	quietFor, hasEvent, err := c.quietFor(now)
-	if err != nil {
-		return nil, err
-	}
-	resp.PriorityQuietForSeconds = int(quietFor.Seconds())
-
-	quietThreshold := time.Duration(c.config.QuietPeriodSeconds) * time.Second
-	priorityQuietOk := !hasEvent || quietFor >= quietThreshold
-
 	sessionHeadroomOk := resp.Session != nil &&
 		resp.Session.SlackFraction != nil &&
 		*resp.Session.SlackFraction >= c.config.SessionSurplusThreshold
@@ -159,11 +148,10 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 
 	resp.Gates["session_headroom"] = sessionHeadroomOk
 	resp.Gates["weekly_headroom"] = weeklyHeadroomOk
-	resp.Gates["priority_quiet"] = priorityQuietOk
 	resp.Gates["baseline_freshness"] = freshOk
 	resp.Gates["not_paused"] = !paused
 
-	resp.ReleaseRecommended = sessionHeadroomOk && weeklyHeadroomOk && priorityQuietOk && freshOk && !paused
+	resp.ReleaseRecommended = sessionHeadroomOk && weeklyHeadroomOk && freshOk && !paused
 
 	return resp, nil
 }
@@ -262,34 +250,14 @@ func (c *Calculator) combineSlackFractions(session, weekly *WindowMetrics) *floa
 	return &combined
 }
 
-// quietFor returns the time since the most recent usage event and a flag
-// indicating whether any events exist.
-//
-// We use ORDER BY ... LIMIT 1 instead of MAX() because go-sqlite3 erases the
-// column type for aggregate results, returning the timestamp as a raw string
-// that does not scan into time.Time.
-func (c *Calculator) quietFor(now time.Time) (time.Duration, bool, error) {
-	var lastEvent time.Time
-	err := c.db.QueryRow(`SELECT occurred_at FROM usage_events ORDER BY occurred_at DESC LIMIT 1`).Scan(&lastEvent)
-	if err == sql.ErrNoRows {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, fmt.Errorf("failed to query last event: %w", err)
-	}
-	if lastEvent.IsZero() {
-		return 0, false, nil
-	}
-	dt := now.Sub(lastEvent)
-	if dt < 0 {
-		dt = 0
-	}
-	return dt, true, nil
-}
-
 // baselineFreshnessOk implements the freshness gate from
 // docs/slack-indicator.md: the gate passes iff a snapshot exists and is no
-// older than BaselineMaxAgeHours. Missing snapshot fails the gate.
+// older than BaselineMaxAgeSeconds. Missing snapshot fails the gate.
+//
+// This gate is the sole defence against a stale snapshot: if the userscript
+// stops posting (page closed, tampermonkey down), release_recommended must
+// flip to false within BaselineMaxAgeSeconds — otherwise queued work would
+// keep draining quota against a frozen percent_used.
 func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
 	var receivedAt time.Time
 	err := c.db.QueryRow(`
@@ -304,7 +272,7 @@ func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
 	}
 
 	age := now.Sub(receivedAt)
-	maxAge := time.Duration(c.config.BaselineMaxAgeHours) * time.Hour
+	maxAge := time.Duration(c.config.BaselineMaxAgeSeconds) * time.Second
 	return age <= maxAge, nil
 }
 

@@ -41,9 +41,8 @@ type Config struct {
 
 	Slack struct {
 		HeadroomThreshold       float64 `yaml:"headroom_threshold"`
-		QuietPeriodSeconds      int     `yaml:"quiet_period_seconds"`
 		FreshnessThresholdMs    int     `yaml:"freshness_threshold_ms"`
-		BaselineMaxAgeHours     int     `yaml:"baseline_max_age_hours"`
+		BaselineMaxAgeSeconds   int     `yaml:"baseline_max_age_seconds"`
 		SessionSurplusThreshold float64 `yaml:"session_surplus_threshold"`
 		WeeklySurplusThreshold  float64 `yaml:"weekly_surplus_threshold"`
 		// Weekly headroom additionally passes when percent_remaining is at
@@ -75,9 +74,8 @@ func Load(path string) (*Config, error) {
 	cfg.Logging.Level = "info"
 	cfg.Logging.File = ""
 	cfg.Slack.HeadroomThreshold = 10.0
-	cfg.Slack.QuietPeriodSeconds = 300
 	cfg.Slack.FreshnessThresholdMs = 60000
-	cfg.Slack.BaselineMaxAgeHours = 48
+	cfg.Slack.BaselineMaxAgeSeconds = 480
 	cfg.Slack.SessionSurplusThreshold = 0.50
 	cfg.Slack.WeeklySurplusThreshold = 0.10
 	cfg.Slack.WeeklyAbsoluteThreshold = 0.80

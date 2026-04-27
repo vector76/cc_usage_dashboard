@@ -75,8 +75,7 @@ slack:
   session_surplus_threshold: 0.50
   weekly_surplus_threshold: 0.10
   weekly_absolute_threshold: 0.80
-  priority_quiet_period_seconds: 300
-  baseline_max_age_hours: 48
+  baseline_max_age_seconds: 480
 
 logging:
   level: info

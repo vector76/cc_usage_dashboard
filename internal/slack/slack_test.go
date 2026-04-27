@@ -17,8 +17,7 @@ func newCalc(t *testing.T) (*Calculator, *store.Store) {
 		t.Fatalf("open store: %v", err)
 	}
 	cfg := Config{
-		QuietPeriodSeconds:      300,
-		BaselineMaxAgeHours:     48,
+		BaselineMaxAgeSeconds:   480,
 		SessionSurplusThreshold: 0.50,
 		WeeklySurplusThreshold:  0.10,
 	}
@@ -187,50 +186,6 @@ func TestRecordRelease_ErrorWhenNoWindow(t *testing.T) {
 	}
 }
 
-// priority_quiet gate must pass when the user has been idle long enough
-// (quietFor >= QuietPeriodSeconds) and fail when the most recent event is
-// within the quiet window. Guards against re-introducing the historical
-// inversion where the gate was `quietFor > 0`.
-func TestPriorityQuietGate_NotInverted(t *testing.T) {
-	tests := []struct {
-		name        string
-		eventOffset time.Duration // negative = in the past
-		wantPass    bool
-	}{
-		{"recent activity fails the gate", -10 * time.Second, false},
-		{"old activity passes the gate", -10 * time.Minute, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c, s := newCalc(t)
-			defer s.Close()
-
-			now := time.Now().UTC()
-			insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
-
-			cost := 1.0
-			if _, err := s.InsertUsageEvent(
-				now.Add(tt.eventOffset), "api",
-				"sess-x", "msg-x", "", "claude-3-5-sonnet-20241022",
-				100, 50, 0, 0,
-				&cost, "reported", "{}",
-			); err != nil {
-				t.Fatalf("insert event: %v", err)
-			}
-
-			resp, err := c.GetSlack()
-			if err != nil {
-				t.Fatalf("GetSlack: %v", err)
-			}
-			got := resp.Gates["priority_quiet"]
-			if got != tt.wantPass {
-				t.Errorf("priority_quiet gate: got %v, want %v (quiet_for=%ds)",
-					got, tt.wantPass, resp.PriorityQuietForSeconds)
-			}
-		})
-	}
-}
-
 // (e) SetPaused(true) forces release_recommended=false even when slack is
 // positive. Asserted via the typed SlackResponse.ReleaseRecommended field
 // rather than any gate-map key.
@@ -395,8 +350,7 @@ func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh, weeklyAbso
 		t.Fatalf("open store: %v", err)
 	}
 	cfg := Config{
-		QuietPeriodSeconds:      300,
-		BaselineMaxAgeHours:     48,
+		BaselineMaxAgeSeconds:   480,
 		SessionSurplusThreshold: sessionThresh,
 		WeeklySurplusThreshold:  weeklyThresh,
 		WeeklyAbsoluteThreshold: weeklyAbsolute,
@@ -530,15 +484,16 @@ func TestWeeklyHeadroom_AbsoluteFloorBranch(t *testing.T) {
 }
 
 // (h) Baseline freshness gate is purely an age check: passes iff a snapshot
-// exists and is no older than BaselineMaxAgeHours.
+// exists and is no older than BaselineMaxAgeSeconds. Default in newCalc is
+// 480s (8 min), so we straddle that boundary here.
 func TestBaselineFreshness_AgeBoundary(t *testing.T) {
 	tests := []struct {
-		name     string
-		ageHours int
-		wantPass bool
+		name       string
+		ageSeconds int
+		wantPass   bool
 	}{
-		{"snapshot well inside max age", 47, true},
-		{"snapshot just past max age", 49, false},
+		{"snapshot well inside max age", 470, true},
+		{"snapshot just past max age", 490, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -546,7 +501,7 @@ func TestBaselineFreshness_AgeBoundary(t *testing.T) {
 			defer s.Close()
 
 			now := time.Now().UTC()
-			receivedAt := now.Add(-time.Duration(tt.ageHours) * time.Hour)
+			receivedAt := now.Add(-time.Duration(tt.ageSeconds) * time.Second)
 			seedFreshSnapshot(t, s, receivedAt, 5.0)
 
 			resp, err := c.GetSlack()
@@ -554,8 +509,8 @@ func TestBaselineFreshness_AgeBoundary(t *testing.T) {
 				t.Fatalf("GetSlack: %v", err)
 			}
 			if got := resp.Gates["baseline_freshness"]; got != tt.wantPass {
-				t.Errorf("baseline_freshness gate: got %v, want %v (age=%dh)",
-					got, tt.wantPass, tt.ageHours)
+				t.Errorf("baseline_freshness gate: got %v, want %v (age=%ds)",
+					got, tt.wantPass, tt.ageSeconds)
 			}
 		})
 	}

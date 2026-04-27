@@ -59,8 +59,7 @@ func newTestEnv(t *testing.T, pricingPath string) *testEnv {
 	cfg.Database.Path = ":memory:"
 	cfg.HTTP.Port = 0
 	cfg.Pricing.TablePath = pricingPath
-	cfg.Slack.QuietPeriodSeconds = 300
-	cfg.Slack.BaselineMaxAgeHours = 48
+	cfg.Slack.BaselineMaxAgeSeconds = 480
 	cfg.Slack.SessionSurplusThreshold = 0.50
 	cfg.Slack.WeeklySurplusThreshold = 0.10
 	cfg.Slack.WeeklyAbsoluteThreshold = 0.80
@@ -149,7 +148,7 @@ func TestE2E_CLIModeA_ConsumptionAndSlack(t *testing.T) {
 	}
 	for _, k := range []string{
 		"now", "session", "weekly", "slack_combined_fraction",
-		"priority_quiet_for_seconds", "paused", "release_recommended", "gates",
+		"paused", "release_recommended", "gates",
 	} {
 		if _, ok := slackResp[k]; !ok {
 			t.Errorf("/slack missing top-level key %q: %s", k, w.Body.String())
@@ -159,7 +158,7 @@ func TestE2E_CLIModeA_ConsumptionAndSlack(t *testing.T) {
 	if err := json.Unmarshal(slackResp["gates"], &gates); err != nil {
 		t.Fatalf("decode gates: %v", err)
 	}
-	for _, k := range []string{"session_headroom", "weekly_headroom", "priority_quiet", "baseline_freshness", "not_paused"} {
+	for _, k := range []string{"session_headroom", "weekly_headroom", "baseline_freshness", "not_paused"} {
 		if _, ok := gates[k]; !ok {
 			t.Errorf("/slack missing gate %q", k)
 		}
