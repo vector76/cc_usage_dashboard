@@ -85,7 +85,7 @@ Useful for tuning the queue heuristics later. Can be turned off.
 |----------------|------------|--------------------------------------|
 | id             | INTEGER PK |                                      |
 | sampled_at     | TIMESTAMP  |                                      |
-| slack_fraction | REAL       | (expected − actual) / quota_total.   |
+| slack_fraction | REAL       | (percent_expected − percent_used)/100. |
 | window_id      | INTEGER    | FK into `windows`.                   |
 
 ### `slack_releases`

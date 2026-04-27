@@ -24,14 +24,22 @@ type SlackResponse struct {
 }
 
 // WindowMetrics holds the computed metrics for a single window.
+//
+// All percent fields are in 0–100 (not 0–1). SlackFraction is in
+// [-1, +1] and represents (PercentExpected − PercentUsed) / 100, i.e.
+// the fraction of the *full* quota currently held in surplus relative to
+// uniform pace. Positive = under pace; negative = over pace.
+//
+// PercentUsed and SlackFraction are nil whenever no in-window snapshot
+// has arrived yet — we don't synthesize an "assumed 0% used" value.
+// Consumers (the headroom gates, dashboards) should treat nil as
+// "couldn't measure" and fail safe rather than infer.
 type WindowMetrics struct {
-	WindowStart   time.Time `json:"window_start"`
-	WindowEnd     time.Time `json:"window_end"`
-	QuotaTotal    float64   `json:"quota_total"`
-	Consumed      float64   `json:"consumed"`
-	Expected      float64   `json:"expected"`
-	Slack         float64   `json:"slack"`
-	SlackFraction *float64  `json:"slack_fraction"`
+	WindowStart     time.Time `json:"window_start"`
+	WindowEnd       time.Time `json:"window_end"`
+	PercentUsed     *float64  `json:"percent_used"`
+	PercentExpected float64   `json:"percent_expected"`
+	SlackFraction   *float64  `json:"slack_fraction"`
 }
 
 // Config holds slack calculation configuration.
@@ -184,32 +192,25 @@ func (c *Calculator) getActiveWindow(kind string) (*activeWindow, error) {
 	return &w, nil
 }
 
-// computeMetrics computes window metrics for an active window.
+// computeMetrics computes window metrics for an active window using
+// percent-of-quota math only. PercentUsed comes from the latest in-window
+// snapshot (windows.baseline_total, which the windows engine keeps current);
+// dollar consumption from usage_events does not enter the slack signal.
 //
-// Per docs/slack-indicator.md:
+//	progress(t)        = clamp((t - t0) / (t1 - t0), 0, 1)
+//	percent_expected   = 100 * progress(t)              # uniform pace to 100% by t1
+//	slack_fraction     = (percent_expected - percent_used) / 100   # in [-1, +1]
 //
-//	progress(t)       = clamp((t - t0) / (t1 - t0), 0, 1)
-//	E(t)              = Q * progress(t)
-//	slack(t)          = E(t) - U(t)
-//	slack_fraction(t) = slack(t) / Q
+// percent_used and slack_fraction are nil when no in-window snapshot has
+// been recorded yet — we fail safe rather than assume 0% used.
 func (c *Calculator) computeMetrics(w *activeWindow, now time.Time) (*WindowMetrics, error) {
-	var consumed float64
-	err := c.db.QueryRow(`
-		SELECT COALESCE(SUM(cost_usd_equivalent), 0)
-		FROM usage_events
-		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
-	`, store.FormatTime(w.startedAt), store.FormatTime(w.endsAt)).Scan(&consumed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compute consumption: %w", err)
-	}
-
 	m := &WindowMetrics{
 		WindowStart: w.startedAt,
 		WindowEnd:   w.endsAt,
-		Consumed:    consumed,
 	}
 	if w.baselineTotal != nil {
-		m.QuotaTotal = *w.baselineTotal
+		v := *w.baselineTotal
+		m.PercentUsed = &v
 	}
 
 	// Window has not started yet.
@@ -229,15 +230,11 @@ func (c *Calculator) computeMetrics(w *activeWindow, now time.Time) (*WindowMetr
 	if progress > 1 {
 		progress = 1
 	}
+	m.PercentExpected = 100 * progress
 
-	if w.baselineTotal != nil {
-		baseline := *w.baselineTotal
-		m.Expected = baseline * progress
-		m.Slack = m.Expected - consumed
-		if baseline > 0 {
-			frac := m.Slack / baseline
-			m.SlackFraction = &frac
-		}
+	if m.PercentUsed != nil {
+		frac := (m.PercentExpected - *m.PercentUsed) / 100
+		m.SlackFraction = &frac
 	}
 
 	return m, nil

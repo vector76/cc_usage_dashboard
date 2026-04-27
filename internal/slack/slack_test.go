@@ -239,30 +239,14 @@ func TestSetPaused_ForcesReleaseRecommendedFalse(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now().UTC()
-	insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
-	insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 5000.0, "snapshot:1")
-
-	// Small consumption keeps slack positive on both windows.
-	cost := 5.0
-	if _, err := s.InsertUsageEvent(
-		now.Add(-30*time.Minute), "api",
-		"sess-1", "msg-1", "", "claude-3-5-sonnet-20241022",
-		1000, 500, 0, 0,
-		&cost, "reported", "{}",
-	); err != nil {
-		t.Fatalf("insert event: %v", err)
-	}
+	// percent_used kept tiny on both windows so the slack fractions are
+	// solidly positive; the point of the test is that pause overrides
+	// them.
+	insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 5.0, "snapshot:1")
+	insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 3.0, "snapshot:1")
 
 	// Fresh quota snapshot satisfies the freshness gate.
-	used := 5.0
-	if _, err := s.InsertQuotaSnapshot(
-		now, now, "userscript",
-		&used, nil,
-		&used, nil,
-		"{}",
-	); err != nil {
-		t.Fatalf("insert snapshot: %v", err)
-	}
+	seedFreshSnapshot(t, s, now, 5.0)
 
 	c.SetPaused(true)
 	resp, err := c.GetSlack()
@@ -284,37 +268,30 @@ func TestSetPaused_ForcesReleaseRecommendedFalse(t *testing.T) {
 	}
 }
 
-// (f) Computed Progress/Expected/Slack match the formulas from
-// docs/slack-indicator.md:
+// (f) Computed PercentExpected and SlackFraction match the percent-only
+// formulas from docs/slack-indicator.md:
 //
 //	progress(t)       = clamp((t - t0) / (t1 - t0), 0, 1)
-//	E(t)              = Q * progress(t)
-//	slack(t)          = E(t) - U(t)
-//	slack_fraction(t) = slack(t) / Q
+//	percent_expected  = 100 * progress(t)
+//	slack_fraction    = (percent_expected - percent_used) / 100
 //
-// Window bounds bracket time.Now() so the test does not depend on
-// wall-clock alignment.
+// percent_used comes from the latest in-window snapshot (= the window's
+// baseline_total). Window bounds bracket time.Now() so the test doesn't
+// depend on wall-clock alignment.
 func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 	c, s := newCalc(t)
 	defer s.Close()
 
-	const baseline = 1000.0
-	const consumed = 50.0
+	const percentUsed = 5.0 // baseline_total stored on the window row
 
 	now := time.Now().UTC()
 	startedAt := now.Add(-1 * time.Hour)
-	endsAt := now.Add(4 * time.Hour) // session window total
-	insertWindow(t, s.DB(), "session", startedAt, endsAt, baseline, "snapshot:1")
-
-	cost := consumed
-	if _, err := s.InsertUsageEvent(
-		now.Add(-30*time.Minute), "api",
-		"sess-1", "msg-1", "", "claude-3-5-sonnet-20241022",
-		1000, 500, 0, 0,
-		&cost, "reported", "{}",
-	); err != nil {
-		t.Fatalf("insert event: %v", err)
-	}
+	endsAt := now.Add(4 * time.Hour) // 5h session window
+	insertWindow(t, s.DB(), "session", startedAt, endsAt, percentUsed, "snapshot:1")
+	// A fresh snapshot keeps the freshness gate happy and proves
+	// computeMetrics reads percent from the windows row, not the snapshot
+	// table directly.
+	seedFreshSnapshot(t, s, now, percentUsed)
 
 	resp, err := c.GetSlack()
 	if err != nil {
@@ -325,10 +302,8 @@ func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 		t.Fatal("expected Session metrics, got nil")
 	}
 
-	// Recompute the expected values relative to a "now" sampled inside
-	// the test, using the same formulas the docs prescribe. The window is
-	// 5 hours; sub-second drift between inserting and reading is
-	// negligible relative to the tolerances below (0.5 of $1000).
+	// Sub-second wall-clock drift between insert and read is negligible
+	// against the tolerances below (a 5h window).
 	windowDur := endsAt.Sub(startedAt).Seconds()
 	elapsed := time.Since(startedAt).Seconds()
 	if elapsed < 0 {
@@ -338,28 +313,60 @@ func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 		elapsed = windowDur
 	}
 	progress := elapsed / windowDur
-	expectedE := baseline * progress
-	expectedSlack := expectedE - consumed
-	expectedSlackFrac := expectedSlack / baseline
+	wantExpected := 100 * progress
+	wantSlackFrac := (wantExpected - percentUsed) / 100
 
-	// Consumed must equal the inserted cost exactly.
-	if math.Abs(m.Consumed-consumed) > 1e-6 {
-		t.Errorf("Consumed: got %v, want %v", m.Consumed, consumed)
+	if m.PercentUsed == nil || math.Abs(*m.PercentUsed-percentUsed) > 1e-6 {
+		t.Errorf("PercentUsed: got %v, want %v", m.PercentUsed, percentUsed)
 	}
-
-	// Allow a small tolerance for time-since-insertion drift.
-	const tol = 0.5
-	if math.Abs(m.Expected-expectedE) > tol {
-		t.Errorf("Expected (E): got %v, want ~%v (tol %v)", m.Expected, expectedE, tol)
-	}
-	if math.Abs(m.Slack-expectedSlack) > tol {
-		t.Errorf("Slack (E - U): got %v, want ~%v (tol %v)", m.Slack, expectedSlack, tol)
+	const tol = 0.05 // half-a-percent tolerance on percent_expected
+	if math.Abs(m.PercentExpected-wantExpected) > tol {
+		t.Errorf("PercentExpected: got %v, want ~%v (tol %v)", m.PercentExpected, wantExpected, tol)
 	}
 	if m.SlackFraction == nil {
 		t.Fatal("expected non-nil SlackFraction")
 	}
-	if math.Abs(*m.SlackFraction-expectedSlackFrac) > tol/baseline {
-		t.Errorf("SlackFraction: got %v, want ~%v", *m.SlackFraction, expectedSlackFrac)
+	if math.Abs(*m.SlackFraction-wantSlackFrac) > tol/100 {
+		t.Errorf("SlackFraction: got %v, want ~%v", *m.SlackFraction, wantSlackFrac)
+	}
+}
+
+// PercentUsed and SlackFraction must be nil when no in-window snapshot has
+// arrived yet — the headroom gate then fails safe rather than assuming 0%.
+func TestComputeMetrics_NilWhenNoInWindowSnapshot(t *testing.T) {
+	c, s := newCalc(t)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	// Insert a window with a NULL baseline_total — i.e. no in-window
+	// snapshot has ever set it.
+	if _, err := s.DB().Exec(
+		`INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
+		 VALUES ('session', ?, ?, NULL, 'default', 0)`,
+		store.FormatTime(now.Add(-1*time.Hour)),
+		store.FormatTime(now.Add(4*time.Hour)),
+	); err != nil {
+		t.Fatalf("insert window: %v", err)
+	}
+
+	resp, err := c.GetSlack()
+	if err != nil {
+		t.Fatalf("GetSlack: %v", err)
+	}
+	if resp.Session == nil {
+		t.Fatal("expected Session metrics, got nil")
+	}
+	if resp.Session.PercentUsed != nil {
+		t.Errorf("PercentUsed: got %v, want nil", *resp.Session.PercentUsed)
+	}
+	if resp.Session.SlackFraction != nil {
+		t.Errorf("SlackFraction: got %v, want nil", *resp.Session.SlackFraction)
+	}
+	if resp.Gates["session_headroom"] {
+		t.Error("session_headroom gate must fail when percent_used is unknown")
+	}
+	if resp.ReleaseRecommended {
+		t.Error("release_recommended must be false when percent_used is unknown")
 	}
 }
 
@@ -396,47 +403,44 @@ func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh float64) (*
 }
 
 // (g) session_headroom and weekly_headroom gates fire independently against
-// their own configured surplus thresholds. The session gate uses the
-// session window's slack_fraction; the weekly gate uses the weekly's.
+// their own configured surplus thresholds, driven by each window's
+// percent_used (= windows.baseline_total) — not by usage_events.
 // release_recommended requires both to pass (plus the other gates).
 //
-// Setup: session window started_at=now-1h, ends_at=now+4h, baseline=1000
+// Setup: session window started_at=now-1h, ends_at=now+4h
 //
-//	progress=0.2, expected=200, slack_fraction(session) = (200-Cs)/1000
+//	progress=0.2, percent_expected=20,
+//	slack_fraction(session) = (20 - percent_used_session) / 100
 //
-// weekly window started_at=now-24h, ends_at=now+6*24h, baseline=10000
+// weekly window started_at=now-24h, ends_at=now+6*24h
 //
-//	progress≈0.1428, expected≈1428.6, slack_fraction(weekly) = (1428.6-Cw)/10000
+//	progress=24/168≈0.1428, percent_expected≈14.28,
+//	slack_fraction(weekly) = (14.28 - percent_used_weekly) / 100
 //
-// Cs = consumption charged inside session window (event in [now-1h, now+4h]).
-// Cw = total consumption inside weekly window (any event in last 24h fits).
-// Thresholds chosen so both gates sit near 0.10 with realistic loads.
+// Both gate thresholds set to 0.10 below.
 func TestHeadroomGates_DualThresholdsBoundaries(t *testing.T) {
 	tests := []struct {
-		name                                  string
-		sessionEventCost, weeklyOnlyEventCost float64
-		wantSession, wantWeekly, wantRelease  bool
+		name                                       string
+		sessionPercentUsed, weeklyPercentUsed      float64
+		wantSession, wantWeekly, wantRelease       bool
 	}{
 		{
-			// Cs=50 → session_frac = 0.15 ≥ 0.10 ✓
-			// Cw=50 → weekly_frac ≈ 0.138 ≥ 0.10 ✓
-			name:             "both pass",
-			sessionEventCost: 50.0, weeklyOnlyEventCost: 0.0,
+			// session_frac = (20 - 5)/100 = 0.15 ≥ 0.10 ✓
+			// weekly_frac  = (14.28 - 3)/100 ≈ 0.113 ≥ 0.10 ✓
+			name:               "both pass",
+			sessionPercentUsed: 5.0, weeklyPercentUsed: 3.0,
 			wantSession: true, wantWeekly: true, wantRelease: true,
 		},
 		{
-			// Cs=150 → session_frac = 0.05 < 0.10 ✗
-			// Cw=150 → weekly_frac ≈ 0.128 ≥ 0.10 ✓
-			name:             "session fails, weekly passes",
-			sessionEventCost: 150.0, weeklyOnlyEventCost: 0.0,
+			// session_frac = (20 - 15)/100 = 0.05 < 0.10 ✗
+			name:               "session fails, weekly passes",
+			sessionPercentUsed: 15.0, weeklyPercentUsed: 3.0,
 			wantSession: false, wantWeekly: true, wantRelease: false,
 		},
 		{
-			// Cs=50 (in-session) → session_frac = 0.15 ≥ 0.10 ✓
-			// Cw=50 + 600 (out-of-session, in-weekly) = 650 → weekly_frac
-			//   ≈ (1428.6-650)/10000 ≈ 0.078 < 0.10 ✗
-			name:             "weekly fails, session passes",
-			sessionEventCost: 50.0, weeklyOnlyEventCost: 600.0,
+			// weekly_frac = (14.28 - 10)/100 ≈ 0.043 < 0.10 ✗
+			name:               "weekly fails, session passes",
+			sessionPercentUsed: 5.0, weeklyPercentUsed: 10.0,
 			wantSession: true, wantWeekly: false, wantRelease: false,
 		},
 	}
@@ -446,36 +450,11 @@ func TestHeadroomGates_DualThresholdsBoundaries(t *testing.T) {
 			defer s.Close()
 
 			now := time.Now().UTC()
-			insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1000.0, "snapshot:1")
-			insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), 10000.0, "snapshot:1")
+			insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), tt.sessionPercentUsed, "snapshot:1")
+			insertWindow(t, s.DB(), "weekly", now.Add(-24*time.Hour), now.Add(6*24*time.Hour), tt.weeklyPercentUsed, "snapshot:1")
 
-			if tt.sessionEventCost > 0 {
-				cost := tt.sessionEventCost
-				if _, err := s.InsertUsageEvent(
-					now.Add(-30*time.Minute), "api",
-					"sess-h", "msg-h", "", "claude-3-5-sonnet-20241022",
-					1, 1, 0, 0,
-					&cost, "reported", "{}",
-				); err != nil {
-					t.Fatalf("insert in-session event: %v", err)
-				}
-			}
-			if tt.weeklyOnlyEventCost > 0 {
-				cost := tt.weeklyOnlyEventCost
-				// Place this event before the session window starts so it
-				// counts toward weekly only, not session.
-				if _, err := s.InsertUsageEvent(
-					now.Add(-3*time.Hour), "api",
-					"sess-w", "msg-w", "", "claude-3-5-sonnet-20241022",
-					1, 1, 0, 0,
-					&cost, "reported", "{}",
-				); err != nil {
-					t.Fatalf("insert weekly-only event: %v", err)
-				}
-			}
-			// Fresh snapshot so freshness gate doesn't interfere with the
-			// release_recommended decision.
-			seedFreshSnapshot(t, s, now, 5.0)
+			// Fresh snapshot so the freshness gate doesn't block release.
+			seedFreshSnapshot(t, s, now, tt.sessionPercentUsed)
 
 			resp, err := c.GetSlack()
 			if err != nil {

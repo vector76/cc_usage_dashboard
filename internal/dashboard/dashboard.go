@@ -27,7 +27,6 @@ type WindowState struct {
 	EndsAt        time.Time         `json:"ends_at"`
 	BaselineTotal *float64          `json:"baseline_total"`
 	Consumed      float64           `json:"consumed"`
-	Slack         *float64          `json:"slack"`
 	Series        []UsedSeriesPoint `json:"series"`
 	Volume        []SeriesBucket    `json:"volume"`
 	// BucketSecs is the width of each Volume bucket in seconds. The
@@ -38,10 +37,14 @@ type WindowState struct {
 }
 
 // UsedSeriesPoint is one observation of % used at a point in time, sourced
-// from quota_snapshots within the window.
+// from quota_snapshots within (or for the session chart, near) the window.
+// WindowEnds is the snapshot's reported reset time for this kind, so the
+// client can split the series into one polyline per window — without it,
+// the 15h session view would draw a single jagged line spanning resets.
 type UsedSeriesPoint struct {
-	ObservedAt  time.Time `json:"observed_at"`
-	PercentUsed float64   `json:"percent_used"`
+	ObservedAt  time.Time  `json:"observed_at"`
+	PercentUsed float64    `json:"percent_used"`
+	WindowEnds  *time.Time `json:"window_ends,omitempty"`
 }
 
 // SeriesBucket is a 15-minute consumption bucket.
@@ -52,13 +55,12 @@ type SeriesBucket struct {
 
 // State is the JSON response for GET /api/dashboard/state.
 type State struct {
-	Now                    time.Time      `json:"now"`
-	Session                *WindowState   `json:"session"`
-	Weekly                 *WindowState   `json:"weekly"`
-	LastSnapshotAgeSeconds *float64       `json:"last_snapshot_age_seconds"`
-	ParseErrors24h         int64          `json:"parse_errors_24h"`
-	Paused                 bool           `json:"paused"`
-	ConsumptionSeries      []SeriesBucket `json:"consumption_series"`
+	Now                    time.Time    `json:"now"`
+	Session                *WindowState `json:"session"`
+	Weekly                 *WindowState `json:"weekly"`
+	LastSnapshotAgeSeconds *float64     `json:"last_snapshot_age_seconds"`
+	ParseErrors24h         int64        `json:"parse_errors_24h"`
+	Paused                 bool         `json:"paused"`
 }
 
 // Handler serves the dashboard UI and state endpoint.
@@ -126,18 +128,15 @@ func (h *Handler) computeState() (*State, error) {
 	now := h.now()
 	db := h.store.DB()
 
-	state := &State{
-		Now:               now,
-		ConsumptionSeries: []SeriesBucket{},
-	}
+	state := &State{Now: now}
 
-	session, err := h.loadActiveWindow(db, "session", now)
+	session, err := h.loadActiveWindow(db, "session")
 	if err != nil {
 		return nil, fmt.Errorf("session window: %w", err)
 	}
 	state.Session = session
 
-	weekly, err := h.loadActiveWindow(db, "weekly", now)
+	weekly, err := h.loadActiveWindow(db, "weekly")
 	if err != nil {
 		return nil, fmt.Errorf("weekly window: %w", err)
 	}
@@ -158,16 +157,10 @@ func (h *Handler) computeState() (*State, error) {
 
 	state.Paused = h.slackCalc.IsPaused()
 
-	series, err := h.consumptionSeries(db, now)
-	if err != nil {
-		return nil, fmt.Errorf("consumption series: %w", err)
-	}
-	state.ConsumptionSeries = series
-
 	return state, nil
 }
 
-func (h *Handler) loadActiveWindow(db *sql.DB, kind string, now time.Time) (*WindowState, error) {
+func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error) {
 	var (
 		id            int64
 		startedAt     time.Time
@@ -210,48 +203,42 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string, now time.Time) (*Win
 	}
 	ws.Consumed = consumed
 
-	series, err := h.loadUsedSeries(db, kind, startedAt, endsAt)
+	// The session chart shows 10h of pre-window history alongside the
+	// current 5h window so the user can compare today's burn rate against
+	// the prior two sessions. The wider domain is purely for the snapshot
+	// curve and the volume bars; the pace line is current-window-only.
+	seriesStart := startedAt
+	if kind == "session" {
+		seriesStart = startedAt.Add(-10 * time.Hour)
+	}
+
+	series, err := h.loadUsedSeries(db, kind, seriesStart, endsAt)
 	if err != nil {
 		return nil, err
 	}
 	ws.Series = series
 
 	bucketSecs := bucketSecsForKind(kind)
-	volume, err := h.loadVolumeSeries(db, startedAt, endsAt, bucketSecs)
+	volume, err := h.loadVolumeSeries(db, seriesStart, endsAt, bucketSecs)
 	if err != nil {
 		return nil, err
 	}
 	ws.Volume = volume
 	ws.BucketSecs = bucketSecs
 
-	if ws.BaselineTotal != nil {
-		duration := endsAt.Sub(startedAt)
-		if duration > 0 {
-			progress := float64(now.Sub(startedAt)) / float64(duration)
-			if progress < 0 {
-				progress = 0
-			}
-			if progress > 1 {
-				progress = 1
-			}
-			expected := *ws.BaselineTotal * progress
-			slk := expected - consumed
-			ws.Slack = &slk
-		}
-	}
-
 	return ws, nil
 }
 
 // bucketSecsForKind picks a bucket width that yields a readable number of
-// bars per window. Session = 5 hours / 5 min ≈ 60 bars; weekly = 7 days /
-// 6 hours = 28 bars. Returned size aligns to UTC by virtue of strftime('%s').
+// bars across the chart's domain. Session view spans 15h (current 5h + 10h
+// pre-window history) → 15-min buckets ≈ 60 bars; weekly = 7 days / 6h = 28
+// bars. Returned size aligns to UTC by virtue of strftime('%s').
 func bucketSecsForKind(kind string) int {
 	switch kind {
 	case "weekly":
 		return 6 * 3600
 	default:
-		return 5 * 60
+		return 15 * 60
 	}
 }
 
@@ -294,25 +281,27 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 }
 
 // loadUsedSeries returns the per-snapshot %used time series for a window.
-// Reads session_used or weekly_used depending on kind. Empty slice when no
-// matching snapshots exist; never returns nil.
+// Reads session_used+session_window_ends or weekly_used+weekly_window_ends
+// depending on kind. Empty slice when no matching snapshots exist; never
+// returns nil. WindowEnds is included so the client can split the polyline
+// at session resets when rendering the 15h session view.
 func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time.Time) ([]UsedSeriesPoint, error) {
-	var col string
+	var usedCol, endsCol string
 	switch kind {
 	case "session":
-		col = "session_used"
+		usedCol, endsCol = "session_used", "session_window_ends"
 	case "weekly":
-		col = "weekly_used"
+		usedCol, endsCol = "weekly_used", "weekly_window_ends"
 	default:
 		return []UsedSeriesPoint{}, nil
 	}
 
 	query := fmt.Sprintf(`
-		SELECT observed_at, %s
+		SELECT observed_at, %s, %s
 		FROM quota_snapshots
 		WHERE observed_at >= ? AND observed_at < ? AND %s IS NOT NULL
 		ORDER BY observed_at
-	`, col, col)
+	`, usedCol, endsCol, usedCol)
 	rows, err := db.Query(query, store.FormatTime(startedAt), store.FormatTime(endsAt))
 	if err != nil {
 		return nil, err
@@ -322,8 +311,13 @@ func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time
 	out := []UsedSeriesPoint{}
 	for rows.Next() {
 		var p UsedSeriesPoint
-		if err := rows.Scan(&p.ObservedAt, &p.PercentUsed); err != nil {
+		var ends sql.NullTime
+		if err := rows.Scan(&p.ObservedAt, &p.PercentUsed, &ends); err != nil {
 			return nil, err
+		}
+		if ends.Valid {
+			t := ends.Time
+			p.WindowEnds = &t
 		}
 		out = append(out, p)
 	}
@@ -361,33 +355,3 @@ func (h *Handler) parseErrors24h(db *sql.DB, now time.Time) (int64, error) {
 	return count, nil
 }
 
-func (h *Handler) consumptionSeries(db *sql.DB, now time.Time) ([]SeriesBucket, error) {
-	cutoff := now.Add(-24 * time.Hour)
-	rows, err := db.Query(`
-		SELECT
-			CAST(strftime('%s', occurred_at) AS INTEGER) / 900 * 900 AS bucket_unix,
-			COALESCE(SUM(cost_usd_equivalent), 0) AS total
-		FROM usage_events
-		WHERE occurred_at >= ? AND cost_usd_equivalent IS NOT NULL
-		GROUP BY bucket_unix
-		ORDER BY bucket_unix
-	`, store.FormatTime(cutoff))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := []SeriesBucket{}
-	for rows.Next() {
-		var bucketUnix int64
-		var total float64
-		if err := rows.Scan(&bucketUnix, &total); err != nil {
-			return nil, err
-		}
-		out = append(out, SeriesBucket{
-			BucketStart: time.Unix(bucketUnix, 0).UTC(),
-			CostUSD:     total,
-		})
-	}
-	return out, rows.Err()
-}

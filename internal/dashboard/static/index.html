@@ -10,13 +10,11 @@
   h2 { margin-top: 0; font-size: 1.1rem; }
   h3 { margin: 0 0 0.5rem 0; font-size: 0.95rem; color: #444; }
   section { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 4px; }
-  .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-  @media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
+  .chart-block { margin-bottom: 1rem; }
+  .chart-block:last-child { margin-bottom: 0; }
   .kv { display: grid; grid-template-columns: max-content auto; column-gap: 1rem; row-gap: 0.25rem; margin: 0; }
   .kv dt { color: #666; }
   .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .alert { color: #c00; font-weight: bold; }
-  .ok { color: #060; }
   .muted { color: #888; }
   svg { width: 100%; height: auto; display: block; }
 </style>
@@ -31,15 +29,13 @@
 
 <section>
   <h2>Burn-down</h2>
-  <div class="charts">
-    <div>
-      <h3>Session window</h3>
-      <svg id="chart-session" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
-    </div>
-    <div>
-      <h3>Weekly window</h3>
-      <svg id="chart-weekly" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
-    </div>
+  <div class="chart-block">
+    <h3>Session window (last 15h, current window in rightmost third)</h3>
+    <svg id="chart-session" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+  </div>
+  <div class="chart-block">
+    <h3>Weekly window</h3>
+    <svg id="chart-weekly" viewBox="0 0 400 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
   </div>
 </section>
 
@@ -89,21 +85,32 @@ function renderStatus(s) {
   kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
 }
 
-// renderBurnDown plots % remaining vs. time within a window, with a
-// dollar-volume bar chart underneath in the style of a stock price+volume
-// chart. Layout (200 tall):
+// renderBurnDown plots % remaining vs. time, with a dollar-volume bar
+// chart underneath in the style of a stock price+volume chart.
+//
+// Layout (200 tall):
 //   y=8..132    upper panel — % remaining (100 at top, 0 at bottom)
 //   y=140..184  lower panel — $ consumption per bucket (bars from baseline)
 //   y=192       x-axis time labels shared across both panels
 //
+// X-axis spans [domainStart, end). The current window is always
+// [start, end); domainStart can sit further back when opts.lookbackMs > 0
+// (session view: 10h pre-window history). The pace line and the latest-
+// dot delta-from-pace label only make sense within the current window.
+//
 //   - Dashed line: linear pace from (start, 100% remaining) to (end, 0%
 //     remaining). Above = under pace = slack available. Below = burning
-//     faster than uniform.
-//   - Solid blue line: actual % remaining over time, computed as
-//     100 - percent_used from each snapshot in win.series.
-//   - Volume bars: per-bucket sum of cost_usd_equivalent inside the
-//     window. Y of the volume panel is auto-scaled to the largest bar.
-function renderBurnDown(svgID, win) {
+//     faster than uniform. Only drawn over the current window's portion.
+//   - Solid blue line(s): actual % remaining over time, computed as
+//     100 - percent_used from each snapshot in win.series. With an
+//     extended domain the curve is split into one polyline per session
+//     (grouped by snapshot's window_ends), so resets show as a gap.
+//   - Volume bars: per-bucket sum of cost_usd_equivalent across the full
+//     domain. Y of the volume panel is auto-scaled to the largest bar.
+//   - Vertical tick at `start` marks the current window's left edge when
+//     the domain extends back beyond it.
+function renderBurnDown(svgID, win, opts) {
+  opts = opts || {};
   const svg = document.getElementById(svgID);
   while (svg.firstChild) svg.removeChild(svg.firstChild);
   const W = 400, H = 200, P = 32;
@@ -121,39 +128,111 @@ function renderBurnDown(svgID, win) {
     svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "Invalid window"));
     return;
   }
-  const sx = (t) => P + (W - 2 * P) * (t - start) / (end - start);
+
+  // Domain may extend backwards beyond the current window's start.
+  const lookbackMs = opts.lookbackMs || 0;
+  const domainStart = start - lookbackMs;
+  const domainEnd = end;
+  const sx = (t) => P + (W - 2 * P) * (t - domainStart) / (domainEnd - domainStart);
   // Y axis is inverted: pct=100 (full quota remaining) sits at the top of
   // the upper panel; pct=0 (exhausted) sits at the bottom.
   const syPct = (pct) => PCT_TOP + (PCT_BOTTOM - PCT_TOP) * (100 - pct) / 100;
+  // Pace line as a function: 100% remaining at start, 0% at end. Only
+  // valid inside the current window — used for the latest-dot delta.
+  const paceRemainingAt = (t) => 100 * (1 - (t - start) / (end - start));
 
   // Upper panel border (left + bottom)
   svg.appendChild(el("line", { x1: P, y1: PCT_TOP, x2: P, y2: PCT_BOTTOM, stroke: "#444" }));
   svg.appendChild(el("line", { x1: P, y1: PCT_BOTTOM, x2: W - P, y2: PCT_BOTTOM, stroke: "#444" }));
 
-  // Pace line: (start, 100% remaining) → (end, 0% remaining)
+  // Vertical marker at the current window's left edge when the domain
+  // extends back past it. Helps the eye separate "history" from "now".
+  if (lookbackMs > 0) {
+    svg.appendChild(el("line", {
+      x1: sx(start), y1: PCT_TOP, x2: sx(start), y2: VOL_BOTTOM,
+      stroke: "#bbb", "stroke-dasharray": "2 3"
+    }));
+  }
+
+  // Pace line: (start, 100% remaining) → (end, 0% remaining), in current window only.
   svg.appendChild(el("line", {
     x1: sx(start), y1: syPct(100), x2: sx(end), y2: syPct(0),
     stroke: "#888", "stroke-dasharray": "3 3"
   }));
 
-  // Observed % remaining series
+  // Observed % remaining series, grouped by snapshot.window_ends so the
+  // line breaks at session resets instead of drawing a sawtooth jump.
+  // Snapshots without a window_ends fall in their own bucket and won't
+  // group with anything else — fine, they're rare.
   const series = (win.series || []).filter(p => {
     const t = new Date(p.observed_at).getTime();
-    return t >= start && t < end;
+    return t >= domainStart && t < domainEnd;
   });
+
   if (series.length > 0) {
-    const points = series.map(p => `${sx(new Date(p.observed_at).getTime())},${syPct(100 - p.percent_used)}`).join(" ");
-    svg.appendChild(el("polyline", { points, fill: "none", stroke: "#06c", "stroke-width": "2" }));
+    const groups = [];
+    let cur = null;
+    for (const p of series) {
+      const key = p.window_ends || "_none_" + groups.length;
+      if (!cur || cur.key !== key) {
+        cur = { key, points: [] };
+        groups.push(cur);
+      }
+      cur.points.push(p);
+    }
+    for (const g of groups) {
+      if (g.points.length === 1) {
+        // A single observation has no line; render just a small marker
+        // so it's not invisible.
+        const p = g.points[0];
+        svg.appendChild(el("circle", {
+          cx: sx(new Date(p.observed_at).getTime()),
+          cy: syPct(100 - p.percent_used),
+          r: "2", fill: "#06c"
+        }));
+        continue;
+      }
+      const pts = g.points.map(p =>
+        `${sx(new Date(p.observed_at).getTime())},${syPct(100 - p.percent_used)}`
+      ).join(" ");
+      svg.appendChild(el("polyline", { points: pts, fill: "none", stroke: "#06c", "stroke-width": "2" }));
+    }
+
+    // Highlight the latest snapshot with a dot + label. When the latest
+    // snapshot is inside the current window, suffix the label with the
+    // delta from the pace line — green when ahead (more remaining than
+    // pace expects), red when behind.
     const latest = series[series.length - 1];
-    const lx = sx(new Date(latest.observed_at).getTime());
+    const lt = new Date(latest.observed_at).getTime();
+    const lx = sx(lt);
     const remaining = 100 - latest.percent_used;
     const ly = syPct(remaining);
     svg.appendChild(el("circle", { cx: lx, cy: ly, r: "4", fill: "#06c" }));
-    svg.appendChild(el("text", {
-      x: lx, y: ly - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
-    }, fmt(remaining) + "%"));
+
+    const baseLabel = fmt(remaining) + "%";
+    if (lt >= start && lt < end) {
+      // Two tspans so the delta gets its own color without painting the
+      // base remaining number red/green.
+      const delta = remaining - paceRemainingAt(lt);
+      const sign = delta >= 0 ? "+" : "−";
+      const t = el("text", {
+        x: lx, y: ly - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+      });
+      t.appendChild(document.createTextNode(baseLabel));
+      const ts = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
+      ts.setAttribute("fill", delta >= 0 ? "#060" : "#c00");
+      ts.setAttribute("font-weight", "bold");
+      ts.textContent = " (" + sign + fmt(Math.abs(delta)) + "%)";
+      t.appendChild(ts);
+      svg.appendChild(t);
+    } else {
+      svg.appendChild(el("text", {
+        x: lx, y: ly - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+      }, baseLabel));
+    }
   } else if (win.baseline_total != null) {
-    // No in-window snapshots yet — flat segment at the baseline value.
+    // No snapshots in the domain — flat segment at the baseline value
+    // across the current window only.
     const now = Math.min(Math.max(Date.now(), start), end);
     const remaining = 100 - win.baseline_total;
     svg.appendChild(el("line", {
@@ -170,10 +249,10 @@ function renderBurnDown(svgID, win) {
     }, "No data yet"));
   }
 
-  // Lower panel: $ volume bars
+  // Lower panel: $ volume bars over the full domain.
   const volume = (win.volume || []).filter(b => {
     const t = new Date(b.bucket_start).getTime();
-    return t >= start && t < end;
+    return t >= domainStart && t < domainEnd;
   });
   // Volume panel border (baseline only)
   svg.appendChild(el("line", { x1: P, y1: VOL_BOTTOM, x2: W - P, y2: VOL_BOTTOM, stroke: "#444" }));
@@ -184,10 +263,10 @@ function renderBurnDown(svgID, win) {
     if (maxVol > 0) {
       // Each bar covers its actual bucket duration on the X axis —
       // [bucket_start, bucket_start + bucket_secs) — so bar width
-      // reflects time, not the number of populated buckets. SQL
-      // GROUP BY only returns buckets with data, so a 5h chart with 10
-      // active 5-min buckets must still render bars at 5-min width
-      // (~6 px), not 1/10 of the chart wide.
+      // reflects time, not the count of populated buckets. SQL GROUP BY
+      // only returns buckets with data, so a 15h chart with 10 active
+      // 5-min buckets must still render bars at 5-min width (~2 px), not
+      // 1/10 of the chart wide.
       const bucketMs = (win.bucket_secs || 300) * 1000;
       const volH = VOL_BOTTOM - VOL_TOP;
       for (const b of volume) {
@@ -212,10 +291,16 @@ function renderBurnDown(svgID, win) {
     }
   }
 
-  // Axis labels
-  const dur = end - start;
-  svg.appendChild(el("text", { x: P, y: AXIS_Y, "font-size": "10", fill: "#444" }, fmtAxisTime(start, dur)));
+  // Axis labels: leftmost = domainStart, rightmost = end. When the
+  // domain is extended, also label the current window's left edge.
+  const dur = domainEnd - domainStart;
+  svg.appendChild(el("text", { x: P, y: AXIS_Y, "font-size": "10", fill: "#444" }, fmtAxisTime(domainStart, dur)));
   svg.appendChild(el("text", { x: W - P, y: AXIS_Y, "font-size": "10", fill: "#444", "text-anchor": "end" }, fmtAxisTime(end, dur)));
+  if (lookbackMs > 0) {
+    svg.appendChild(el("text", {
+      x: sx(start), y: AXIS_Y, "font-size": "10", fill: "#444", "text-anchor": "middle"
+    }, fmtAxisTime(start, dur)));
+  }
   svg.appendChild(el("text", { x: 4, y: PCT_TOP + 4, "font-size": "10", fill: "#444" }, "100%"));
   svg.appendChild(el("text", { x: 4, y: PCT_BOTTOM, "font-size": "10", fill: "#444" }, "0"));
 }
@@ -238,7 +323,10 @@ async function refresh() {
     const sResp = await fetch("/api/dashboard/state");
     const s = await sResp.json();
     renderStatus(s);
-    renderBurnDown("chart-session", s.session);
+    // Session: extend domain 10h backwards so the current 5h window
+    // sits in the rightmost third and the prior two sessions are
+    // visible for context.
+    renderBurnDown("chart-session", s.session, { lookbackMs: 10 * 3600 * 1000 });
     renderBurnDown("chart-weekly", s.weekly);
   } catch (e) { console.error("state error", e); }
   try {

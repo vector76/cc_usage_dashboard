@@ -6,42 +6,40 @@ to release low-priority work that is only worth running for free.
 
 ## Definition
 
+The signal is computed entirely in percent-of-quota units. Both inputs come
+from the userscript's snapshots — usage_events / cost_usd_equivalent does
+not enter the slack signal at all (the consumption report owns dollars).
+
 Let:
 
-- `Q` = total quota for the current window (session or weekly). Now derived from
-  `windows.baseline_total`, which since the v0.2 schema rewrite stores a
-  percentage anchor (0–100) rather than a dollar amount. Math below is unitless
-  in `Q`'s own units, but the dashboard / queue should treat the figures as
-  unanchored to dollars until cross-source reconciliation lands.
-- `t0` = window start.
-- `t1` = window end.
-- `t` = now.
-- `U(t)` = cumulative consumption since `t0`. Currently sourced from
-  `usage_events.cost_usd_equivalent` (in dollars). The unit mismatch between
-  `Q` and `U` is known follow-up debt — the previous formulation assumed both
-  were dollars, but Anthropic stopped exposing a per-window dollar quota.
-
-Define expected consumption as a uniform burn, clamped to the window:
+- `t0` = current window start, `t1` = window end, `t` = now.
+- `percent_used(t)` = the latest in-window snapshot's `session_used` (or
+  `weekly_used`) value, kept current on `windows.baseline_total` by the
+  windows engine.
 
 ```
-progress(t)  = clamp((t - t0) / (t1 - t0), 0, 1)
-E(t)         = Q * progress(t)
-slack(t)     = E(t) - U(t)
-slack_fraction(t) = slack(t) / Q
+progress(t)        = clamp((t - t0) / (t1 - t0), 0, 1)
+percent_expected   = 100 * progress(t)              # uniform pace to 100% by t1
+slack_fraction     = (percent_expected - percent_used) / 100   # in [-1, +1]
 ```
 
-The clamp matters at the boundaries:
+Positive `slack_fraction` ⇒ user is below pace and has free capacity that
+will expire at `t1`. Negative ⇒ user is ahead of pace; releasing
+low-priority work would risk exhausting the quota before the user's real
+work completes.
 
-- **Before window starts** (`t < t0`): a session window only begins on first use. If no
-  events have occurred yet, the window is undefined; the API returns
-  `release_recommended=false` and a null `slack_fraction` rather than computing.
-- **After window ends** (`t > t1`): `progress=1`, `E=Q`. Slack is just `Q - U`, but at
-  this point any unused budget is already forfeit, so the value is informational only
-  and `release_recommended=false`.
+Boundaries:
 
-Positive slack ⇒ the user is below pace and has free capacity that will expire at `t1`.
-Negative slack ⇒ the user is ahead of pace; releasing low-priority work would risk
-exhausting the quota before the user's real work completes.
+- **Before window starts** (`t < t0`): session windows only begin on first
+  use; weekly is anchored from snapshots. If no in-window snapshot has
+  arrived, `percent_used` and `slack_fraction` are null and the headroom
+  gate fails (no measurement = don't release).
+- **After window ends** (`t > t1`): `progress=1`, `percent_expected=100`.
+  Slack is informational only; `release_recommended=false`.
+
+Threshold meaning: `slack_fraction ≥ T` means "the unused fraction of the
+full quota currently held in surplus relative to uniform pace is at least
+T." A `0.50` session surplus only becomes achievable past 50% elapsed.
 
 ## Two windows, one signal
 
@@ -75,9 +73,7 @@ the queue is expected to apply one client-side gate of its own.
    from over-burn within hours, while a weekly over-burn lingers for days. A high
    bar on the session and a low bar on the weekly captures "leave the user enough
    short-term headroom to do real work, but don't sit on excess long-term capacity."
-   Both thresholds are in *quota-fraction* units. The relationship to pace is
-   `slack_fraction = progress(t) * (1 - U/E)`, so the same threshold demands more
-   underutilization early in a window than late.
+   Both thresholds are in fraction-of-quota units (range [-1, +1]).
 
 3. **Priority quiet gate.** If the user has issued a Claude Code request in the last
    `priority_quiet_period` (suggested default: 5 minutes), refuse release. Prevents
@@ -92,11 +88,11 @@ the queue is expected to apply one client-side gate of its own.
 
 ### Client-side gate (queue's responsibility)
 
-4. **Per-job budget cap.** Each pending job has an estimated cost. The queue should
-   only release a job when `estimated_cost <= slack * safety_factor` (suggested `0.5`).
-   The slack endpoint can't apply this gate — it doesn't know about specific jobs —
-   but it exposes `slack` in absolute units so the queue can compute it. Prevents one
-   big job from eating all available headroom.
+5. **Per-job budget cap.** Each pending job has an estimated cost in dollars or
+   percent-of-quota — that's the queue's choice. The slack endpoint exposes only
+   the unitless `slack_fraction`, so the queue must convert its job estimate into
+   the same percent-of-quota units before applying any "fits in slack" check.
+   Prevents one big job from eating all available headroom.
 
 ## API
 
@@ -110,22 +106,18 @@ Response:
 {
   "now": "2026-04-25T17:32:14Z",
   "session": {
-    "window_start": "2026-04-25T14:02:11Z",
-    "window_end":   "2026-04-25T19:02:11Z",
-    "quota_total":  100.0,
-    "consumed":     32.5,
-    "expected":     45.7,
-    "slack":        13.2,
-    "slack_fraction": 0.132
+    "window_start":     "2026-04-25T14:02:11Z",
+    "window_end":       "2026-04-25T19:02:11Z",
+    "percent_used":     32.5,
+    "percent_expected": 45.7,
+    "slack_fraction":   0.132
   },
   "weekly": {
-    "window_start": "2026-04-21T00:00:00Z",
-    "window_end":   "2026-04-28T00:00:00Z",
-    "quota_total":  2000.0,
-    "consumed":     611.4,
-    "expected":     1142.9,
-    "slack":        531.5,
-    "slack_fraction": 0.266
+    "window_start":     "2026-04-21T00:00:00Z",
+    "window_end":       "2026-04-28T00:00:00Z",
+    "percent_used":     30.6,
+    "percent_expected": 57.1,
+    "slack_fraction":   0.266
   },
   "slack_combined_fraction": 0.132,
   "priority_quiet_for_seconds": 432,
@@ -141,8 +133,10 @@ Response:
 }
 ```
 
-`release_recommended` is true iff every gate passes. The queue can also read the raw
-fractions and apply its own logic.
+`release_recommended` is true iff every gate passes. The queue can also read
+the raw fractions and apply its own logic. `percent_used` and `slack_fraction`
+are null whenever no in-window snapshot has arrived; in that state the
+corresponding headroom gate fails.
 
 ## Baseline freshness gate
 

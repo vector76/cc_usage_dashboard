@@ -80,7 +80,6 @@ func TestDashboardStateJSONShape(t *testing.T) {
 		"last_snapshot_age_seconds",
 		"parse_errors_24h",
 		"paused",
-		"consumption_series",
 	} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("response missing documented field %q", key)
@@ -102,21 +101,6 @@ func TestDashboardStateJSONShape(t *testing.T) {
 	}
 	if paused {
 		t.Error("expected paused=false on fresh server")
-	}
-
-	var series []map[string]any
-	if err := json.Unmarshal(raw["consumption_series"], &series); err != nil {
-		t.Fatalf("consumption_series not an array: %v", err)
-	}
-	if len(series) < 1 {
-		t.Errorf("expected at least one consumption bucket, got %d", len(series))
-	} else {
-		if _, ok := series[0]["bucket_start"]; !ok {
-			t.Error("series bucket missing bucket_start")
-		}
-		if _, ok := series[0]["cost_usd"]; !ok {
-			t.Error("series bucket missing cost_usd")
-		}
 	}
 }
 

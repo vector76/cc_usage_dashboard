@@ -98,7 +98,7 @@ func TestHandleSlackQueryWindowFields(t *testing.T) {
 		t.Fatalf("expected session block, got null")
 	}
 
-	wantKeys := []string{"window_start", "window_end", "quota_total", "consumed", "expected", "slack", "slack_fraction"}
+	wantKeys := []string{"window_start", "window_end", "percent_used", "percent_expected", "slack_fraction"}
 	for _, k := range wantKeys {
 		if _, ok := raw.Session[k]; !ok {
 			t.Errorf("missing session field %q: %s", k, w.Body.String())
