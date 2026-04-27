@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.3.0
+// @version      0.4.0
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -106,15 +106,45 @@
         return null;
     }
 
-    // "Resets in 3 hr 33 min" / "Resets in 19 min" / "Resets in 5 hr"
-    function parseSessionEnds(text) {
+    // "Resets in 3 hr 33 min" / "Resets in 19 min" / "Resets in 5 hr".
+    // baseMs is the wall-clock time the reset string was current — typically
+    // Date.now() minus the page's "Last updated: N minutes ago" staleness, so
+    // a stale page doesn't shift the computed end forward in time.
+    function parseSessionEnds(text, baseMs) {
         if (!text) return null;
         const m = text.match(/Resets in\s+(?:(\d+)\s*hr)?\s*(?:(\d+)\s*min)?/i);
         if (!m) return null;
         const hours = parseInt(m[1] || '0', 10);
         const mins = parseInt(m[2] || '0', 10);
         if (hours === 0 && mins === 0) return null;
-        return new Date(Date.now() + (hours * 60 + mins) * 60 * 1000).toISOString();
+        return new Date(baseMs + (hours * 60 + mins) * 60 * 1000).toISOString();
+    }
+
+    // Parse the page's "Last updated" indicator into staleness in milliseconds.
+    // The Anthropic page's progression is: "just now" → "less than a minute
+    // ago" → "1 minute ago" → "N minutes ago" → "N hours ago" (long-idle
+    // tabs). The first two collapse to 0; the rest are captured by the
+    // numeric regex. Both the percent values and the "Resets in …" text are
+    // accurate as of that timestamp, not as of Date.now(). Returns null when
+    // the indicator can't be located, in which case the caller falls back to
+    // treating the snapshot as current.
+    function findLastUpdatedAgeMs() {
+        const candidates = document.querySelectorAll('p, span, div');
+        for (const node of candidates) {
+            const t = (node.textContent || '').trim();
+            // Skip large containers; we only want the small label itself.
+            if (!t || t.length > 80) continue;
+            if (!/last updated/i.test(t)) continue;
+            if (/just now/i.test(t)) return 0;
+            if (/less than a minute ago/i.test(t)) return 0;
+            const m = t.match(/(\d+)\s*(minutes?|hours?)\s+ago/i);
+            if (!m) continue;
+            const n = parseInt(m[1], 10);
+            const unit = m[2].toLowerCase();
+            if (unit.startsWith('min')) return n * 60 * 1000;
+            if (unit.startsWith('hour')) return n * 60 * 60 * 1000;
+        }
+        return null;
     }
 
     // "Resets Thu 11:00 PM" — weekday + time-of-day in the browser's local
@@ -145,12 +175,17 @@
         return target.toISOString();
     }
 
-    // Returns { sessionUsed, weeklyUsed, sessionWindowEnds, weeklyWindowEnds }
-    // or null when neither section yields a usable bar.
+    // Returns { sessionUsed, weeklyUsed, sessionWindowEnds, weeklyWindowEnds, observedAtMs }
+    // or null when neither section yields a usable bar. observedAtMs is the
+    // wall-clock time the page's numbers were accurate (Date.now() minus the
+    // "Last updated" staleness, or Date.now() when the indicator is missing).
     function extractQuota() {
         const headings = Array.from(document.querySelectorAll('h2'))
             .map(h => ({ node: h, text: (h.textContent || '').trim() }));
         const bars = document.querySelectorAll('[role="progressbar"][aria-label="Usage"]');
+
+        const ageMs = findLastUpdatedAgeMs();
+        const observedAtMs = Date.now() - (ageMs || 0);
 
         let sessionUsed = null, weeklyUsed = null;
         let sessionEnds = null, weeklyEnds = null;
@@ -164,22 +199,24 @@
 
             if (heading === SESSION_HEADING && sessionUsed === null) {
                 sessionUsed = value;
-                sessionEnds = parseSessionEnds(findRowResetText(bar));
+                sessionEnds = parseSessionEnds(findRowResetText(bar), observedAtMs);
             } else if (heading === WEEKLY_HEADING && weeklyUsed === null) {
                 weeklyUsed = value;
+                // Weekly hint is an absolute clock time ("Resets Thu 11:00 PM"),
+                // so page staleness doesn't shift it.
                 weeklyEnds = parseWeeklyEnds(findRowResetText(bar));
             }
         }
 
         if (sessionUsed === null && weeklyUsed === null) return null;
-        return { sessionUsed, weeklyUsed, sessionWindowEnds: sessionEnds, weeklyWindowEnds: weeklyEnds };
+        return { sessionUsed, weeklyUsed, sessionWindowEnds: sessionEnds, weeklyWindowEnds: weeklyEnds, observedAtMs };
     }
 
     // ---------- snapshot dispatch ----------
 
     function buildSnapshotBody(extracted) {
         const body = {
-            observed_at: new Date().toISOString(),
+            observed_at: new Date(extracted.observedAtMs || Date.now()).toISOString(),
             source: 'userscript',
         };
         if (extracted.sessionUsed !== null) body.session_used = extracted.sessionUsed;

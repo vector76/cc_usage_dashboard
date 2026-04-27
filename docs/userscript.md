@@ -30,14 +30,21 @@ path is exactly `/settings/usage`. On that path:
    all ignored. Anchoring on section titles is more durable than matching row
    labels — Anthropic edits row text often, section headings rarely.
 3. Read `aria-valuenow` (0–100) directly. We do not text-scrape the "X% used" label.
-4. Parse the row's reset hint into a UTC ISO timestamp:
-   - "Resets in 3 hr 33 min" / "Resets in 19 min" → `now + Δ`.
+4. Parse the page's "Last updated: N minutes ago" indicator into a staleness
+   delta. The percent values and the "Resets in …" hint are accurate as of
+   that timestamp, not as of `Date.now()`. `observed_at` is back-dated by the
+   delta; the session-reset timestamp uses the back-dated time as its base
+   (`baseMs + Δ` rather than `now + Δ`). When the indicator can't be found
+   the snapshot is treated as current.
+5. Parse the row's reset hint into a UTC ISO timestamp:
+   - "Resets in 3 hr 33 min" / "Resets in 19 min" → `observedAt + Δ`.
    - "Resets Thu 11:00 PM" → next future occurrence of that weekday at that
-     local time, converted to UTC.
+     local time, converted to UTC. Absolute clock-time hints are unaffected
+     by page staleness.
    These land in `session_window_ends` / `weekly_window_ends` so the server can
    anchor the windows on Anthropic's actual reset boundary instead of a calendar
    guess.
-5. POST to `http://localhost:27812/snapshot`.
+6. POST to `http://localhost:27812/snapshot`.
 
 **Trigger sources, in priority order:**
 

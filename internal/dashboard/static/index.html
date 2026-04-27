@@ -286,6 +286,9 @@ function renderBurnDown(svgID, win, opts) {
     const ly = syPct(remaining);
     svg.appendChild(el("circle", { cx: lx, cy: ly, r: "3", fill: "#06c" }));
 
+    // Flip the label below the dot when it would clip the chart top.
+    const labelAbove = ly - PCT_TOP >= 14;
+    const labelY = labelAbove ? ly - 8 : ly + 14;
     const baseLabel = fmt(remaining) + "%";
     if (lt >= start && lt < end) {
       // Two tspans so the delta gets its own color without painting the
@@ -293,7 +296,7 @@ function renderBurnDown(svgID, win, opts) {
       const delta = remaining - paceRemainingAt(lt);
       const sign = delta >= 0 ? "+" : "−";
       const t = el("text", {
-        x: lx, y: ly - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+        x: lx, y: labelY, "font-size": "10", fill: "#06c", "text-anchor": "middle"
       });
       t.appendChild(document.createTextNode(baseLabel));
       const ts = document.createElementNS("http://www.w3.org/2000/svg", "tspan");
@@ -304,7 +307,7 @@ function renderBurnDown(svgID, win, opts) {
       svg.appendChild(t);
     } else {
       svg.appendChild(el("text", {
-        x: lx, y: ly - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+        x: lx, y: labelY, "font-size": "10", fill: "#06c", "text-anchor": "middle"
       }, baseLabel));
     }
   } else if (win.baseline_percent_used != null) {
@@ -316,9 +319,11 @@ function renderBurnDown(svgID, win, opts) {
       x1: sx(start), y1: syPct(remaining), x2: sx(now), y2: syPct(remaining),
       stroke: "#06c", "stroke-width": "2"
     }));
-    svg.appendChild(el("circle", { cx: sx(now), cy: syPct(remaining), r: "3", fill: "#06c" }));
+    const by = syPct(remaining);
+    svg.appendChild(el("circle", { cx: sx(now), cy: by, r: "3", fill: "#06c" }));
     svg.appendChild(el("text", {
-      x: sx(now), y: syPct(remaining) - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
+      x: sx(now), y: by - PCT_TOP >= 14 ? by - 8 : by + 14,
+      "font-size": "10", fill: "#06c", "text-anchor": "middle"
     }, fmt(remaining) + "%"));
   } else {
     svg.appendChild(el("text", {
