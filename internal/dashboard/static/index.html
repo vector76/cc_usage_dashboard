@@ -194,6 +194,17 @@ function renderBurnDown(svgID, win, opts) {
     svg.appendChild(el("text", { x: W / 2, y: H / 2, "text-anchor": "middle", fill: "#888" }, "No active window"));
     return;
   }
+  // Hypothetical windows are placeholders synthesized by the backend
+  // when no real session is open. The right-third still gets the chart
+  // frame so the user can read the 5h slope, but every right-third
+  // element (slack-zone fill, pace diagonal, ends_at tick) is ghosted
+  // via lighter fill/stroke + italic so it reads as projection rather
+  // than live data. The "No data yet" and baseline-flat-segment fallbacks
+  // are gated off (an in-chart annotation makes the no-session state
+  // explicit instead), and the latest-dot pace-delta label is structurally
+  // inert because the backend leaves in-window Series empty for the
+  // hypothetical case.
+  const hypothetical = win.hypothetical === true;
   const start = new Date(win.started_at).getTime();
   const end = new Date(win.ends_at).getTime();
   if (!(end > start)) {
@@ -253,15 +264,23 @@ function renderBurnDown(svgID, win, opts) {
       [start, floor],
     ];
     const points = verts.map(([t, pct]) => `${sx(t)},${syPct(pct)}`).join(" ");
+    // Hypothetical → lighter fill (the chosen "projection" treatment).
+    // No live usage means no real slack to highlight; we keep the polygon
+    // visible only so the diagonal context isn't lost.
     svg.appendChild(el("polygon", {
-      points: points, fill: "#6c6", opacity: "0.18", stroke: "none"
+      points: points, fill: "#6c6",
+      opacity: hypothetical ? "0.07" : "0.18",
+      stroke: "none"
     }));
   }
 
   // Pace line: (start, 100% remaining) → (end, 0% remaining), in current window only.
+  // Hypothetical → lighter stroke; same dash pattern as the live chart so
+  // the slope reads identically, just ghosted.
   svg.appendChild(el("line", {
     x1: sx(start), y1: syPct(100), x2: sx(end), y2: syPct(0),
-    stroke: "#888", "stroke-dasharray": "3 3"
+    stroke: hypothetical ? "#bbb" : "#888",
+    "stroke-dasharray": "3 3"
   }));
 
   // Observed % remaining series, grouped into one polyline per session.
@@ -354,7 +373,7 @@ function renderBurnDown(svgID, win, opts) {
         x: lx, y: labelY, "font-size": "10", fill: "#06c", "text-anchor": "middle"
       }, baseLabel));
     }
-  } else if (win.baseline_percent_used != null) {
+  } else if (win.baseline_percent_used != null && !hypothetical) {
     // No snapshots in the domain — flat segment at the baseline value
     // across the current window only.
     const now = Math.min(Math.max(Date.now(), start), end);
@@ -369,10 +388,28 @@ function renderBurnDown(svgID, win, opts) {
       x: sx(now), y: by - PCT_TOP >= 14 ? by - 8 : by + 14,
       "font-size": "10", fill: "#06c", "text-anchor": "middle"
     }, fmt(remaining) + "%"));
-  } else {
+  } else if (!hypothetical) {
     svg.appendChild(el("text", {
       x: W / 2, y: (PCT_TOP + PCT_BOTTOM) / 2, "text-anchor": "middle", fill: "#888"
     }, "No data yet"));
+  }
+
+  // Hypothetical projection annotation: anchored over the right-third
+  // window so it's unambiguous what the dashed slope represents. Placed
+  // in the upper portion (inside/just below the slack-zone region) where
+  // the pace diagonal sits low enough that it only nicks the bottom line
+  // near its left edge. Two lines so the full message fits at
+  // session-chart width without truncation.
+  if (hypothetical) {
+    const annoX = (sx(start) + sx(end)) / 2;
+    svg.appendChild(el("text", {
+      x: annoX, y: 22, "font-size": "11", fill: "#666",
+      "text-anchor": "middle", "font-style": "italic"
+    }, "No active session"));
+    svg.appendChild(el("text", {
+      x: annoX, y: 36, "font-size": "11", fill: "#666",
+      "text-anchor": "middle", "font-style": "italic"
+    }, "projection if started now"));
   }
 
   // Lower panel: $ volume bars over the full domain. Buckets are
@@ -437,7 +474,14 @@ function renderBurnDown(svgID, win, opts) {
   // domain is extended, also label the current window's left edge.
   const dur = domainEnd - domainStart;
   svg.appendChild(el("text", { x: P, y: AXIS_Y, "font-size": "10", fill: "#444" }, fmtAxisTime(domainStart, dur)));
-  svg.appendChild(el("text", { x: W - P, y: AXIS_Y, "font-size": "10", fill: "#444", "text-anchor": "end" }, fmtAxisTime(end, dur)));
+  // ends_at is muted/italic for hypothetical so it visually pairs with
+  // the projection annotation rather than the concrete left-side ticks.
+  svg.appendChild(el("text", {
+    x: W - P, y: AXIS_Y, "font-size": "10",
+    fill: hypothetical ? "#888" : "#444",
+    "font-style": hypothetical ? "italic" : "normal",
+    "text-anchor": "end"
+  }, fmtAxisTime(end, dur)));
   if (lookbackMs > 0) {
     svg.appendChild(el("text", {
       x: sx(start), y: AXIS_Y, "font-size": "10", fill: "#444", "text-anchor": "middle"
