@@ -121,6 +121,22 @@ function appendKV(dl, label, value) {
   dl.appendChild(dd);
 }
 
+// sessionStatusText computes the Session row's value. Uses the server's
+// `now` (not Date.now()) so a skewed client clock can't shift the
+// displayed remaining time. Backend guarantees that session_active=true
+// implies session is non-null with ends_at set; the second guard is
+// defensive only.
+function sessionStatusText(s) {
+  if (!s.session_active) return "not active";
+  if (!s.session || !s.session.ends_at) return "active";
+  const endMs = new Date(s.session.ends_at).getTime();
+  const nowMs = s.now ? new Date(s.now).getTime() : Date.now();
+  const remMs = Math.max(0, endMs - nowMs);
+  const h = Math.floor(remMs / 3600000);
+  const m = Math.floor((remMs % 3600000) / 60000);
+  return `active (${h}h ${m}m remaining)`;
+}
+
 function renderStatus(s) {
   const kv = document.getElementById("status-kv");
   while (kv.firstChild) kv.removeChild(kv.firstChild);
@@ -129,6 +145,7 @@ function renderStatus(s) {
     s.last_snapshot_age_seconds == null ? "no snapshots yet" : fmt(s.last_snapshot_age_seconds, 0) + " s");
   appendKV(kv, "Parse errors (24h)", s.parse_errors_24h);
   appendKV(kv, "Paused", s.paused ? "yes" : "no");
+  appendKV(kv, "Session", sessionStatusText(s));
   let slackEl;
   if (s.slack_release_recommended == null) {
     slackEl = kvSpan("—", "color:#888");
