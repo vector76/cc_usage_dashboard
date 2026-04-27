@@ -139,6 +139,18 @@ func (t *Tailer) pollOnce() {
 			return nil
 		}
 
+		// filepath.Walk uses Lstat, so info reflects the symlink itself
+		// rather than its target. Skip symlinks: an attacker (or buggy
+		// MCP server) that drops a "*.jsonl" symlink under the projects
+		// dir pointing at /etc/passwd would otherwise have its bytes
+		// read, parsed, and on parse failure stored verbatim in
+		// parse_errors.payload. The trust boundary doesn't extend to
+		// "anything anyone can put under ~/.claude/projects".
+		if info.Mode()&os.ModeSymlink != 0 {
+			slog.Debug("tailer: skipping symlink under projects dir", "path", path)
+			return nil
+		}
+
 		t.handleFileChange(path)
 		return nil
 	})
@@ -177,9 +189,22 @@ func (t *Tailer) refreshCaughtUp() {
 	t.caughtUp.Store(true)
 }
 
-// handleFileChange processes a changed transcript file.
+// handleFileChange processes a changed transcript file. Symlinks are
+// rejected here as well as in pollOnce so the fsnotify event branch
+// (which receives raw paths from the watcher and skips Walk's Lstat)
+// can't be tricked into following a symlink either.
 func (t *Tailer) handleFileChange(filePath string) {
 	if !isTranscriptFile(filePath) {
+		return
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		// Stat failures are normal (file removed between event and
+		// handler); silently ignore.
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		slog.Debug("tailer: skipping symlink under projects dir", "path", filePath)
 		return
 	}
 	t.processFile(filePath)

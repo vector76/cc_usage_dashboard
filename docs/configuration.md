@@ -15,9 +15,9 @@ http:
   bind:
     - 127.0.0.1
     # Docker/WSL adapter IPs are auto-detected at startup; add explicit
-    # entries here only to override that detection.
-  enable_fallback: false   # if no bound interface is reachable from
-                           # containers, allow falling back to 0.0.0.0
+    # entries here only when the auto-detect misses your topology. There
+    # is no 0.0.0.0 fallback — see docs/architecture.md "Network and
+    # security" for the rationale.
 
 claude:
   projects_dir: "~/.claude/projects"   # %USERPROFILE%\.claude\projects on Windows

@@ -124,7 +124,8 @@ func (h *Handler) handleState(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("dashboard state computation failed", "err", err)
 		w.Header().Set("Content-Type", "application/json")
-		http.Error(w, `{"error":"state computation failed"}`, http.StatusInternalServerError)
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "state computation failed"})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

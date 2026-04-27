@@ -94,23 +94,50 @@ function fmtTooltipTime(ms) {
   return `${month} ${d.getDate()} ${h}:${mm} ${ampm}`;
 }
 
+// kvSpan returns a <span> with the given text content and inline style. Used
+// by renderStatus so the slack-release indicator can carry colour without
+// concatenating HTML strings (which would let any future server-controlled
+// value escape into markup — see the audit notes for the reflected-XSS sink
+// this pattern existed to close).
+function kvSpan(text, style) {
+  const el = document.createElement("span");
+  if (style) el.setAttribute("style", style);
+  el.textContent = text;
+  return el;
+}
+
+// appendKV appends a <dt>label</dt><dd>value</dd> pair to dl. value can be
+// a string (set via textContent) or an Element (appended as a child).
+function appendKV(dl, label, value) {
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  if (value instanceof Element) {
+    dd.appendChild(value);
+  } else {
+    dd.textContent = String(value);
+  }
+  dl.appendChild(dt);
+  dl.appendChild(dd);
+}
+
 function renderStatus(s) {
   const kv = document.getElementById("status-kv");
-  const lines = [];
-  lines.push(["Now", fmtTime(s.now)]);
-  lines.push(["Last snapshot age", s.last_snapshot_age_seconds == null ? "no snapshots yet" : fmt(s.last_snapshot_age_seconds, 0) + " s"]);
-  lines.push(["Parse errors (24h)", s.parse_errors_24h]);
-  lines.push(["Paused", s.paused ? "yes" : "no"]);
-  let slackHTML;
+  while (kv.firstChild) kv.removeChild(kv.firstChild);
+  appendKV(kv, "Now", fmtTime(s.now));
+  appendKV(kv, "Last snapshot age",
+    s.last_snapshot_age_seconds == null ? "no snapshots yet" : fmt(s.last_snapshot_age_seconds, 0) + " s");
+  appendKV(kv, "Parse errors (24h)", s.parse_errors_24h);
+  appendKV(kv, "Paused", s.paused ? "yes" : "no");
+  let slackEl;
   if (s.slack_release_recommended == null) {
-    slackHTML = '<span class="muted">—</span>';
+    slackEl = kvSpan("—", "color:#888");
   } else if (s.slack_release_recommended) {
-    slackHTML = '<span style="color:#060;font-weight:bold;">yes</span>';
+    slackEl = kvSpan("yes", "color:#060;font-weight:bold;");
   } else {
-    slackHTML = '<span style="color:#888;">no</span>';
+    slackEl = kvSpan("no", "color:#888;");
   }
-  lines.push(["Slack release", slackHTML]);
-  kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
+  appendKV(kv, "Slack release", slackEl);
 }
 
 // renderBurnDown plots % remaining vs. time, with a dollar-volume bar
@@ -405,15 +432,23 @@ function renderBurnDown(svgID, win, opts) {
 
 function renderConsumption(d) {
   const kv = document.getElementById("consumption-kv");
-  if (!d || d.error) { kv.innerHTML = '<dd class="muted">unavailable</dd>'; return; }
-  const lines = [];
-  lines.push(["Period", d.period]);
-  lines.push(["Consumed (USD eq.)", "$" + fmt(d.consumed_usd_equivalent)]);
-  lines.push(["Consumed % session", d.consumed_session_pct == null ? "—" : fmt(d.consumed_session_pct, 0) + "%"]);
-  lines.push(["Consumed % weekly", d.consumed_weekly_pct == null ? "—" : fmt(d.consumed_weekly_pct, 0) + "%"]);
-  lines.push(["Events (total / reported / computed / none)",
-    d.events_total + " / " + d.events_with_reported_cost + " / " + d.events_with_computed_cost + " / " + d.events_without_cost]);
-  kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");
+  while (kv.firstChild) kv.removeChild(kv.firstChild);
+  if (!d || d.error) {
+    const dd = document.createElement("dd");
+    dd.className = "muted";
+    dd.textContent = "unavailable";
+    kv.appendChild(dd);
+    return;
+  }
+  // d.period is whatever the caller passed in ?period= and the server
+  // echoes back. Building it via textContent (not innerHTML) means a
+  // hostile value never reaches the HTML parser.
+  appendKV(kv, "Period", d.period);
+  appendKV(kv, "Consumed (USD eq.)", "$" + fmt(d.consumed_usd_equivalent));
+  appendKV(kv, "Consumed % session", d.consumed_session_pct == null ? "—" : fmt(d.consumed_session_pct, 0) + "%");
+  appendKV(kv, "Consumed % weekly", d.consumed_weekly_pct == null ? "—" : fmt(d.consumed_weekly_pct, 0) + "%");
+  appendKV(kv, "Events (total / reported / computed / none)",
+    d.events_total + " / " + d.events_with_reported_cost + " / " + d.events_with_computed_cost + " / " + d.events_without_cost);
 }
 
 async function refresh() {

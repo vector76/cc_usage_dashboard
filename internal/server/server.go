@@ -4,9 +4,12 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +20,17 @@ import (
 	"github.com/vector76/cc_usage_dashboard/internal/slack"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 	"github.com/vector76/cc_usage_dashboard/internal/windows"
+)
+
+// Per-endpoint request body limits. Anything larger is rejected with 413
+// before json.Decode pulls it into memory. Values are loose upper bounds
+// — real payloads are dramatically smaller — but tight enough that a
+// hostile caller (LAN, browser, CSRF) cannot exhaust RAM or fill the DB.
+const (
+	maxBodyLog          = 1 << 20 // 1 MiB: /log carries a transcript line which can include cached blob
+	maxBodySnapshot     = 1 << 16 // 64 KiB: /snapshot is a few floats + timestamps
+	maxBodyParseError   = 1 << 18 // 256 KiB: /parse_error carries fingerprint diagnostics
+	maxBodySlackRelease = 1 << 13 // 8 KiB: /slack/release is a fixed-shape struct
 )
 
 // TailerStatus reports whether the tailer has caught up with all known
@@ -44,6 +58,20 @@ type Server struct {
 	// ListenAndServe/Serve call appends one entry.
 	mu          sync.Mutex
 	httpServers []*http.Server
+
+	// allowedHosts is the set of acceptable Host header values for any
+	// inbound request. Set via SetAllowedHosts; nil means "no host check
+	// applied" (the in-process httptest path used by unit tests). The
+	// production wiring in cmd/trayapp must call SetAllowedHosts so DNS
+	// rebinding cannot smuggle requests in via a forged Host header.
+	allowedHosts map[string]struct{}
+
+	// now returns the wall clock used by request handlers that need to
+	// validate timestamps relative to "now" (currently the snapshot
+	// handler's *_window_ends bounds check). Defaults to time.Now;
+	// tests with fixed-date fixtures override via SetNow so the bounds
+	// move with the fixture instead of drifting against real time.
+	now func() time.Time
 }
 
 // New creates a new HTTP server.
@@ -65,6 +93,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 			WeeklyAbsoluteThreshold: cfg.Slack.WeeklyAbsoluteThreshold,
 		}),
 		windowsEngine: windows.NewEngine(s.DB()),
+		now:           time.Now,
 	}
 
 	dh, err := dashboard.NewHandler(s, srv.slackCalc)
@@ -93,9 +122,104 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	return srv
 }
 
-// ServeHTTP implements http.Handler.
+// ServeHTTP implements http.Handler. Every request first passes the Host
+// header allow-list (DNS rebinding defence) before reaching the mux.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if !s.hostAllowed(r.Host) {
+		slog.Warn("rejected request with disallowed Host",
+			"host", r.Host, "remote", r.RemoteAddr, "path", r.URL.Path)
+		http.Error(w, "forbidden host", http.StatusForbidden)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
+}
+
+// SetAllowedHosts configures the Host header allow-list. Production wiring
+// must include every interface address the server binds to (with the
+// configured port) plus the well-known names containers and the host
+// browser use to reach it. A nil/empty map disables the check, which is
+// the default state used by unit tests that exercise handlers via
+// httptest.NewRequest (Host="example.com"). Safe to call once before
+// ListenAndServe; concurrent calls are not supported.
+func (s *Server) SetAllowedHosts(boundAddrs []string, port int) {
+	set := make(map[string]struct{})
+	add := func(host string) {
+		if host == "" {
+			return
+		}
+		set[host] = struct{}{}
+		set[net.JoinHostPort(host, strconv.Itoa(port))] = struct{}{}
+	}
+	// Well-known names: the userscript and host CLI both use loopback;
+	// containers reach the host via host.docker.internal which Docker
+	// resolves to one of the bound interface IPs.
+	for _, h := range []string{"localhost", "127.0.0.1", "host.docker.internal"} {
+		add(h)
+	}
+	for _, a := range boundAddrs {
+		add(a)
+	}
+	s.allowedHosts = set
+}
+
+// hostAllowed reports whether the request's Host header is in the
+// configured allow-list. A nil allow-list (tests) means "no check".
+func (s *Server) hostAllowed(host string) bool {
+	if s.allowedHosts == nil {
+		return true
+	}
+	_, ok := s.allowedHosts[host]
+	return ok
+}
+
+// requireJSONPOST validates that an incoming POST is acceptable: the
+// Content-Type media type must be application/json, and the body is
+// capped at maxBytes. The Content-Type check is the CSRF defence —
+// browsers cannot mount a "simple" cross-origin POST with this media
+// type, so any caller that passes is either same-origin, the userscript
+// (GM.xmlHttpRequest), or a non-browser client that explicitly opts in
+// (the CLI sets it). Returns true when the request may proceed; on
+// rejection the response is already written.
+func requireJSONPOST(w http.ResponseWriter, r *http.Request, maxBytes int64) bool {
+	ct := r.Header.Get("Content-Type")
+	if ct == "" {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "missing Content-Type")
+		return false
+	}
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil || mt != "application/json" {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	return true
+}
+
+// writeJSONError writes a JSON {"error": ...} body with the given status.
+// Centralised so the Content-Type and body are guaranteed consistent;
+// http.Error writes text/plain regardless of any later header set.
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+// decodeJSONBody reads r.Body into v and writes the appropriate HTTP error
+// on failure: 413 when the request exceeded the MaxBytesReader limit set
+// by requireJSONPOST, 400 for any other decode failure (malformed JSON,
+// type mismatches, EOF on empty body). Returns true when v was populated
+// successfully.
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return false
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return false
+	}
+	return true
 }
 
 // SetTailer attaches a TailerStatus source whose CaughtUp() value is reported
@@ -103,6 +227,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // not supported.
 func (s *Server) SetTailer(t TailerStatus) {
 	s.tailerStatus = t
+}
+
+// SetNow injects a clock for tests whose fixtures use a fixed timestamp.
+// Production never calls this — handlers default to time.Now.
+func (s *Server) SetNow(fn func() time.Time) {
+	s.now = fn
 }
 
 // WindowsEngine returns the server's internal windows engine so callers (the
@@ -119,16 +249,6 @@ func (s *Server) SlackCalculator() *slack.Calculator {
 	return s.slackCalc
 }
 
-// LogRequest logs incoming requests (middleware-style).
-func (s *Server) LogRequest(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		duration := time.Since(start)
-		slog.Info("request", "method", r.Method, "path", r.URL.Path, "duration_ms", duration.Milliseconds())
-	})
-}
-
 // handleHealthz checks if the trayapp and database are healthy. Per the
 // Phase 7 contract, a tailer that hasn't caught up does NOT degrade health to
 // 503 — only an unwritable database does. The current tailer state is
@@ -138,7 +258,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	// Check database accessibility
 	err := s.store.DB().Ping()
 	if err != nil {
-		http.Error(w, `{"status":"unhealthy","reason":"database_not_writable"}`, http.StatusServiceUnavailable)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status": "unhealthy",
+			"reason": "database_not_writable",
+		})
 		return
 	}
 
@@ -180,22 +305,18 @@ type LogPostRequest struct {
 
 // handleLog processes POST /log requests.
 func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireJSONPOST(w, r, maxBodyLog) {
 		return
 	}
 
 	var req LogPostRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-		w.Header().Set("Content-Type", "application/json")
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
 	// Validate required fields
 	if req.InputTokens == 0 && req.OutputTokens == 0 {
-		http.Error(w, `{"error":"input_tokens and output_tokens required"}`, http.StatusBadRequest)
-		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, "input_tokens and output_tokens required")
 		return
 	}
 
@@ -256,8 +377,7 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slog.Error("failed to insert usage event", "err", err)
-		http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
-		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusInternalServerError, "database error")
 		return
 	}
 
@@ -293,15 +413,12 @@ type ParseErrorRequest struct {
 
 // handleParseError processes POST /parse_error requests.
 func (s *Server) handleParseError(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireJSONPOST(w, r, maxBodyParseError) {
 		return
 	}
 
 	var req ParseErrorRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-		w.Header().Set("Content-Type", "application/json")
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
@@ -314,8 +431,7 @@ func (s *Server) handleParseError(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		slog.Error("failed to insert parse error", "err", err)
-		http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
-		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusInternalServerError, "database error")
 		return
 	}
 

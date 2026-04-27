@@ -55,6 +55,34 @@ func TestInferProjectPath(t *testing.T) {
 	}
 }
 
+func TestValidateTranscriptPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"typical transcript", "/home/user/.claude/projects/-home-user-x/abc.jsonl", false},
+		{"relative transcript", "projects/-home-user-x/abc.jsonl", false},
+		{"empty path", "", true},
+		{"non jsonl extension", "/home/user/.claude/projects/-home-user-x/abc.txt", true},
+		{"no projects parent", "/etc/passwd", true},
+		{"jsonl outside projects layout", "/tmp/random/abc.jsonl", true},
+		{"path traversal collapses to outside projects", "/home/user/.claude/projects/../../etc/abc.jsonl", true},
+		{"projects-named dir but wrong depth", "/home/user/projects/abc.jsonl", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateTranscriptPath(tc.path)
+			if tc.wantErr && err == nil {
+				t.Errorf("validateTranscriptPath(%q) = nil, want error", tc.path)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("validateTranscriptPath(%q) = %v, want nil", tc.path, err)
+			}
+		})
+	}
+}
+
 func TestProcessHookInputFlow(t *testing.T) {
 	// Capture POSTs hitting the stub trayapp.
 	type capturedEvent struct {

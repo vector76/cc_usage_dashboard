@@ -128,13 +128,19 @@ func main() {
 		ifaces = nil
 	}
 	bindAddrs, err := netbind.SelectBindAddrs(ifaces, netbind.BindConfig{
-		UserOverrides:  cfg.HTTP.Bind,
-		EnableFallback: cfg.HTTP.EnableFallback,
+		UserOverrides: cfg.HTTP.Bind,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to select bind addresses: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Configure the Host header allow-list before any goroutine starts
+	// accepting traffic, so DNS-rebinding requests cannot slip in during
+	// startup. The list combines every interface we bind to with the
+	// well-known names (localhost, 127.0.0.1, host.docker.internal) that
+	// the userscript and containers actually use.
+	srv.SetAllowedHosts(bindAddrs, cfg.HTTP.Port)
 
 	serverErr := make(chan error, len(bindAddrs))
 

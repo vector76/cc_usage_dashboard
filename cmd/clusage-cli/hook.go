@@ -27,8 +27,8 @@ func processHookInput(stdin io.Reader, hostURL string) {
 		os.Exit(2)
 	}
 
-	if payload.TranscriptPath == "" {
-		fmt.Fprintf(os.Stderr, "error: transcript_path not found in hook payload\n")
+	if err := validateTranscriptPath(payload.TranscriptPath); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -156,6 +156,36 @@ func postEventPayloadTo(hostURL string, eventPayload map[string]interface{}) boo
 	defer resp.Body.Close()
 
 	return resp.StatusCode >= 200 && resp.StatusCode < 300
+}
+
+// validateTranscriptPath rejects transcript_path values that don't match
+// the Claude Code projects layout. The hook payload is structured input
+// from Claude Code, but a workspace-level configuration could in principle
+// influence it; without this guard the CLI happily ReadFile's whatever
+// path the payload names — the file's contents would then be POSTed up to
+// the trayapp as raw_json. Two cheap structural checks close the gap:
+//
+//  1. The file extension must be .jsonl (Claude Code's transcript format).
+//  2. The grandparent directory's basename must be exactly "projects",
+//     matching ~/.claude/projects/<encoded>/<session>.jsonl.
+//
+// The checks intentionally don't pin to an absolute prefix because the
+// $HOME / projects-dir location varies across containers and CI; the
+// shape of the path is what matters.
+func validateTranscriptPath(p string) error {
+	if p == "" {
+		return fmt.Errorf("transcript_path missing from hook payload")
+	}
+	cleaned := filepath.Clean(p)
+	if filepath.Ext(cleaned) != ".jsonl" {
+		return fmt.Errorf("transcript_path must be a .jsonl file: %q", p)
+	}
+	dir := filepath.Dir(cleaned)
+	parent := filepath.Base(filepath.Dir(dir))
+	if parent != "projects" {
+		return fmt.Errorf("transcript_path must live under a 'projects' directory: %q", p)
+	}
+	return nil
 }
 
 // inferProjectPath extracts the encoded project segment from a transcript

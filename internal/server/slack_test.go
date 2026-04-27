@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -122,7 +121,7 @@ func TestHandleSlackReleaseMissingFields(t *testing.T) {
 			srv, testStore := createTestServer(t)
 			defer testStore.Close()
 
-			req := httptest.NewRequest("POST", "/slack/release", bytes.NewReader([]byte(tt.body)))
+			req := jsonPOST("/slack/release", []byte(tt.body))
 			w := httptest.NewRecorder()
 			srv.ServeHTTP(w, req)
 
@@ -140,7 +139,7 @@ func TestHandleSlackReleaseNoActiveWindow(t *testing.T) {
 	defer testStore.Close()
 
 	body := `{"released_at":"2026-04-26T12:00:00Z","job_tag":"nightly-lint"}`
-	req := httptest.NewRequest("POST", "/slack/release", bytes.NewReader([]byte(body)))
+	req := jsonPOST("/slack/release", []byte(body))
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -172,7 +171,7 @@ func TestHandleSlackReleaseWindowKindWeekly(t *testing.T) {
 		"job_tag":     "weekly-job",
 		"window_kind": "weekly",
 	})
-	req := httptest.NewRequest("POST", "/slack/release", bytes.NewReader(body))
+	req := jsonPOST("/slack/release", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -214,7 +213,7 @@ func TestHandleSlackReleaseWindowKindNoMatch(t *testing.T) {
 		"job_tag":     "session-job",
 		"window_kind": "session",
 	})
-	req := httptest.NewRequest("POST", "/slack/release", bytes.NewReader(body))
+	req := jsonPOST("/slack/release", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 

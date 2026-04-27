@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +37,7 @@ func TestMetricsLogIncrementsEventsIngested(t *testing.T) {
 				Source:       tt.source,
 			}
 			body, _ := json.Marshal(payload)
-			req := httptest.NewRequest("POST", "/log", bytes.NewReader(body))
+			req := jsonPOST("/log", body)
 			w := httptest.NewRecorder()
 			srv.ServeHTTP(w, req)
 
@@ -63,7 +62,7 @@ func TestMetricsLogFailureDoesNotIncrement(t *testing.T) {
 	// Missing required fields → 400
 	payload := LogPostRequest{SessionID: "x"}
 	body, _ := json.Marshal(payload)
-	req := httptest.NewRequest("POST", "/log", bytes.NewReader(body))
+	req := jsonPOST("/log", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -89,7 +88,7 @@ func TestMetricsParseErrorIncrements(t *testing.T) {
 		Payload: "{",
 	}
 	body, _ := json.Marshal(payload)
-	req := httptest.NewRequest("POST", "/parse_error", bytes.NewReader(body))
+	req := jsonPOST("/parse_error", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -115,7 +114,7 @@ func TestMetricsSnapshotIncrements(t *testing.T) {
 		Source:     "userscript",
 	}
 	body, _ := json.Marshal(payload)
-	req := httptest.NewRequest("POST", "/snapshot", bytes.NewReader(body))
+	req := jsonPOST("/snapshot", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -170,7 +169,7 @@ func TestMetricsSlackReleaseIncrements(t *testing.T) {
 		JobTag:     "job-1",
 	}
 	body, _ := json.Marshal(payload)
-	req := httptest.NewRequest("POST", "/slack/release", bytes.NewReader(body))
+	req := jsonPOST("/slack/release", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -196,7 +195,7 @@ func TestMetricsSlackReleaseFailureDoesNotIncrement(t *testing.T) {
 		JobTag:     "job-x",
 	}
 	body, _ := json.Marshal(payload)
-	req := httptest.NewRequest("POST", "/slack/release", bytes.NewReader(body))
+	req := jsonPOST("/slack/release", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 

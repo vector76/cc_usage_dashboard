@@ -17,9 +17,8 @@ type Config struct {
 	} `yaml:"database"`
 
 	HTTP struct {
-		Port           int      `yaml:"port"`
-		Bind           []string `yaml:"bind"`
-		EnableFallback bool     `yaml:"enable_fallback"`
+		Port int      `yaml:"port"`
+		Bind []string `yaml:"bind"`
 	} `yaml:"http"`
 
 	Claude struct {
@@ -67,7 +66,6 @@ func Load(path string) (*Config, error) {
 	cfg.Database.Path = "usage.db"
 	cfg.HTTP.Port = 27812
 	cfg.HTTP.Bind = []string{"127.0.0.1"}
-	cfg.HTTP.EnableFallback = false
 	cfg.Claude.ProjectsDir = expandHome("~/.claude/projects")
 	cfg.Pricing.TablePath = "config/prices.example.yaml"
 	cfg.Tailer.PollIntervalMs = 1000

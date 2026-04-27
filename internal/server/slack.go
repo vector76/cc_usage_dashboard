@@ -21,18 +21,12 @@ type ReleaseRequest struct {
 
 // handleSlackQuery processes GET /slack requests.
 func (s *Server) handleSlackQuery(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	s.metrics.SlackQueries.Add(1)
 
 	slackResp, err := s.slackCalc.GetSlack()
 	if err != nil {
 		slog.Error("failed to compute slack", "err", err)
-		http.Error(w, `{"error":"computation error"}`, http.StatusInternalServerError)
-		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusInternalServerError, "computation error")
 		return
 	}
 
@@ -50,26 +44,21 @@ func (s *Server) handleSlackQuery(w http.ResponseWriter, r *http.Request) {
 
 // handleSlackRelease processes POST /slack/release requests.
 func (s *Server) handleSlackRelease(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !requireJSONPOST(w, r, maxBodySlackRelease) {
 		return
 	}
 
 	var req ReleaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid JSON"}`, http.StatusBadRequest)
-		w.Header().Set("Content-Type", "application/json")
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
 
 	if req.JobTag == "" {
-		http.Error(w, `{"error":"job_tag required"}`, http.StatusBadRequest)
-		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, "job_tag required")
 		return
 	}
 	if req.ReleasedAt.IsZero() {
-		http.Error(w, `{"error":"released_at required"}`, http.StatusBadRequest)
-		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, "released_at required")
 		return
 	}
 
@@ -78,21 +67,18 @@ func (s *Server) handleSlackRelease(w http.ResponseWriter, r *http.Request) {
 		windowKind = "session"
 	}
 	if windowKind != "session" && windowKind != "weekly" {
-		http.Error(w, `{"error":"invalid window_kind"}`, http.StatusBadRequest)
-		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusBadRequest, "invalid window_kind")
 		return
 	}
 
 	id, err := s.slackCalc.RecordRelease(req.ReleasedAt, req.JobTag, req.EstimatedCost, req.SlackAtRelease, windowKind)
 	if err != nil {
 		if errors.Is(err, slack.ErrNoActiveWindow) {
-			http.Error(w, `{"error":"no active window"}`, http.StatusConflict)
-			w.Header().Set("Content-Type", "application/json")
+			writeJSONError(w, http.StatusConflict, "no active window")
 			return
 		}
 		slog.Error("failed to record release", "err", err)
-		http.Error(w, `{"error":"database error"}`, http.StatusInternalServerError)
-		w.Header().Set("Content-Type", "application/json")
+		writeJSONError(w, http.StatusInternalServerError, "database error")
 		return
 	}
 

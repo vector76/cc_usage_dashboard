@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,12 +9,100 @@ import (
 	"time"
 )
 
+// TestSnapshotRejectsOutOfRangeTimestamps verifies that *_window_ends
+// values pointing at the year 9999 (or far-past dates) are rejected with
+// 400 instead of being persisted. Without this guard a hostile or buggy
+// snapshot could pin a window's reset boundary far in the future and
+// freeze the slack signal.
+func TestSnapshotRejectsOutOfRangeTimestamps(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	farFuture := time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
+	farPast := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	cases := []struct {
+		name    string
+		mutate  func(*SnapshotRequest)
+		wantErr string
+	}{
+		{
+			name: "session_window_ends far future",
+			mutate: func(r *SnapshotRequest) {
+				r.SessionWindowEnds = &farFuture
+			},
+			wantErr: "session_window_ends too far in the future",
+		},
+		{
+			name: "weekly_window_ends far future",
+			mutate: func(r *SnapshotRequest) {
+				r.WeeklyWindowEnds = &farFuture
+			},
+			wantErr: "weekly_window_ends too far in the future",
+		},
+		{
+			name: "session_window_ends far past",
+			mutate: func(r *SnapshotRequest) {
+				r.SessionWindowEnds = &farPast
+			},
+			wantErr: "session_window_ends too far in the past",
+		},
+		{
+			name: "observed_at far future",
+			mutate: func(r *SnapshotRequest) {
+				future := now.Add(10 * time.Hour)
+				r.ObservedAt = future
+			},
+			wantErr: "observed_at too far in the future",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &SnapshotRequest{ObservedAt: now}
+			tc.mutate(req)
+			err := validateSnapshotTimestamps(req, now)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestSnapshotAcceptsInBoundsTimestamps verifies the validator passes the
+// values the userscript actually produces (now-ish observation, ~5h
+// session reset, ~7d weekly reset).
+func TestSnapshotAcceptsInBoundsTimestamps(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	sessEnd := now.Add(5 * time.Hour)
+	weekEnd := now.Add(6 * 24 * time.Hour)
+	req := &SnapshotRequest{
+		ObservedAt:        now,
+		SessionWindowEnds: &sessEnd,
+		WeeklyWindowEnds:  &weekEnd,
+	}
+	if err := validateSnapshotTimestamps(req, now); err != nil {
+		t.Errorf("validateSnapshotTimestamps rejected a normal snapshot: %v", err)
+	}
+
+	// Zero-valued timestamps must be tolerated (userscript can omit a
+	// reset hint when the DOM doesn't expose one).
+	emptyReq := &SnapshotRequest{}
+	if err := validateSnapshotTimestamps(emptyReq, now); err != nil {
+		t.Errorf("validateSnapshotTimestamps rejected an all-zero snapshot: %v", err)
+	}
+}
+
 func TestSnapshotCreatesWindow(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()
 
 	fixed := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	srv.windowsEngine.SetNow(func() time.Time { return fixed })
+	// The snapshot handler now bounds-checks ObservedAt against
+	// Server.now; align that clock with the fixture so the test
+	// payload's ObservedAt isn't flagged as "too far in the past".
+	srv.SetNow(func() time.Time { return fixed })
 
 	used := 20.0
 	payload := SnapshotRequest{
@@ -25,7 +112,7 @@ func TestSnapshotCreatesWindow(t *testing.T) {
 	}
 
 	body, _ := json.Marshal(payload)
-	req := httptest.NewRequest("POST", "/snapshot", bytes.NewReader(body))
+	req := jsonPOST("/snapshot", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -49,6 +136,10 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 
 	fixed := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 	srv.windowsEngine.SetNow(func() time.Time { return fixed })
+	// The snapshot handler now bounds-checks ObservedAt against
+	// Server.now; align that clock with the fixture so the test
+	// payload's ObservedAt isn't flagged as "too far in the past".
+	srv.SetNow(func() time.Time { return fixed })
 
 	// First snapshot: establishes the active window. Observed at the same
 	// instant as the engine's now() so that it falls within [startedAt, endsAt).
@@ -59,7 +150,7 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 		SessionUsed: &first,
 	}
 	body, _ := json.Marshal(firstPayload)
-	req := httptest.NewRequest("POST", "/snapshot", bytes.NewReader(body))
+	req := jsonPOST("/snapshot", body)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
@@ -81,7 +172,7 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 		SessionUsed: &second,
 	}
 	body, _ = json.Marshal(secondPayload)
-	req = httptest.NewRequest("POST", "/snapshot", bytes.NewReader(body))
+	req = jsonPOST("/snapshot", body)
 	w = httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {

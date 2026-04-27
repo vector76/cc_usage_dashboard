@@ -12,9 +12,10 @@ import (
 // BindConfig controls SelectBindAddrs.
 type BindConfig struct {
 	// UserOverrides are explicit addresses appended to the resolved list.
+	// Use this to add interfaces the auto-detection missed; there is no
+	// 0.0.0.0 catch-all because that would expose the API to the LAN
+	// without a corresponding firewall rule.
 	UserOverrides []string
-	// EnableFallback prepends 0.0.0.0 when set.
-	EnableFallback bool
 }
 
 // dockerWSLRanges are IPv4 CIDRs that commonly correspond to Docker bridge,
@@ -37,9 +38,12 @@ var ifaceAddrs = func(iface net.Interface) ([]net.Addr, error) {
 //
 // The result always contains 127.0.0.1; any IPv4 address from ifaces whose IP
 // falls inside a well-known Docker/WSL range is appended, followed by entries
-// from cfg.UserOverrides. When cfg.EnableFallback is true, 0.0.0.0 is
-// prepended and a warning is logged. Duplicates are removed while preserving
-// order.
+// from cfg.UserOverrides. Duplicates are removed while preserving order.
+//
+// There is intentionally no 0.0.0.0 catch-all: binding all interfaces would
+// expose the unauthenticated API to whatever LAN the host happens to sit on,
+// without a paired firewall rule to gate it. Topologies that the auto-detect
+// misses must add an explicit cfg.UserOverrides entry.
 func SelectBindAddrs(ifaces []net.Interface, cfg BindConfig) ([]string, error) {
 	nets := make([]*net.IPNet, 0, len(dockerWSLRanges))
 	for _, c := range dockerWSLRanges {
@@ -87,11 +91,6 @@ func SelectBindAddrs(ifaces []net.Interface, cfg BindConfig) ([]string, error) {
 			return nil, fmt.Errorf("netbind: invalid override %q", ov)
 		}
 		addrs = append(addrs, ov)
-	}
-
-	if cfg.EnableFallback {
-		slog.Warn("netbind: enable_fallback set; binding 0.0.0.0 — all interfaces will accept connections")
-		addrs = append([]string{"0.0.0.0"}, addrs...)
 	}
 
 	return dedupe(addrs), nil

@@ -107,11 +107,6 @@ func TestSelectBindAddrs(t *testing.T) {
 			want: []string{"127.0.0.1", "172.17.0.1", "192.0.2.42"},
 		},
 		{
-			name: "fallback prepends 0.0.0.0",
-			cfg:  BindConfig{EnableFallback: true},
-			want: []string{"0.0.0.0", "127.0.0.1"},
-		},
-		{
 			name: "duplicates collapsed preserving first occurrence",
 			ifaces: []ifaceData{{
 				name:  "docker0",

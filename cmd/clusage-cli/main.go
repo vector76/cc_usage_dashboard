@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 )
@@ -230,7 +231,12 @@ func cmdConsumption() {
 	timeout := parseTimeout()
 	client := &http.Client{Timeout: timeout}
 
-	resp, err := client.Get(fmt.Sprintf("%s/consumption?period=%s", hostURL(), *period))
+	// url.Values.Encode handles characters like &, #, and whitespace in
+	// the period flag — fmt.Sprintf would silently produce a malformed
+	// URL the server then can't parse.
+	q := url.Values{}
+	q.Set("period", *period)
+	resp, err := client.Get(fmt.Sprintf("%s/consumption?%s", hostURL(), q.Encode()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: connection refused\n")
 		os.Exit(3)

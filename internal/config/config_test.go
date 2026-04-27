@@ -21,9 +21,6 @@ func TestLoadDefaults(t *testing.T) {
 	if len(cfg.HTTP.Bind) != 1 || cfg.HTTP.Bind[0] != "127.0.0.1" {
 		t.Errorf("expected default bind [127.0.0.1], got %v", cfg.HTTP.Bind)
 	}
-	if cfg.HTTP.EnableFallback {
-		t.Error("expected enable_fallback false by default")
-	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("expected logging level 'info', got %q", cfg.Logging.Level)
 	}
@@ -68,7 +65,6 @@ http:
   bind:
     - 127.0.0.1
     - 172.17.0.1
-  enable_fallback: true
 tailer:
   poll_interval_ms: 500
 logging:
@@ -99,9 +95,6 @@ slack:
 	}
 	if len(cfg.HTTP.Bind) != 2 || cfg.HTTP.Bind[1] != "172.17.0.1" {
 		t.Errorf("expected bind [127.0.0.1, 172.17.0.1], got %v", cfg.HTTP.Bind)
-	}
-	if !cfg.HTTP.EnableFallback {
-		t.Error("expected enable_fallback true")
 	}
 	if cfg.Tailer.PollIntervalMs != 500 {
 		t.Errorf("expected poll_interval_ms 500, got %d", cfg.Tailer.PollIntervalMs)

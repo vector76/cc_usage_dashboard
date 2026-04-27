@@ -212,6 +212,36 @@
         return { sessionUsed, weeklyUsed, sessionWindowEnds: sessionEnds, weeklyWindowEnds: weeklyEnds, observedAtMs };
     }
 
+    // ---------- diagnostics ----------
+
+    // buildFingerprint summarises the *structure* of the page when our
+    // extractor breaks, without including conversation text, account
+    // names, or any other PII. Earlier versions shipped up to 64 KiB of
+    // document.body.outerHTML; that landed verbatim in parse_errors and
+    // sat on disk for 30 days. The fingerprint captures what an admin
+    // actually needs to debug a parser break (which selectors matched
+    // how many times, what the section headings look like) and nothing
+    // else.
+    function buildFingerprint() {
+        try {
+            const headings = Array.from(document.querySelectorAll('h2'))
+                .map(h => (h.textContent || '').trim().slice(0, 80))
+                .filter(Boolean)
+                .slice(0, 30);
+            const fp = {
+                pathname: location.pathname,
+                h2_count: headings.length,
+                h2_texts: headings,
+                progressbar_count: document.querySelectorAll('[role="progressbar"]').length,
+                usage_progressbar_count: document.querySelectorAll('[role="progressbar"][aria-label="Usage"]').length,
+                user_agent_short: (navigator.userAgent || '').slice(0, 120),
+            };
+            return JSON.stringify(fp);
+        } catch (e) {
+            return JSON.stringify({ fingerprint_error: String(e).slice(0, 200) });
+        }
+    }
+
     // ---------- snapshot dispatch ----------
 
     function buildSnapshotBody(extracted) {
@@ -244,8 +274,7 @@
                 postJSON(ENDPOINT_PARSE_ERROR, {
                     source: 'userscript',
                     reason: 'usage progressbars missing for >5 minutes',
-                    payload: (document.body && document.body.outerHTML) ?
-                        document.body.outerHTML.slice(0, 65536) : '',
+                    payload: buildFingerprint(),
                 });
             }
             return;

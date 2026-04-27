@@ -142,18 +142,28 @@ failure means that turn is lost. See the failure-modes table below.
   host (commonly in the `192.168.65.0/24` or WSL `172.x.x.0/20` ranges). Native Linux
   Docker uses a `172.17.0.1`-style bridge instead. The exact interface is environment-
   dependent, so the trayapp resolves it at startup rather than hardcoding.
-- Preferred binding strategy:
+- Binding strategy:
   1. Always bind `127.0.0.1` for local-only callers (the userscript via the host
      browser, manual `curl` from the host).
   2. Enumerate the host's network interfaces and additionally bind any that match
      well-known Docker / WSL ranges (Docker Desktop's vEthernet adapter, WSL adapter,
-     `172.16.0.0/12`, `192.168.65.0/24`). The user can override the list in config.
-  3. If neither (1) nor (2) is reachable from a container, fall back to `0.0.0.0`
-     **and** install a Windows Defender inbound rule restricting the port to
-     `LocalSubnet` only. The fallback is surfaced in the tray UI so the user knows
-     they're in the looser configuration.
+     `172.16.0.0/12`, `192.168.65.0/24`). The user can append explicit addresses
+     via `http.bind` for topologies the auto-detect misses.
+  3. There is **no** `0.0.0.0` catch-all. Binding all interfaces would expose the
+     unauthenticated API to whatever LAN the host happens to sit on, with no
+     paired firewall rule to gate it. Topologies that defeat (1) and (2) must add
+     an explicit `http.bind` entry rather than open every interface at once.
 - No authentication. The trust boundary is the host. Anything able to reach the bound
   interface is already running on this machine or its containers.
+- Browser-mounted CSRF defence: every POST handler requires
+  `Content-Type: application/json` and caps the body at a per-endpoint limit. The
+  Content-Type check rejects "simple" cross-origin form posts a malicious site could
+  mount against `http://localhost:27812/...` from the user's browser; the body cap
+  prevents a hostile caller from exhausting RAM or filling the DB with junk.
+- DNS-rebinding defence: every request's `Host` header must match the configured
+  allow-list (`localhost`, `127.0.0.1`, `host.docker.internal`, plus each bound
+  interface IP). Without this, a malicious site could rebind its hostname to
+  127.0.0.1 and bypass the same-origin policy.
 - If the user later wants remote access, route via Cloudflare tunnel + cloudflared
   Access policy. Do not add bespoke auth to the local server.
 

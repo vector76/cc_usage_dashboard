@@ -129,7 +129,10 @@ The userscript must:
   since the last successful post.
 - Tolerate DOM changes. If the expected nodes are missing for >N seconds, post a
   `parse_error` payload to the local server (separate endpoint) so the trayapp can
-  surface "userscript broke, please update" in the tray UI.
+  surface "userscript broke, please update" in the tray UI. The payload is a
+  structured **fingerprint** (heading texts, progressbar counts, pathname) — not
+  raw page HTML — so conversation content and account names never leave the
+  browser.
 
 ## Distribution
 

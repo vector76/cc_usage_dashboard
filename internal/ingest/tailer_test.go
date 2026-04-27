@@ -508,3 +508,65 @@ func TestTailerOffsetPersistence(t *testing.T) {
 		t.Errorf("expected DB offset %d after append, got %d", expectedOffset2, dbOffset2)
 	}
 }
+
+// TestTailerSkipsSymlinks verifies that a *.jsonl symlink under the
+// projects dir is not opened. Without this guard a hostile symlink
+// pointing at, say, /etc/passwd would have its bytes read line-by-line
+// and any non-JSON line would land in parse_errors.payload.
+func TestTailerSkipsSymlinks(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+
+	// The "secret" file represents anything outside the projects dir
+	// that we must never read. Contents are deliberately not JSON so a
+	// regression would write to parse_errors and fail the test loudly.
+	secretPath := filepath.Join(tmpDir, "secret.txt")
+	if err := os.WriteFile(secretPath, []byte("SHOULD-NOT-BE-READ\n"), 0644); err != nil {
+		t.Fatalf("write secret: %v", err)
+	}
+
+	projectsDir := filepath.Join(tmpDir, "projects")
+	if err := os.Mkdir(projectsDir, 0755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+
+	// Drop a *.jsonl symlink under projectsDir pointing at the secret.
+	symlinkPath := filepath.Join(projectsDir, "evil.jsonl")
+	if err := os.Symlink(secretPath, symlinkPath); err != nil {
+		t.Skipf("symlink unsupported on this platform: %v", err)
+	}
+
+	tailer := NewTailer(projectsDir, s, make(PriceTable))
+
+	// Both ingest paths share the same skip logic; exercise both.
+	tailer.pollOnce()
+	tailer.handleFileChange(symlinkPath)
+
+	var ueCount, peCount int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM usage_events`).Scan(&ueCount); err != nil {
+		t.Fatalf("count usage_events: %v", err)
+	}
+	if ueCount != 0 {
+		t.Errorf("expected 0 usage_events from symlink read, got %d", ueCount)
+	}
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM parse_errors`).Scan(&peCount); err != nil {
+		t.Fatalf("count parse_errors: %v", err)
+	}
+	if peCount != 0 {
+		t.Errorf("symlink should be silently skipped, but parse_errors=%d", peCount)
+	}
+	// The symlink must not be tracked either: an offset row would mean
+	// we did at least open and seek the file.
+	if _, err := s.GetTailerOffset(symlinkPath); err == nil {
+		var n int
+		_ = s.DB().QueryRow(`SELECT COUNT(*) FROM tailer_offsets WHERE file_path = ?`, symlinkPath).Scan(&n)
+		if n != 0 {
+			t.Errorf("expected no tailer_offsets row for symlink, got %d", n)
+		}
+	}
+}
