@@ -36,6 +36,7 @@ slack:
   baseline_max_age_seconds: 480     # baseline freshness gate (8 min)
   session_surplus_threshold: 0.50   # session headroom gate
   weekly_surplus_threshold: 0.10    # weekly pace-relative gate
+  session_absolute_threshold: 0.98  # session absolute-floor gate (percent_used <= 2)
   weekly_absolute_threshold: 0.80   # weekly absolute-floor gate (percent_used <= 20)
 
 retention:

@@ -46,6 +46,10 @@ type Config struct {
 	BaselineMaxAgeSeconds   int
 	SessionSurplusThreshold float64
 	WeeklySurplusThreshold  float64
+	// SessionAbsoluteThreshold is the percent_remaining floor (0–1) at or
+	// above which the session headroom gate also passes, regardless of
+	// pace. A value of 1.0 disables the absolute branch.
+	SessionAbsoluteThreshold float64
 	// WeeklyAbsoluteThreshold is the percent_remaining floor (0–1) at or
 	// above which the weekly headroom gate also passes, regardless of
 	// pace. Lets the gate fire early in the week.
@@ -127,9 +131,17 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 
 	resp.SlackCombinedFraction = c.combineSlackFractions(resp.Session, resp.Weekly)
 
-	sessionHeadroomOk := resp.Session != nil &&
+	// Session passes if EITHER the pace-relative surplus is met OR the
+	// absolute remaining-quota floor is met. A nil session window is the
+	// deadlock-breaker: when no active session row exists, getActiveWindow
+	// returns nil and we let the absolute branch pass so the gate can fire.
+	sessionPaceOk := resp.Session != nil &&
 		resp.Session.SlackFraction != nil &&
 		*resp.Session.SlackFraction >= c.config.SessionSurplusThreshold
+	sessionAbsoluteOk := resp.Session == nil ||
+		(resp.Session.PercentUsed != nil &&
+			*resp.Session.PercentUsed <= (1-c.config.SessionAbsoluteThreshold)*100)
+	sessionHeadroomOk := sessionPaceOk || sessionAbsoluteOk
 	// Weekly passes if EITHER the pace-relative surplus is met OR the
 	// absolute remaining-quota floor is met. The latter lets slack
 	// activate early in the week before pace-relative surplus accrues.

@@ -63,8 +63,16 @@ the queue is expected to apply one client-side gate of its own.
 
 ### Server-side gates (set `release_recommended`)
 
-1. **Session headroom gate.** Release work only if
-   `session.slack_fraction >= session_surplus_threshold` (suggested default: `0.50`).
+1. **Session headroom gate.** Release work if ANY of:
+   - `session.slack_fraction >= session_surplus_threshold` (default `0.50`), or
+   - `session.percent_used <= 100 * (1 - session_absolute_threshold)` (default
+     `0.98` → percent_used ≤ 2), or
+   - the session window is absent entirely (no active 5-hour session row, i.e.
+     the user is between sessions). This deadlock-breaker disjunct lets slack
+     fire during inactive limbo when `session_active=false` has closed the
+     window early — without it the gate would stay closed forever in limbo,
+     since pace and percent_used are undefined when there's no window to
+     measure against.
 2. **Weekly headroom gate.** Release work if EITHER:
    - `weekly.slack_fraction >= weekly_surplus_threshold` (default `0.10`), or
    - `weekly.percent_used <= 100 * (1 - weekly_absolute_threshold)` (default

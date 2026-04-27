@@ -36,6 +36,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Slack.WeeklyAbsoluteThreshold != 0.80 {
 		t.Errorf("expected weekly_absolute_threshold 0.80, got %f", cfg.Slack.WeeklyAbsoluteThreshold)
 	}
+	if cfg.Slack.SessionAbsoluteThreshold != 0.98 {
+		t.Errorf("expected session_absolute_threshold 0.98, got %f", cfg.Slack.SessionAbsoluteThreshold)
+	}
 	if cfg.Slack.BaselineMaxAgeSeconds != 480 {
 		t.Errorf("expected baseline_max_age_seconds 480, got %d", cfg.Slack.BaselineMaxAgeSeconds)
 	}
@@ -73,6 +76,7 @@ logging:
 slack:
   session_surplus_threshold: 0.75
   weekly_surplus_threshold: 0.05
+  session_absolute_threshold: 0.95
   weekly_absolute_threshold: 0.90
   baseline_max_age_seconds: 240
 `
@@ -113,6 +117,9 @@ slack:
 	}
 	if cfg.Slack.WeeklyAbsoluteThreshold != 0.90 {
 		t.Errorf("expected weekly_absolute_threshold 0.90, got %f", cfg.Slack.WeeklyAbsoluteThreshold)
+	}
+	if cfg.Slack.SessionAbsoluteThreshold != 0.95 {
+		t.Errorf("expected session_absolute_threshold 0.95, got %f", cfg.Slack.SessionAbsoluteThreshold)
 	}
 	if cfg.Slack.BaselineMaxAgeSeconds != 240 {
 		t.Errorf("expected baseline_max_age_seconds 240, got %d", cfg.Slack.BaselineMaxAgeSeconds)

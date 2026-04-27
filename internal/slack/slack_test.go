@@ -341,20 +341,22 @@ func seedFreshSnapshot(t *testing.T, s *store.Store, receivedAt time.Time, sessi
 }
 
 // newCalcWithThresholds builds a Calculator with custom surplus + absolute
-// thresholds. weeklyAbsolute is in fraction units (0–1) — pass 1.0 to
-// effectively disable the absolute-floor branch (percent_used must be ≤ 0
-// to satisfy it, which won't happen with non-negative test inputs).
-func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh, weeklyAbsolute float64) (*Calculator, *store.Store) {
+// thresholds. The absolute thresholds are in fraction units (0–1) — pass 1.0
+// to effectively disable the absolute-floor branch (percent_used must be ≤ 0
+// to satisfy it, which won't happen with non-negative test inputs and an
+// open window).
+func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh, sessionAbsolute, weeklyAbsolute float64) (*Calculator, *store.Store) {
 	t.Helper()
 	s, err := store.Open(":memory:")
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	cfg := Config{
-		BaselineMaxAgeSeconds:   480,
-		SessionSurplusThreshold: sessionThresh,
-		WeeklySurplusThreshold:  weeklyThresh,
-		WeeklyAbsoluteThreshold: weeklyAbsolute,
+		BaselineMaxAgeSeconds:    480,
+		SessionSurplusThreshold:  sessionThresh,
+		WeeklySurplusThreshold:   weeklyThresh,
+		SessionAbsoluteThreshold: sessionAbsolute,
+		WeeklyAbsoluteThreshold:  weeklyAbsolute,
 	}
 	return NewCalculator(s.DB(), cfg), s
 }
@@ -403,10 +405,10 @@ func TestHeadroomGates_DualThresholdsBoundaries(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Absolute floor disabled (1.0) so this test exercises only
-			// the pace-relative branch — the absolute-floor branch has
-			// its own dedicated test below.
-			c, s := newCalcWithThresholds(t, 0.10, 0.10, 1.0)
+			// Absolute floors disabled (1.0) so this test exercises only
+			// the pace-relative branch — the absolute-floor branches have
+			// their own dedicated tests below.
+			c, s := newCalcWithThresholds(t, 0.10, 0.10, 1.0, 1.0)
 			defer s.Close()
 
 			now := time.Now().UTC()
@@ -463,7 +465,9 @@ func TestWeeklyHeadroom_AbsoluteFloorBranch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Surplus threshold deliberately set above what pace can
 			// supply so the only way to pass is via the absolute branch.
-			c, s := newCalcWithThresholds(t, 0.10, 0.10, 0.80)
+			// Session absolute disabled (1.0) so this test focuses on
+			// weekly behaviour only.
+			c, s := newCalcWithThresholds(t, 0.10, 0.10, 1.0, 0.80)
 			defer s.Close()
 
 			now := time.Now().UTC()
@@ -479,6 +483,77 @@ func TestWeeklyHeadroom_AbsoluteFloorBranch(t *testing.T) {
 			}
 			if got := resp.Gates["weekly_headroom"]; got != tt.wantWeekly {
 				t.Errorf("weekly_headroom: got %v want %v (percent_used=%v)", got, tt.wantWeekly, tt.weeklyPctUsed)
+			}
+		})
+	}
+}
+
+// (g3) The session absolute-floor branch passes session_headroom whenever
+// percent_used is at or below (100 - 100*SessionAbsoluteThreshold), or when
+// no open session row exists at all (the deadlock-breaker). Lets the gate
+// fire even when pace cannot supply the surplus.
+//
+// Setup: session window started_at=now-1h, ends_at=now+4h
+//
+//	progress=0.2, percent_expected=20
+//	slack_fraction = (20 - percent_used) / 100
+//
+// SessionSurplusThreshold = 0.50 ensures pace fails for every percent_used
+// chosen below, isolating the absolute branch.
+func TestSessionHeadroom_AbsoluteFloorBranch(t *testing.T) {
+	tests := []struct {
+		name            string
+		sessionPctUsed  *float64 // nil → no open session row inserted
+		sessionAbsolute float64
+		sessionSurplus  float64
+		wantSession     bool
+	}{
+		// (a) no open session row → absolute deadlock-breaker passes,
+		// regardless of any other state.
+		{"no open session row passes via deadlock-breaker", nil, 0.98, 0.50, true},
+		// (b) percent_used=1.5, threshold=0.98 → 1.5 ≤ 2 ✓; pace fails.
+		{"under floor passes via absolute branch", fptr(1.5), 0.98, 0.50, true},
+		// (c) percent_used=5, threshold=0.98 → 5 > 2 ✗; pace fails.
+		{"above floor fails when pace fails", fptr(5.0), 0.98, 0.50, false},
+		// (c') percent_used=5, threshold=0.98 → absolute fails; but with
+		// pace threshold 0.10 the pace branch passes (slack=0.15).
+		{"above floor + pace passes → gate passes via pace", fptr(5.0), 0.98, 0.10, true},
+		// (d) threshold=1.0 → absolute branch effectively disabled
+		// (percent_used must be ≤0 to pass); pace fails too.
+		{"absolute disabled (1.0) + pace fails → gate fails", fptr(5.0), 1.0, 0.50, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Weekly absolute disabled (1.0) and surplus high so weekly
+			// gate is irrelevant to this test's session_headroom check.
+			c, s := newCalcWithThresholds(t, tt.sessionSurplus, 0.10, tt.sessionAbsolute, 1.0)
+			defer s.Close()
+
+			now := time.Now().UTC()
+			if tt.sessionPctUsed != nil {
+				insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), *tt.sessionPctUsed, "snapshot:1")
+				seedFreshSnapshot(t, s, now, *tt.sessionPctUsed)
+			} else {
+				// Insert a CLOSED prior session row with high percent_used
+				// to prove getActiveWindow correctly skips it and the
+				// deadlock-breaker fires regardless of stale data.
+				if _, err := s.DB().Exec(
+					`INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, baseline_source, closed)
+					 VALUES ('session', ?, ?, 99.0, 'snapshot:0', 1)`,
+					store.FormatTime(now.Add(-10*time.Hour)),
+					store.FormatTime(now.Add(-5*time.Hour)),
+				); err != nil {
+					t.Fatalf("insert closed window: %v", err)
+				}
+				seedFreshSnapshot(t, s, now, 0.0)
+			}
+
+			resp, err := c.GetSlack()
+			if err != nil {
+				t.Fatalf("GetSlack: %v", err)
+			}
+			if got := resp.Gates["session_headroom"]; got != tt.wantSession {
+				t.Errorf("session_headroom: got %v want %v", got, tt.wantSession)
 			}
 		})
 	}
