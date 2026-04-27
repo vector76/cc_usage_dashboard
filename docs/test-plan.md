@@ -35,7 +35,7 @@ development; run the full suite before declaring done.
 | Transcript parser                   | `go test ./internal/ingest/...`                    | Valid/invalid JSONL, missing fields, timestamp parsing, parse-error capture     |
 | Tailer                              | `go test ./internal/ingest/...`                    | `.jsonl` matching, offset persistence, advance past skipped lines                |
 | Windows engine                      | `go test ./internal/windows/...`                   | session and weekly derivation, baseline assignment, clock injection              |
-| Slack calculator                    | `go test ./internal/slack/...`                     | Per-window slack fractions, gates (session/weekly headroom, priority quiet, freshness, not-paused), pause |
+| Slack calculator                    | `go test ./internal/slack/...`                     | Per-window slack fractions, gates (session/weekly headroom, baseline freshness, not-paused), pause |
 | Consumption calculator              | `go test ./internal/consumption/...`               | Documented field names; snapshot-derived `consumed_session_pct` / `consumed_weekly_pct` with cross-window resets |
 | HTTP server (handlers + dashboard)  | `go test ./internal/server/...`                    | `/log`, `/parse_error`, `/snapshot`, `/slack`, `/slack/release`, `/consumption`  |
 | CLI hook payload parsing            | `go test ./cmd/clusage-cli/...`                    | Hook stdin payload → `/log` POST                                                 |

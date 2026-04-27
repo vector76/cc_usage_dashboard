@@ -105,6 +105,17 @@ CREATE TABLE IF NOT EXISTS tailer_offsets (
 );
 `,
 	},
+	{
+		Version: 3,
+		Name:    "rename_windows_baseline_total",
+		// The column historically held a dollar-denominated quota total;
+		// it now holds the latest in-window snapshot's percent_used (0–100).
+		// Rename to match what the value actually is. Requires SQLite 3.25+
+		// (2018), which the modernc.org driver provides.
+		SQL: `
+ALTER TABLE windows RENAME COLUMN baseline_total TO baseline_percent_used;
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.

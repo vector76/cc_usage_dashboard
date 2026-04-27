@@ -203,7 +203,7 @@ func TestWeeklyWindowOnSundayDoesNotExpireImmediately(t *testing.T) {
 
 	var startedAt, endsAt time.Time
 	var baseline sql.NullFloat64
-	row := s.DB().QueryRow(`SELECT started_at, ends_at, baseline_total FROM windows WHERE kind = 'weekly' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT started_at, ends_at, baseline_percent_used FROM windows WHERE kind = 'weekly' AND closed = 0`)
 	if err := row.Scan(&startedAt, &endsAt, &baseline); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -215,7 +215,7 @@ func TestWeeklyWindowOnSundayDoesNotExpireImmediately(t *testing.T) {
 		t.Errorf("snapshot must fall inside the weekly window; got [%v, %v) for now=%v", startedAt, endsAt, now)
 	}
 	if !baseline.Valid || baseline.Float64 != weekly {
-		t.Errorf("expected weekly baseline_total=%v, got %v", weekly, baseline)
+		t.Errorf("expected weekly baseline_percent_used=%v, got %v", weekly, baseline)
 	}
 }
 
@@ -446,7 +446,7 @@ func TestBaselineFromSnapshot(t *testing.T) {
 	// Baseline should reflect the most recent prior snapshot.
 	var baseline sql.NullFloat64
 	var source string
-	row := s.DB().QueryRow(`SELECT baseline_total, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT baseline_percent_used, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&baseline, &source); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestBaselineCorrection(t *testing.T) {
 	var windowID int64
 	var initialBaseline sql.NullFloat64
 	var initialSource string
-	row := s.DB().QueryRow(`SELECT id, baseline_total, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT id, baseline_percent_used, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&windowID, &initialBaseline, &initialSource); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestBaselineCorrection(t *testing.T) {
 	var correctedID int64
 	var baseline sql.NullFloat64
 	var baselineSource string
-	row = s.DB().QueryRow(`SELECT id, baseline_total, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
+	row = s.DB().QueryRow(`SELECT id, baseline_percent_used, baseline_source FROM windows WHERE kind = 'session' AND closed = 0`)
 	if err := row.Scan(&correctedID, &baseline, &baselineSource); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}

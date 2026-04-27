@@ -47,43 +47,10 @@ Tray icon should show distinct states:
 
 ## Configuration
 
-A single TOML or YAML file in `%APPDATA%\usage_dashboard\config.yaml`:
-
-```yaml
-http:
-  port: 27812
-  bind:
-    - 127.0.0.1
-    - 172.17.0.1   # Docker bridge; auto-detected if blank
-
-db:
-  path: "%LOCALAPPDATA%\\usage_dashboard\\usage.db"
-
-tailer:
-  claude_dir: "%USERPROFILE%\\.claude\\projects"
-  poll_interval_ms: 1000
-
-subscription:
-  monthly_usd: 200
-  billing_cycle_days: 30
-
-# Used to compute cost_usd_equivalent when the source did not report it.
-# See docs/data-model.md "Cost source".
-price_table_path: "%APPDATA%\\usage_dashboard\\prices.yaml"
-
-slack:
-  session_surplus_threshold: 0.50
-  weekly_surplus_threshold: 0.10
-  weekly_absolute_threshold: 0.80
-  baseline_max_age_seconds: 480
-
-logging:
-  level: info
-  file: "%LOCALAPPDATA%\\usage_dashboard\\trayapp.log"
-```
-
-The file is read on start; changes require a restart. No reload-on-SIGHUP — this is
-Windows-first and the simplification is worth it.
+The trayapp reads a single YAML file at startup (default path
+`%APPDATA%\usage_dashboard\config.yaml`). The full schema, defaults, and
+path-placeholder rules live in [`docs/configuration.md`](configuration.md).
+The file is read once; changes require a restart.
 
 ## Autostart
 

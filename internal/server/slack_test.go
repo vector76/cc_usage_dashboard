@@ -15,7 +15,7 @@ import (
 func insertWindow(t *testing.T, db *sql.DB, kind string, startedAt, endsAt time.Time, baselineTotal float64) int64 {
 	t.Helper()
 	res, err := db.Exec(
-		`INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
+		`INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, baseline_source, closed)
 		 VALUES (?, ?, ?, ?, ?, 0)`,
 		kind, store.FormatTime(startedAt), store.FormatTime(endsAt), baselineTotal, "snapshot:1",
 	)

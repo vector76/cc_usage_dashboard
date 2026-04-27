@@ -88,8 +88,9 @@ Exit criteria: opening `http://localhost:27812` shows charts that match observed
 - Document the queue contract in `docs/slack-indicator.md` (already drafted).
 
 Test focus: table-driven tests for the slack math (clamp boundaries, both windows,
-combined `min`); each gate (headroom, priority quiet, freshness) tested in
-isolation and in combination; window-not-started returns null fraction, not 0.
+combined `min`); each gate (session/weekly headroom, baseline freshness, not-paused)
+tested in isolation and in combination; window-not-started returns null fraction,
+not 0.
 
 Exit criteria: a queue script can poll `slack --format release-bool` and get sane
 release decisions in synthetic and real tests.

@@ -307,11 +307,11 @@ function renderBurnDown(svgID, win, opts) {
         x: lx, y: ly - 8, "font-size": "10", fill: "#06c", "text-anchor": "middle"
       }, baseLabel));
     }
-  } else if (win.baseline_total != null) {
+  } else if (win.baseline_percent_used != null) {
     // No snapshots in the domain — flat segment at the baseline value
     // across the current window only.
     const now = Math.min(Math.max(Date.now(), start), end);
-    const remaining = 100 - win.baseline_total;
+    const remaining = 100 - win.baseline_percent_used;
     svg.appendChild(el("line", {
       x1: sx(start), y1: syPct(remaining), x2: sx(now), y2: syPct(remaining),
       stroke: "#06c", "stroke-width": "2"
@@ -404,8 +404,8 @@ function renderConsumption(d) {
   const lines = [];
   lines.push(["Period", d.period]);
   lines.push(["Consumed (USD eq.)", "$" + fmt(d.consumed_usd_equivalent)]);
-  lines.push(["Consumed % session", d.consumed_session_pct == null ? "—" : fmt(d.consumed_session_pct) + "%"]);
-  lines.push(["Consumed % weekly", d.consumed_weekly_pct == null ? "—" : fmt(d.consumed_weekly_pct) + "%"]);
+  lines.push(["Consumed % session", d.consumed_session_pct == null ? "—" : fmt(d.consumed_session_pct, 0) + "%"]);
+  lines.push(["Consumed % weekly", d.consumed_weekly_pct == null ? "—" : fmt(d.consumed_weekly_pct, 0) + "%"]);
   lines.push(["Events (total / reported / computed / none)",
     d.events_total + " / " + d.events_with_reported_cost + " / " + d.events_with_computed_cost + " / " + d.events_without_cost]);
   kv.innerHTML = lines.map(function (kv) { return "<dt>" + kv[0] + "</dt><dd>" + kv[1] + "</dd>"; }).join("");

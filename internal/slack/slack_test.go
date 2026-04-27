@@ -27,7 +27,7 @@ func newCalc(t *testing.T) (*Calculator, *store.Store) {
 func insertWindow(t *testing.T, db *sql.DB, kind string, startedAt, endsAt time.Time, baselineTotal float64, baselineSource string) int64 {
 	t.Helper()
 	res, err := db.Exec(
-		`INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
+		`INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, baseline_source, closed)
 		 VALUES (?, ?, ?, ?, ?, 0)`,
 		kind, store.FormatTime(startedAt), store.FormatTime(endsAt), baselineTotal, baselineSource,
 	)
@@ -231,13 +231,13 @@ func TestSetPaused_ForcesReleaseRecommendedFalse(t *testing.T) {
 //	slack_fraction    = (percent_expected - percent_used) / 100
 //
 // percent_used comes from the latest in-window snapshot (= the window's
-// baseline_total). Window bounds bracket time.Now() so the test doesn't
+// baseline_percent_used). Window bounds bracket time.Now() so the test doesn't
 // depend on wall-clock alignment.
 func TestComputeMetrics_FormulasMatchDocs(t *testing.T) {
 	c, s := newCalc(t)
 	defer s.Close()
 
-	const percentUsed = 5.0 // baseline_total stored on the window row
+	const percentUsed = 5.0 // baseline_percent_used stored on the window row
 
 	now := time.Now().UTC()
 	startedAt := now.Add(-1 * time.Hour)
@@ -293,10 +293,10 @@ func TestComputeMetrics_NilWhenNoInWindowSnapshot(t *testing.T) {
 	defer s.Close()
 
 	now := time.Now().UTC()
-	// Insert a window with a NULL baseline_total — i.e. no in-window
+	// Insert a window with a NULL baseline_percent_used — i.e. no in-window
 	// snapshot has ever set it.
 	if _, err := s.DB().Exec(
-		`INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
+		`INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, baseline_source, closed)
 		 VALUES ('session', ?, ?, NULL, 'default', 0)`,
 		store.FormatTime(now.Add(-1*time.Hour)),
 		store.FormatTime(now.Add(4*time.Hour)),
@@ -360,7 +360,7 @@ func newCalcWithThresholds(t *testing.T, sessionThresh, weeklyThresh, weeklyAbso
 
 // (g) session_headroom and weekly_headroom gates fire independently against
 // their own configured surplus thresholds, driven by each window's
-// percent_used (= windows.baseline_total) — not by usage_events.
+// percent_used (= windows.baseline_percent_used) — not by usage_events.
 // release_recommended requires both to pass (plus the other gates).
 //
 // Setup: session window started_at=now-1h, ends_at=now+4h

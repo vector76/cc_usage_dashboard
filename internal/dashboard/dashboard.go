@@ -21,13 +21,13 @@ var staticFS embed.FS
 
 // WindowState describes one active window in the dashboard state response.
 type WindowState struct {
-	ID            int64             `json:"id"`
-	Kind          string            `json:"kind"`
-	StartedAt     time.Time         `json:"started_at"`
-	EndsAt        time.Time         `json:"ends_at"`
-	BaselineTotal *float64          `json:"baseline_total"`
-	Series        []UsedSeriesPoint `json:"series"`
-	Volume        []SeriesBucket    `json:"volume"`
+	ID                  int64             `json:"id"`
+	Kind                string            `json:"kind"`
+	StartedAt           time.Time         `json:"started_at"`
+	EndsAt              time.Time         `json:"ends_at"`
+	BaselinePercentUsed *float64          `json:"baseline_percent_used"`
+	Series              []UsedSeriesPoint `json:"series"`
+	Volume              []SeriesBucket    `json:"volume"`
 	// BucketSecs is the width of each Volume bucket in seconds. The
 	// client uses this to size bars by their actual time span instead
 	// of by the count of populated buckets, since GROUP BY only emits
@@ -185,7 +185,7 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 		baselineTotal sql.NullFloat64
 	)
 	err := db.QueryRow(`
-		SELECT id, started_at, ends_at, baseline_total
+		SELECT id, started_at, ends_at, baseline_percent_used
 		FROM windows
 		WHERE kind = ? AND closed = 0
 		ORDER BY started_at DESC
@@ -206,7 +206,7 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 	}
 	if baselineTotal.Valid {
 		v := baselineTotal.Float64
-		ws.BaselineTotal = &v
+		ws.BaselinePercentUsed = &v
 	}
 
 	// The session chart shows 10h of pre-window history alongside the

@@ -66,9 +66,15 @@ not bounded at 100.
   snapshot stream; an hour-long gap between snapshots gets attributed to
   whichever pair of snapshots brackets it. Periods with few snapshots
   under-report.
-- **Window-reset detection** uses a 2-minute tolerance on
-  `*_window_ends`, the same value `windows.reanchorIfStale` uses to
-  absorb minute-rounded reset hints from the userscript.
+- **Window-reset detection** treats two adjacent snapshots as belonging
+  to the same window when their `*_window_ends` values agree within 10
+  minutes. The userscript computes `window_ends` as
+  `Date.now() + minutesUntilReset`, so two snapshots in the same window
+  can drift by a few minutes between sends; actually-different windows
+  are at least multiple hours apart, so the generous tolerance is safe.
+  (The reanchor logic in `windows.reanchorIfStale` uses a tighter
+  2-minute tolerance because it only absorbs minute-rounded jitter on
+  the *same* reset boundary.)
 - **Unknown-model events** are still counted in `events_without_cost`
   and excluded from `consumed_usd_equivalent`. They have no effect on
   the percent numbers.

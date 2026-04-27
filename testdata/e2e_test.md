@@ -99,7 +99,7 @@ curl -X POST http://localhost:27812/snapshot \
   }'
 
 # Query windows table
-sqlite3 usage.db "SELECT kind, baseline_total FROM windows;"
+sqlite3 usage.db "SELECT kind, baseline_percent_used FROM windows;"
 
 # Cleanup
 kill $SERVER_PID
@@ -108,8 +108,8 @@ kill $SERVER_PID
 **Expected:**
 - Snapshot stored successfully
 - Windows created for both `session` and `weekly`
-- session window has `baseline_total = session_used`
-- Weekly window has `baseline_total = weekly_used` (set by the in-window
+- session window has `baseline_percent_used = session_used`
+- Weekly window has `baseline_percent_used = weekly_used` (set by the in-window
   baseline correction pass)
 
 ## Scenario 4: Cost resolution

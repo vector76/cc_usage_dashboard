@@ -15,15 +15,18 @@ and no cross-machine state.
 |  +----------------------------- trayapp.exe ------------------------------+|
 |  |                                                                        ||
 |  |  HTTP server (binds 127.0.0.1 + detected Docker/WSL adapters)          ||
-|  |    POST /log              <- per-invocation token usage                ||
-|  |    POST /snapshot         <- authoritative quota numbers               ||
-|  |    POST /parse_error      <- userscript / tailer parse failures        ||
-|  |    POST /slack/release    <- queue reports a released job              ||
-|  |    GET  /slack            <- current slack signal (for external queue) ||
-|  |    GET  /consumption      <- USD + percent-of-quota over a period      ||
-|  |    GET  /healthz          <- liveness                                  ||
-|  |    GET  /metrics          <- counters                                  ||
-|  |    GET  /dashboard        <- HTML/JS UI                                ||
+|  |    POST /log                  <- per-invocation token usage            ||
+|  |    POST /snapshot             <- authoritative quota numbers           ||
+|  |    POST /parse_error          <- userscript / tailer parse failures    ||
+|  |    POST /slack/release        <- queue reports a released job          ||
+|  |    GET  /slack                <- current slack signal (external queue) ||
+|  |    GET  /consumption          <- USD + percent-of-quota over a period  ||
+|  |    GET  /healthz              <- liveness                              ||
+|  |    GET  /metrics              <- counters (Prometheus text format)     ||
+|  |    GET  /                     <- dashboard HTML (alias of /dashboard)  ||
+|  |    GET  /dashboard            <- dashboard HTML                        ||
+|  |    GET  /api/dashboard/state  <- JSON state powering the dashboard     ||
+|  |    GET  /favicon.{png,ico}    <- favicon                               ||
 |  |                                                                        ||
 |  |  SQLite DB (single file, WAL mode)                                     ||
 |  |                                                                        ||
@@ -121,7 +124,7 @@ failure means that turn is lost. See the failure-modes table below.
 3. Userscript POSTs `/snapshot` with `session_used` and/or `weekly_used`
    percentages — see `docs/userscript.md`.
 4. Trayapp inserts into `quota_snapshots` and uses the value to set or correct
-   the `baseline_total` for the current session and weekly windows.
+   the `baseline_percent_used` for the current session and weekly windows.
 
 ### Slack consumption
 

@@ -215,7 +215,7 @@ func TestE2E_DuplicateDetection(t *testing.T) {
 }
 
 // Scenario 3: a snapshot creates session and weekly windows whose
-// baseline_total reflects the snapshot's reported "% used" values.
+// baseline_percent_used reflects the snapshot's reported "% used" values.
 func TestE2E_SnapshotAndWindowDerivation(t *testing.T) {
 	env := newTestEnv(t, "")
 
@@ -236,7 +236,7 @@ func TestE2E_SnapshotAndWindowDerivation(t *testing.T) {
 		t.Fatalf("POST /snapshot: status=%d body=%s", w.Code, w.Body.String())
 	}
 
-	rows, err := env.store.DB().Query(`SELECT kind, baseline_total FROM windows`)
+	rows, err := env.store.DB().Query(`SELECT kind, baseline_percent_used FROM windows`)
 	if err != nil {
 		t.Fatalf("query windows: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestE2E_SnapshotAndWindowDerivation(t *testing.T) {
 		t.Fatalf("expected a session window, got rows for kinds=%v", got)
 	}
 	if !sess.Valid || sess.Float64 != sessionUsed {
-		t.Errorf("session baseline_total=%v, want %v", sess, sessionUsed)
+		t.Errorf("session baseline_percent_used=%v, want %v", sess, sessionUsed)
 	}
 
 	wk, ok := got["weekly"]
@@ -270,7 +270,7 @@ func TestE2E_SnapshotAndWindowDerivation(t *testing.T) {
 	// The weekly window picks the snapshot's weekly_used via the in-window
 	// baseline correction pass; this is the post-correction value.
 	if !wk.Valid || wk.Float64 != weeklyUsed {
-		t.Errorf("weekly baseline_total=%v, want %v", wk, weeklyUsed)
+		t.Errorf("weekly baseline_percent_used=%v, want %v", wk, weeklyUsed)
 	}
 }
 

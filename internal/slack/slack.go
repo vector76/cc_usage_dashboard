@@ -169,7 +169,7 @@ func (c *Calculator) getActiveWindow(kind string) (*activeWindow, error) {
 	var baselineTotal sql.NullFloat64
 
 	err := c.db.QueryRow(`
-		SELECT started_at, ends_at, baseline_total
+		SELECT started_at, ends_at, baseline_percent_used
 		FROM windows
 		WHERE kind = ? AND closed = 0
 		ORDER BY started_at DESC
@@ -191,7 +191,7 @@ func (c *Calculator) getActiveWindow(kind string) (*activeWindow, error) {
 
 // computeMetrics computes window metrics for an active window using
 // percent-of-quota math only. PercentUsed comes from the latest in-window
-// snapshot (windows.baseline_total, which the windows engine keeps current);
+// snapshot (windows.baseline_percent_used, which the windows engine keeps current);
 // dollar consumption from usage_events does not enter the slack signal.
 //
 //	progress(t)        = clamp((t - t0) / (t1 - t0), 0, 1)

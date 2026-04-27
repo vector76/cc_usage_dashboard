@@ -14,8 +14,8 @@ Let:
 
 - `t0` = current window start, `t1` = window end, `t` = now.
 - `percent_used(t)` = the latest in-window snapshot's `session_used` (or
-  `weekly_used`) value, kept current on `windows.baseline_total` by the
-  windows engine.
+  `weekly_used`) value, kept current on `windows.baseline_percent_used` by
+  the windows engine.
 
 ```
 progress(t)        = clamp((t - t0) / (t1 - t0), 0, 1)

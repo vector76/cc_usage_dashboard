@@ -35,8 +35,9 @@ at multiple levels.
 
 ## Configuration
 
-Configuration is loaded once at startup from a YAML file. See `internal/config` (Phase 2+)
-for the schema. Restart is required for config changes; no hot-reload.
+Configuration is loaded once at startup from a YAML file. See `internal/config`
+for the schema (and `docs/tray-app.md` for the documented keys and defaults).
+Restart is required for config changes; no hot-reload.
 
 ## Build tags for Windows-specific code
 
@@ -45,8 +46,8 @@ platform-specific code. Stub implementations must exist for non-Windows platform
 so the entire codebase compiles on Linux without platform-specific dependencies.
 
 Example:
-- `internal/tray/tray_windows.go` — Windows implementation
-- `internal/tray/tray_linux.go` — Linux stub (no-op)
+- `cmd/trayapp/tray_windows.go` — Windows implementation (`//go:build windows`)
+- `cmd/trayapp/tray_stub.go` — non-Windows stub (`//go:build !windows`)
 
 The tray UI in `cmd/trayapp/` follows this pattern: `tray_windows.go`
 (`//go:build windows`) wires the real `fyne.io/systray` menu (Open dashboard,

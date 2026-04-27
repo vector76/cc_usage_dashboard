@@ -59,19 +59,16 @@ later, headless scrape).
 Derived/cached state for the current and recent session and weekly windows. Maintained by
 the trayapp from `usage_events` + `quota_snapshots`.
 
-| Column          | Type      | Notes                                                |
-|-----------------|-----------|------------------------------------------------------|
-| id              | INTEGER PK|                                                      |
-| kind            | TEXT      | `session` \| `weekly`. (`session` = the rolling      |
-|                 |           | 5-hour "Current session" window in the Claude UI.)   |
-| started_at      | TIMESTAMP | First-use timestamp (session) or week boundary.      |
-| ends_at         | TIMESTAMP | Computed.                                            |
-| baseline_total  | REAL      | "% used" anchor at the most-recent in-window         |
-|                 |           | snapshot. Column name is legacy from the dollar-     |
-|                 |           | denominated era and may be renamed; values are now   |
-|                 |           | percentages (0–100).                                 |
-| baseline_source | TEXT      | Snapshot ID or `default` if assumed.                 |
-| closed          | INTEGER   | 0 while active, 1 once expired.                      |
+| Column               | Type      | Notes                                            |
+|----------------------|-----------|--------------------------------------------------|
+| id                   | INTEGER PK|                                                  |
+| kind                 | TEXT      | `session` \| `weekly`. (`session` = the rolling  |
+|                      |           | 5-hour "Current session" window in the Claude UI.) |
+| started_at           | TIMESTAMP | First-use timestamp (session) or week boundary.  |
+| ends_at              | TIMESTAMP | Computed.                                        |
+| baseline_percent_used| REAL      | "% used" anchor (0–100) at the most-recent in-window snapshot. |
+| baseline_source      | TEXT      | Snapshot ID or `default` if assumed.             |
+| closed               | INTEGER   | 0 while active, 1 once expired.                  |
 
 This table exists so historical windows can be queried efficiently for charts without
 recomputing from raw events every time.
@@ -103,6 +100,22 @@ event log, not a time-series.
 | estimated_cost    | REAL       | Dollar-equivalent the queue expected the job to cost. |
 | slack_at_release  | REAL       | The slack value the queue saw on its prior `/slack`. |
 | window_id         | INTEGER    | FK into `windows`. Which window the queue sized against. |
+
+### `tailer_offsets`
+
+Per-file resume state for the host JSONL tailer. Lets the trayapp pick up
+where it left off after a restart instead of re-parsing every transcript
+from byte zero.
+
+| Column      | Type         | Notes                                          |
+|-------------|--------------|------------------------------------------------|
+| file_path   | TEXT PK      | Absolute path of the JSONL file being tailed.  |
+| byte_offset | INTEGER      | Number of bytes consumed so far. Persisted on each batch insert. |
+| updated_at  | TIMESTAMP    | When the offset was last advanced.             |
+
+This table is purely operational state — it carries no usage data of its
+own. Wiping it forces a full re-tail (which is harmless because event
+inserts dedupe on `(session_id, message_id)`).
 
 ### `parse_errors`
 
@@ -146,6 +159,8 @@ hand when Anthropic updates rates.
 - `windows`: keep forever.
 - `slack_samples`: optional, default off. If on, retain 90 days.
 - `slack_releases`: keep forever. Volume is tiny (one row per released job).
+- `tailer_offsets`: keep forever; one row per transcript file ever tailed.
+  Volume scales with distinct transcript files (small).
 - `parse_errors`: retain 30 days, with a count-only summary kept indefinitely.
 
 ## Migrations

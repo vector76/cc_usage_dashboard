@@ -91,13 +91,13 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 	var baseline float64
 	var source string
 	if err := testStore.DB().QueryRow(
-		`SELECT baseline_total, baseline_source FROM windows WHERE id = ?`, windowID,
+		`SELECT baseline_percent_used, baseline_source FROM windows WHERE id = ?`, windowID,
 	).Scan(&baseline, &source); err != nil {
 		t.Fatalf("failed to read updated window: %v", err)
 	}
 
 	if baseline != second {
-		t.Errorf("expected baseline_total=%v after in-window snapshot, got %v", second, baseline)
+		t.Errorf("expected baseline_percent_used=%v after in-window snapshot, got %v", second, baseline)
 	}
 	if !strings.HasPrefix(source, "snapshot:") {
 		t.Errorf("expected baseline_source to start with 'snapshot:', got %q", source)

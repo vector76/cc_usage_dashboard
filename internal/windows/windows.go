@@ -16,8 +16,8 @@ type Window struct {
 	Kind           string // "session" or "weekly"
 	StartedAt      time.Time
 	EndsAt         time.Time
-	BaselineTotal  *float64 // Percent-used anchor (0–100) from the most-recent in-window snapshot.
-	BaselineSource string
+	BaselinePercentUsed *float64 // Percent-used anchor (0–100) from the most-recent in-window snapshot.
+	BaselineSource      string
 	Closed         bool
 }
 
@@ -120,7 +120,7 @@ func (e *Engine) correctBaselineFromSnapshots() error {
 		baselineSource := fmt.Sprintf("snapshot:%d", snapshotID)
 		slog.Debug("correcting baseline", "windowID", w.id, "newBaseline", baseline)
 		if _, err := e.db.Exec(`
-			UPDATE windows SET baseline_total = ?, baseline_source = ?
+			UPDATE windows SET baseline_percent_used = ?, baseline_source = ?
 			WHERE id = ?
 		`, baseline, baselineSource, w.id); err != nil {
 			return fmt.Errorf("failed to update window baseline: %w", err)
@@ -137,12 +137,12 @@ func (e *Engine) ensureSessionWindow() error {
 	// Get the most recent active session window
 	var window Window
 	err := e.db.QueryRow(`
-		SELECT id, started_at, ends_at, baseline_total, baseline_source
+		SELECT id, started_at, ends_at, baseline_percent_used, baseline_source
 		FROM windows
 		WHERE kind = 'session' AND closed = 0
 		ORDER BY started_at DESC
 		LIMIT 1
-	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselineTotal, &window.BaselineSource)
+	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselinePercentUsed, &window.BaselineSource)
 
 	if err == nil {
 		// Window exists. If it's still active, optionally re-anchor it on
@@ -193,7 +193,7 @@ func (e *Engine) ensureSessionWindow() error {
 
 	// Insert new window
 	_, err = e.db.Exec(`
-		INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
+		INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, baseline_source, closed)
 		VALUES (?, ?, ?, ?, ?, 0)
 	`, "session", store.FormatTime(startTime), store.FormatTime(endsAt), baseline, baselineSource)
 
@@ -211,12 +211,12 @@ func (e *Engine) ensureWeeklyWindow() error {
 	// Get the most recent active weekly window
 	var window Window
 	err := e.db.QueryRow(`
-		SELECT id, started_at, ends_at, baseline_total, baseline_source
+		SELECT id, started_at, ends_at, baseline_percent_used, baseline_source
 		FROM windows
 		WHERE kind = 'weekly' AND closed = 0
 		ORDER BY started_at DESC
 		LIMIT 1
-	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselineTotal, &window.BaselineSource)
+	`).Scan(&window.ID, &window.StartedAt, &window.EndsAt, &window.BaselinePercentUsed, &window.BaselineSource)
 
 	if err == nil {
 		// Window exists. Re-anchor on snapshot boundary if needed (see
@@ -260,7 +260,7 @@ func (e *Engine) ensureWeeklyWindow() error {
 
 	// Insert new window
 	_, err = e.db.Exec(`
-		INSERT INTO windows (kind, started_at, ends_at, baseline_total, baseline_source, closed)
+		INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, baseline_source, closed)
 		VALUES (?, ?, ?, ?, ?, 0)
 	`, "weekly", store.FormatTime(startTime), store.FormatTime(endsAt), baseline, baselineSource)
 
@@ -301,7 +301,7 @@ func (e *Engine) findFirstEventAfterGap(windowKind string) (time.Time, error) {
 }
 
 // findBaseline finds the baseline (latest known % used) for the given window
-// kind at or before t. Used to seed a new window's baseline_total when no
+// kind at or before t. Used to seed a new window's baseline_percent_used when no
 // in-window snapshot exists yet. Subsequent in-window snapshots refine the
 // value via correctBaselineFromSnapshots.
 func (e *Engine) findBaseline(kind string, t time.Time) (*float64, string, error) {
