@@ -168,6 +168,17 @@ func (e *Engine) ensureSessionWindow() error {
 		return fmt.Errorf("failed to query windows: %w", err)
 	}
 
+	// If the most recent snapshot reports the session as inactive, do not
+	// mint a phantom replacement window. Anthropic considers there to be no
+	// active session, and zero open session rows is a permitted state.
+	active, err := e.findMostRecentSessionActive()
+	if err != nil {
+		return err
+	}
+	if active != nil && !*active {
+		return nil
+	}
+
 	// Prefer the snapshot's authoritative reset time ("Resets in N hr M min"
 	// parsed by the userscript). Falls back to event-based detection only
 	// when no snapshot has supplied an end yet.
@@ -405,6 +416,31 @@ func (e *Engine) findSessionBoundary() (time.Time, error) {
 	}
 
 	return boundary, nil
+}
+
+// findMostRecentSessionActive reads session_active from the most recent
+// quota_snapshots row by observed_at. Returns (nil, nil) when the column is
+// NULL or no snapshots exist.
+func (e *Engine) findMostRecentSessionActive() (*bool, error) {
+	var active sql.NullInt64
+	err := e.db.QueryRow(`
+		SELECT session_active
+		FROM quota_snapshots
+		ORDER BY observed_at DESC
+		LIMIT 1
+	`).Scan(&active)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to query session_active: %w", err)
+	}
+
+	if !active.Valid {
+		return nil, nil
+	}
+	v := active.Int64 != 0
+	return &v, nil
 }
 
 // findWeeklyBoundary extracts the weekly window boundary from the most recent snapshot.
