@@ -115,6 +115,7 @@ func TestWeeklyWindowEndsFromSnapshot(t *testing.T) {
 		now.Add(-time.Hour), now.Add(-time.Hour), "test",
 		nil, nil,
 		nil, &weeklyEnds,
+		nil,
 		"{}",
 	)
 	if err != nil {
@@ -192,6 +193,7 @@ func TestWeeklyWindowOnSundayDoesNotExpireImmediately(t *testing.T) {
 		now, now, "userscript",
 		nil, nil,
 		&weekly, nil,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -366,6 +368,7 @@ func TestActiveWindowReanchorsToSnapshotBoundary(t *testing.T) {
 		now, now, "userscript",
 		nil, nil,
 		&weekly, &authoritativeEnds,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -415,6 +418,7 @@ func TestBaselineFromSnapshot(t *testing.T) {
 		now.Add(-2*time.Hour), now.Add(-2*time.Hour), "test",
 		&older, nil,
 		nil, nil,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("failed to insert older snapshot: %v", err)
@@ -425,6 +429,7 @@ func TestBaselineFromSnapshot(t *testing.T) {
 		now.Add(-1*time.Minute), now.Add(-1*time.Minute), "test",
 		&newer, nil,
 		nil, nil,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("failed to insert newer snapshot: %v", err)
@@ -503,6 +508,7 @@ func TestBaselineCorrection(t *testing.T) {
 		laterTime, laterTime, "test",
 		&newBaseline, nil,
 		nil, nil,
+		nil,
 		"{}",
 	)
 	if err != nil {

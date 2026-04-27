@@ -251,6 +251,7 @@ func TestInsertQuotaSnapshot(t *testing.T) {
 		"userscript",
 		floatPtr(25.0), timePtr(time.Now().Add(5*time.Hour)),
 		floatPtr(40.0), timePtr(time.Now().Add(7*24*time.Hour)),
+		nil,
 		`{"session_used": 25.0}`,
 	)
 
@@ -271,6 +272,48 @@ func TestInsertQuotaSnapshot(t *testing.T) {
 	}
 	if sessionUsed != 25.0 {
 		t.Errorf("expected 25.0, got %f", sessionUsed)
+	}
+}
+
+func TestInsertQuotaSnapshotSessionActive(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	cases := []struct {
+		name  string
+		input *bool
+		want  sql.NullInt64
+	}{
+		{"true", boolPtr(true), sql.NullInt64{Int64: 1, Valid: true}},
+		{"false", boolPtr(false), sql.NullInt64{Int64: 0, Valid: true}},
+		{"nil", nil, sql.NullInt64{Valid: false}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			observedAt := time.Now()
+			id, err := store.InsertQuotaSnapshot(
+				observedAt, observedAt,
+				"userscript",
+				nil, nil,
+				nil, nil,
+				tc.input,
+				"{}",
+			)
+			if err != nil {
+				t.Fatalf("InsertQuotaSnapshot failed: %v", err)
+			}
+
+			var got sql.NullInt64
+			if err := store.db.QueryRow(
+				`SELECT session_active FROM quota_snapshots WHERE id = ?`, id,
+			).Scan(&got); err != nil {
+				t.Fatalf("select failed: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("session_active: got %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -406,6 +449,10 @@ func createTestStore(t *testing.T) *Store {
 
 func floatPtr(f float64) *float64 {
 	return &f
+}
+
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 func timePtr(t time.Time) *time.Time {

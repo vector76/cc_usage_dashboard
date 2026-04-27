@@ -67,6 +67,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		req.SessionWindowEnds,
 		req.WeeklyUsed,
 		req.WeeklyWindowEnds,
+		nil,
 		string(rawJSON),
 	)
 
