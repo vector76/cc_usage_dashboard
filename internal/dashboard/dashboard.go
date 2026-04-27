@@ -33,6 +33,12 @@ type WindowState struct {
 	// of by the count of populated buckets, since GROUP BY only emits
 	// rows for buckets that have data.
 	BucketSecs int `json:"bucket_secs"`
+	// Hypothetical is true when no real open window backs this state and
+	// the handler synthesized a placeholder spanning [now, now+5h] so the
+	// UI has somewhere to project pace against. ID is 0 in that case and
+	// in-window Series/Volume are empty; pre-window history is still
+	// populated for the session view's 10h lookback.
+	Hypothetical bool `json:"hypothetical,omitempty"`
 }
 
 // UsedSeriesPoint is one observation of % used at a point in time, sourced
@@ -64,6 +70,10 @@ type State struct {
 	LastSnapshotAgeSeconds *float64     `json:"last_snapshot_age_seconds"`
 	ParseErrors24h         int64        `json:"parse_errors_24h"`
 	Paused                 bool         `json:"paused"`
+	// SessionActive is true when the windows table has a real open
+	// session row. The windows table is the single source of truth —
+	// this field is NOT read from quota_snapshots.session_active.
+	SessionActive bool `json:"session_active"`
 	// SlackReleaseRecommended mirrors the /slack endpoint's
 	// release_recommended bit so the dashboard status panel can show
 	// "release: yes/no" without a separate HTTP poll. Null if the slack
@@ -144,6 +154,7 @@ func (h *Handler) computeState() (*State, error) {
 		return nil, fmt.Errorf("session window: %w", err)
 	}
 	state.Session = session
+	state.SessionActive = session != nil && !session.Hypothetical
 
 	weekly, err := h.loadActiveWindow(db, "weekly")
 	if err != nil {
@@ -193,6 +204,9 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 		LIMIT 1
 	`, kind).Scan(&id, &startedAt, &endsAt, &baselineTotal)
 	if err == sql.ErrNoRows {
+		if kind == "session" {
+			return h.synthesizeHypotheticalSession(db)
+		}
 		return nil, nil
 	}
 	if err != nil {
@@ -234,6 +248,37 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 	ws.BucketSecs = bucketSecs
 
 	return ws, nil
+}
+
+// synthesizeHypotheticalSession builds a placeholder WindowState for the
+// session view when no real open session row exists in the windows table.
+// The synthesized window spans [now, now+5h] so the UI has a stable domain
+// to render; in-window Series/Volume are intentionally empty (there can be
+// no observations inside a window that has not begun in real life), but
+// the 10h pre-window snapshot history is still loaded so the user can see
+// the prior session(s) on the chart even without an active one.
+func (h *Handler) synthesizeHypotheticalSession(db *sql.DB) (*WindowState, error) {
+	now := h.now()
+	startedAt := now
+	endsAt := now.Add(5 * time.Hour)
+
+	historyStart := startedAt.Add(-10 * time.Hour)
+	series, err := h.loadUsedSeries(db, "session", historyStart, startedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	zero := 0.0
+	return &WindowState{
+		Kind:                "session",
+		StartedAt:           startedAt,
+		EndsAt:              endsAt,
+		BaselinePercentUsed: &zero,
+		Series:              series,
+		Volume:              []SeriesBucket{},
+		BucketSecs:          bucketSecsForKind("session"),
+		Hypothetical:        true,
+	}, nil
 }
 
 // bucketSecsForKind picks a bucket width that yields a readable number of

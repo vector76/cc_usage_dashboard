@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vector76/cc_usage_dashboard/internal/dashboard"
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 func TestDashboardIndexHTML(t *testing.T) {
@@ -102,6 +105,163 @@ func TestDashboardStateJSONShape(t *testing.T) {
 	}
 	if paused {
 		t.Error("expected paused=false on fresh server")
+	}
+}
+
+// fetchDashboardState issues GET /api/dashboard/state and decodes the
+// response into a dashboard.State. Fails the test on any non-200 or
+// decode error.
+func fetchDashboardState(t *testing.T, srv *Server) *dashboard.State {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/api/dashboard/state", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (body=%s)", w.Code, w.Body.String())
+	}
+	var s dashboard.State
+	if err := json.Unmarshal(w.Body.Bytes(), &s); err != nil {
+		t.Fatalf("decode state: %v\nbody=%s", err, w.Body.String())
+	}
+	return &s
+}
+
+// TestDashboardStateNoOpenSessionSynthesizesHypothetical covers properties
+// (a)–(d) from the bead: when the windows table has no open session row,
+// the response reports session_active=false and a hypothetical WindowState
+// pinned to the handler's injected clock, with BaselinePercentUsed=0 and
+// pre-window snapshot history loaded into Series for [now-10h, now].
+func TestDashboardStateNoOpenSessionSynthesizesHypothetical(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	srv.dashboardHandler.SetNow(func() time.Time { return now })
+
+	// Pre-window history: one snapshot inside the [now-10h, now] window
+	// (3h ago) and one well outside it (12h ago) to verify the bounds.
+	used := 42.5
+	if _, err := testStore.InsertQuotaSnapshot(
+		now.Add(-3*time.Hour), now.Add(-3*time.Hour), "userscript",
+		&used, nil, nil, nil, nil, "{}",
+	); err != nil {
+		t.Fatalf("insert in-history snapshot: %v", err)
+	}
+	out := 10.0
+	if _, err := testStore.InsertQuotaSnapshot(
+		now.Add(-12*time.Hour), now.Add(-12*time.Hour), "userscript",
+		&out, nil, nil, nil, nil, "{}",
+	); err != nil {
+		t.Fatalf("insert out-of-history snapshot: %v", err)
+	}
+
+	state := fetchDashboardState(t, srv)
+
+	// (a) session_active=false; Session present and Hypothetical=true.
+	if state.SessionActive {
+		t.Errorf("expected session_active=false, got true")
+	}
+	if state.Session == nil {
+		t.Fatal("expected synthesized hypothetical Session, got nil")
+	}
+	if !state.Session.Hypothetical {
+		t.Errorf("expected Session.Hypothetical=true, got false")
+	}
+
+	// (b) started_at and ends_at are exactly 5h apart and pinned to now.
+	if !state.Session.StartedAt.Equal(now) {
+		t.Errorf("StartedAt = %v, want %v", state.Session.StartedAt, now)
+	}
+	if !state.Session.EndsAt.Equal(now.Add(5 * time.Hour)) {
+		t.Errorf("EndsAt = %v, want %v", state.Session.EndsAt, now.Add(5*time.Hour))
+	}
+	if span := state.Session.EndsAt.Sub(state.Session.StartedAt); span != 5*time.Hour {
+		t.Errorf("EndsAt-StartedAt = %v, want 5h", span)
+	}
+
+	// (c) BaselinePercentUsed is 0.
+	if state.Session.BaselinePercentUsed == nil {
+		t.Fatal("expected BaselinePercentUsed pointer, got nil")
+	}
+	if *state.Session.BaselinePercentUsed != 0 {
+		t.Errorf("BaselinePercentUsed = %v, want 0", *state.Session.BaselinePercentUsed)
+	}
+
+	// (d) Series loaded from real snapshots in [now-10h, now]: only the
+	// 3h-ago point qualifies; the 12h-ago point falls outside the lookback.
+	if len(state.Session.Series) != 1 {
+		t.Fatalf("Series len = %d, want 1; got %+v", len(state.Session.Series), state.Session.Series)
+	}
+	pt := state.Session.Series[0]
+	if !pt.ObservedAt.Equal(now.Add(-3 * time.Hour)) {
+		t.Errorf("Series[0].ObservedAt = %v, want %v", pt.ObservedAt, now.Add(-3*time.Hour))
+	}
+	if pt.PercentUsed != used {
+		t.Errorf("Series[0].PercentUsed = %v, want %v", pt.PercentUsed, used)
+	}
+
+	// No points should fall inside the synthesized window itself.
+	for _, p := range state.Session.Series {
+		if !p.ObservedAt.Before(now) {
+			t.Errorf("Series point %v is at or after StartedAt=%v; in-window points must be empty",
+				p.ObservedAt, now)
+		}
+	}
+}
+
+// TestDashboardStateOpenSessionUnchanged covers property (e): when a real
+// open session window exists, session_active=true, the WindowState is not
+// hypothetical, and ID/StartedAt/EndsAt mirror the row in the windows
+// table.
+func TestDashboardStateOpenSessionUnchanged(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	srv.dashboardHandler.SetNow(func() time.Time { return now })
+
+	startedAt := now.Add(-1 * time.Hour)
+	endsAt := startedAt.Add(5 * time.Hour)
+	res, err := testStore.DB().Exec(`
+		INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, closed)
+		VALUES (?, ?, ?, ?, 0)
+	`, "session", store.FormatTime(startedAt), store.FormatTime(endsAt), 12.5)
+	if err != nil {
+		t.Fatalf("insert open session window: %v", err)
+	}
+	wantID, _ := res.LastInsertId()
+
+	state := fetchDashboardState(t, srv)
+
+	if !state.SessionActive {
+		t.Errorf("expected session_active=true with a real open window, got false")
+	}
+	if state.Session == nil {
+		t.Fatal("expected Session, got nil")
+	}
+	if state.Session.Hypothetical {
+		t.Errorf("expected Hypothetical=false for a real open window, got true")
+	}
+	if state.Session.ID != wantID {
+		t.Errorf("Session.ID = %d, want %d", state.Session.ID, wantID)
+	}
+	if !state.Session.StartedAt.Equal(startedAt) {
+		t.Errorf("Session.StartedAt = %v, want %v", state.Session.StartedAt, startedAt)
+	}
+	if !state.Session.EndsAt.Equal(endsAt) {
+		t.Errorf("Session.EndsAt = %v, want %v", state.Session.EndsAt, endsAt)
+	}
+	if state.Session.BaselinePercentUsed == nil || *state.Session.BaselinePercentUsed != 12.5 {
+		t.Errorf("BaselinePercentUsed = %v, want 12.5",
+			state.Session.BaselinePercentUsed)
+	}
+
+	// The JSON should also omit the hypothetical key entirely (omitempty).
+	req := httptest.NewRequest("GET", "/api/dashboard/state", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if strings.Contains(w.Body.String(), `"hypothetical"`) {
+		t.Errorf("expected hypothetical field absent from JSON for real window; body=%s", w.Body.String())
 	}
 }
 
