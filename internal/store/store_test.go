@@ -28,9 +28,107 @@ func TestOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("expected schema version 3, got %d", version)
+	if version != 4 {
+		t.Errorf("expected schema version 4, got %d", version)
 	}
+}
+
+func TestMigrateFromV3AddsSessionActive(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open memory DB: %v", err)
+	}
+	defer db.Close()
+
+	// Apply only migrations up through v3 to simulate an older database.
+	saved := migrations
+	defer func() { migrations = saved }()
+	migrations = saved[:3]
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("failed to apply v1-v3 migrations: %v", err)
+	}
+
+	// Confirm we're at v3 with no session_active column yet.
+	var version int
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 3 {
+		t.Fatalf("expected schema version 3, got %d", version)
+	}
+	if columnExists(t, db, "quota_snapshots", "session_active") {
+		t.Fatalf("session_active column should not exist before migration")
+	}
+
+	// Restore the full set and run remaining migrations.
+	migrations = saved
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("failed to apply v4 migration: %v", err)
+	}
+
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 4 {
+		t.Errorf("expected schema version 4 after migrating, got %d", version)
+	}
+	if !columnExists(t, db, "quota_snapshots", "session_active") {
+		t.Fatalf("session_active column missing after migration")
+	}
+
+	// Insert a row without session_active and confirm NULL is the default.
+	now := time.Now()
+	_, err = db.Exec(`
+		INSERT INTO quota_snapshots (observed_at, received_at, source, raw_json)
+		VALUES (?, ?, ?, ?)
+	`, FormatTime(now), FormatTime(now), "userscript", "{}")
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	var sessionActive sql.NullInt64
+	if err := db.QueryRow("SELECT session_active FROM quota_snapshots LIMIT 1").Scan(&sessionActive); err != nil {
+		t.Fatalf("select failed: %v", err)
+	}
+	if sessionActive.Valid {
+		t.Errorf("expected session_active to default to NULL, got %d", sessionActive.Int64)
+	}
+}
+
+func TestFreshDatabaseHasSessionActiveColumn(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open memory DB: %v", err)
+	}
+	defer db.Close()
+
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("ApplyMigrations failed: %v", err)
+	}
+	if !columnExists(t, db, "quota_snapshots", "session_active") {
+		t.Fatalf("session_active column missing on fresh database")
+	}
+}
+
+func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info failed: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan failed: %v", err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMigrations(t *testing.T) {

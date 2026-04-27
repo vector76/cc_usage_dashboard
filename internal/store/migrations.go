@@ -116,6 +116,14 @@ CREATE TABLE IF NOT EXISTS tailer_offsets (
 ALTER TABLE windows RENAME COLUMN baseline_total TO baseline_percent_used;
 `,
 	},
+	{
+		Version: 4,
+		Name:    "add_quota_snapshots_session_active",
+		// Nullable INTEGER; NULL means the field was not reported by the source.
+		SQL: `
+ALTER TABLE quota_snapshots ADD COLUMN session_active INTEGER;
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.
