@@ -56,6 +56,23 @@ Expected: every `*.test.js` file under `userscript/test/` reports
 `pass`. The Go `make test` target does **not** invoke this; CI runs it
 via `make ci`.
 
+### Continuity-flag edge cases
+
+The freshness-driven dedup, persistent userscript state,
+`continuous_with_prev` flag, write-time slide, and renderer
+simplification each ship with targeted unit and integration coverage.
+The expected test names below are the canonical reference; rename
+freely as long as the scenario is preserved.
+
+| Bead | Layer / file                                                       | Scenarios asserted                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|------|--------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 4    | `userscript/test/dedup.test.js` (`shouldSend`)                     | Frozen page → skip; percent change → send; reset-text tick with percent unchanged → send; limbo entry → send; limbo exit → send; limbo with "Last updated" decreasing → send; limbo with "Last updated" *increasing* → skip; limbo with "Last updated" parser returning null → skip; cold-start (no prior state) → send.                                                                                                                                                                     |
+| 5    | `userscript/test/continuity.test.js` (`decideContinuity`)          | Cold start → false; wall-clock gap > 15 min → false; within-threshold continuation → true; percent decrease → false; window-ends jump > 1 hr → false; window-ends drift within tolerance → true; limbo→active at percent 0 with small reset shift → true; active→limbo at non-zero usage → false (rule 3); active→limbo at zero usage with no big window jump → true; F5 within 1 min with plausible movement → true; F5 after > 15 min → false.                                              |
+| 6    | `internal/store/store_test.go` (`InsertQuotaSnapshot` slide)        | Start + 5 identical continuations collapse to 2 rows, the surviving row's `observed_at`/`received_at` are the latest arrival's, and `raw_json` is preserved from the FIRST continuation; differing `session_used` on a continuation suppresses the slide; an explicit-false continuation never collapses onto its predecessor (slide must not cross a start); each "match" field (`session_used`, `weekly_used`, `session_window_ends`, `weekly_window_ends`, `session_active`) individually suppresses the slide; cold DB inserts a fresh row regardless of the flag. |
+| 7    | `internal/dashboard/dashboard_test.go` and `userscript/test/grouping.test.js` (`groupPolylines`) | `loadUsedSeries` carries through `continuous_with_prev` for true / false / NULL rows (NULL coerces to false); fixture `[F,T,T,F,T]` yields two polylines of length 3 and 2; an only-continuations fixture across a 30-min `window_ends` drift yields a single polyline (no Δt sensitivity); a single point yields a single 1-element group rendered as a dot. |
+| 8    | `internal/consumption/consumption_test.go` (`percentConsumed`)     | A flag-signalled reset treats the post-reset value as a fresh contribution; a series of continuations across a synthetic > 10 min `*_window_ends` drift produces no spurious reset; a NULL flag mid-series is treated as start; the `windowMatchTolerance` constant and the `sameWindow` helper are gone.                                                                                                                                                                                    |
+| 9    | `internal/integration/e2e_test.go` (`TestE2E_ContinuityFlagEndToEnd`) | POST `continuous_with_prev=false` is visible in `GET /api/dashboard/state`; 4 identical follow-ups with `continuous_with_prev=true` collapse the DB to 2 rows while the dashboard reflects the latest arrival's time; a differing `session_used` follow-up inserts a 3rd row (slide suppressed); a `continuous_with_prev=false` follow-up whose values match the predecessor inserts a 4th row (slide must not cross a start). `s.metrics.SnapshotsReceived` increments per arrival, not per row. |
+
 ### Build verification
 
 ```bash
@@ -200,8 +217,20 @@ the database, which is authoritative.
       new `quota_snapshots` rows — the userscript no-ops off the usage page.
 - [ ] After running some Claude Code activity that moves the displayed
       percentages, a follow-up row appears within ~1 minute. (The
-      userscript dedupes on `(session_used, weekly_used)`, so identical-
-      value snapshots are intentionally skipped.)
+      userscript performs freshness-driven dedup, so identical-value
+      observations on a frozen page are intentionally skipped — see
+      `docs/userscript.md`. The 60-second backstop is gated by the
+      same dedup, so a frozen page produces no new rows.)
+- [ ] On an idle but actively-displayed page (percent unchanged, but the
+      "Resets in N min" text ticking down each minute), the row count
+      under `source='userscript'` stays flat while the most-recent row's
+      `received_at` and `observed_at` advance — the server-side write-time
+      slide is collapsing the identical-value continuations into the
+      single surviving plateau row.
+- [ ] After a tab refresh (F5), the next snapshot row carries
+      `continuous_with_prev = 0` (start), and the dashboard burn-down
+      polyline visibly breaks at that point rather than connecting
+      across the gap.
 - [ ] The page console has no `[claude-usage-snapshot]` warnings during
       a healthy run.
 - [ ] If the DOM changes and the script can't find quota nodes for >5

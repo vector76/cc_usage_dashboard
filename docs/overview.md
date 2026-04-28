@@ -40,6 +40,12 @@ This project aims to:
 1. **Record** every Claude Code invocation's token usage and dollar-equivalent cost,
    continuously, with no perturbation of the quota itself.
 2. **Visualize** burn-down for both the session and weekly windows, with historical trends.
+   The renderer connects observations into a polyline only when each observation's
+   `continuous_with_prev` flag is true; a `false` flag breaks the line. Because the
+   userscript also dedupes identical observations on the client side, **gaps in the
+   burn-down chart now mean a genuine absence of observation** (the page was closed,
+   the userscript was uninstalled, the source was offline) rather than a missing
+   poll on a stable plateau.
 3. **Report** consumption over a period: dollar-equivalent token cost plus
    percent-of-session and percent-of-weekly quota consumed (both can exceed 100%
    over a multi-window period). The user reconciles those numbers against their

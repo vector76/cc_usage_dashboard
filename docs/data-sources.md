@@ -90,6 +90,16 @@ A Tampermonkey/Violentmonkey userscript on `claude.ai/*` reads the dashboard's d
 quota numbers and POSTs them to the local server. See `docs/userscript.md` for
 the implementation plan.
 
+The userscript performs **freshness-driven dedup** on the client side: a POST
+is emitted only when at least one meaningful-change signal has fired since
+the last successful send (percent moved, "Resets in …" text changed, limbo
+appeared/disappeared, or — in limbo — the "Last updated" age decreased).
+Identical-value re-observations are intentionally suppressed; a 60-second
+backstop catches missed observer events but is gated by the same dedup, so
+stable plateaus produce no extra rows. Every POST also carries a
+`continuous_with_prev` boolean (see `docs/userscript.md`) the server uses
+for write-time plateau compaction.
+
 ### Pros
 
 - **Authoritative for baselines.** This is what Anthropic's UI shows, by definition.

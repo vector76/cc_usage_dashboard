@@ -55,6 +55,30 @@ insensitive). When found, the snapshot POST body includes
 absence encodes "unknown," not "active." See `docs/userscript.md` and
 `docs/data-sources.md`.
 
+**Cadence under limbo is sparse and freshness-driven, not periodic.**
+The userscript's freshness-driven dedup gate (see `docs/userscript.md`)
+emits only on a meaningful-change signal. Inside limbo the visible
+percent is frozen and the row text is constant ("Starts when a
+message is sent"), so the only signals that fire are the limbo
+text appearing or disappearing and — once the userscript is in limbo
+— a strict *decrease* in the parsed "Last updated" age, which
+indicates that claude.ai's own poll fetched a fresh page. Consequently
+any consumer that previously assumed a snapshot every backstop tick
+must instead treat the limbo observation stream as event-driven:
+an event happens when limbo is entered, an event happens each time
+a fresh poll lands, and an event happens when limbo is exited.
+There is no fixed interval.
+
+What reaches the DB is sparser still: the limbo-entered observation
+inserts a new row, but each subsequent fresh-poll observation
+typically matches every "match" field of the previous one, so the
+server-side write-time slide (`docs/data-model.md`) collapses them
+onto the existing row by refreshing its `observed_at`/`received_at`.
+A limbo run therefore tends to surface as a single row whose
+timestamps creep forward as fresh polls land, bracketed by the
+limbo-entered start and a continuity-flagged-false row when limbo
+exits.
+
 ### 2. Snapshot ingestion: persist tri-state to `quota_snapshots`
 
 The `/snapshot` handler accepts `session_active` as a nullable

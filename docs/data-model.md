@@ -107,6 +107,19 @@ The audit-trail rules:
 - `received_at` is refreshed so freshness queries
   (`last_snapshot_age_seconds`, slack-gate freshness) stay honest on
   a stable plateau.
+
+  Note the resulting **shift in semantics** for
+  `last_snapshot_age_seconds` on `GET /api/dashboard/state`: it is now
+  computed off the latest `received_at`, which is refreshed by either
+  a brand-new row OR an in-place slide of an identical continuation.
+  Because the userscript dedupes identical observations on the client
+  side (see `docs/userscript.md`) and the server slides any duplicates
+  that do arrive, the value reflects **time since the last
+  meaningful-change observation**, not userscript liveness. A long
+  value means "the page has been frozen" or "the userscript is not
+  running" — those are no longer distinguishable from this field
+  alone. UIs that need a pure liveness signal must use a different
+  source (e.g. process metrics).
 - `raw_json` is preserved as the original payload's audit artifact;
   it is not overwritten across slides.
 

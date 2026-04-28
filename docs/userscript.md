@@ -51,14 +51,78 @@ path is exactly `/settings/usage`. On that path:
 - **Persistent MutationObserver** on `document.body`, filtered to `aria-valuenow`
   attribute changes. Fires within milliseconds of claude.ai's own poll updating
   the DOM, even on backgrounded tabs.
-- **5-min `setInterval` backstop.** Catches the cases where the observer is torn
-  down by an SPA re-render, or the tab is throttled below the observer's
-  delivery cadence.
+- **60-second `setInterval` backstop.** Catches the cases where the observer is
+  torn down by an SPA re-render, or the tab is throttled below the observer's
+  delivery cadence. The shorter interval (vs. the previous 5 minutes) is now
+  affordable because freshness-driven dedup, below, prevents the backstop from
+  generating duplicate rows on a stable plateau.
 - **Initial sample on script start.**
 
-**No client-side dedup.** Identical-value observations are kept; the server stores
-every row so plateau duration is preserved. Read-time rollups (collapsing runs of
-identical values) are a query-side concern.
+### Freshness-driven dedup
+
+Every trigger runs the extracted observation through a pure decision function
+(`userscript/lib/dedup.js`, `shouldSend`) that only emits a POST when at least
+one **meaningful-change signal** has fired since the last successful send.
+Because every trigger goes through the same gate, the backstop is free to fire
+aggressively without producing duplicate rows.
+
+The four meaningful-change signals are:
+
+1. **Session percent (`aria-valuenow`) changed.** The bar visibly moved.
+2. **Verbatim "Resets in …" text changed.** Even when the percent is unchanged
+   the row text ticks down; this is how we capture pure time advancement
+   inside an active window.
+3. **Limbo text appeared or disappeared.** The row text matched
+   "Starts when a message is sent" on one side and not the other.
+4. **In limbo only**, `findLastUpdatedAgeMs` returned a value strictly *smaller*
+   than the persisted one — i.e. claude.ai's own poll fetched a fresh page.
+   Null on either side is "no information" and must not fire.
+
+**Why "Last updated" is excluded as a generic trigger.** The "Last updated:
+N minutes ago" indicator advances on pure wall-clock time even when nothing
+on the page has changed. Treating its tick as a meaningful change would
+defeat the entire dedup. It is consulted only inside limbo as the *decrease*
+signal — when its value drops, that's a positive sign of a fresh fetch
+landing, which is the only liveness evidence available while the visible
+numbers and the row text are frozen.
+
+### Persistent state
+
+The dedup and continuity rules need to compare the current observation to the
+last *successfully-sent* one, including across tab reloads and SPA route
+changes. State is persisted in `localStorage` under the versioned key
+`claude-usage-snapshot.state.v1`; see "Pure-JS helpers and the test harness"
+below for the version-key rationale and cold-start fallback.
+
+The record is written only after a successful POST, so an aborted send does
+not advance the anchor. The record carries the timestamp of the send, the
+percent, the verbatim reset text, the parsed `windowEndsMs`, the observed
+`session_active`, and the parsed `lastUpdatedAgeMs` — exactly the inputs the
+dedup and continuity rules consume.
+
+### `continuous_with_prev` flag on every POST
+
+Every snapshot body carries a boolean `continuous_with_prev` decided by
+`userscript/lib/continuity.js` (`decideContinuity`). It is `true` when the
+new observation can be linearly chained off the previous one and `false`
+when downstream consumers should treat it as the start of a fresh segment.
+The flag is `false` (start) when ANY of:
+
+1. No persisted state exists (cold start).
+2. Wall-clock gap from the previous send exceeds 15 minutes.
+3. Session percent decreased (indicates a window reset or a fresh page state).
+4. `session_window_ends` jumped by more than 1 hour (different window or a
+   corrupt prior reading). Only the session boundary is checked here; the
+   weekly boundary moves so rarely that drift is not a useful signal.
+
+Otherwise it is `true`. Note `session_active` flipping is *not* a separate
+start signal — the four rules above already cover every transition that
+matters. The constants are named (`WALL_CLOCK_GAP_MS`, `WINDOW_ENDS_JUMP_MS`)
+so they are tunable; the values listed are the current defaults.
+
+The server uses the flag for write-time plateau compaction (see
+`docs/data-model.md`) and the dashboard uses it to decide where to break the
+burn-down polyline (see `docs/overview.md`).
 
 ## Why `GM.xmlHttpRequest`, not `fetch()`
 
@@ -101,7 +165,8 @@ Content-Type: application/json
   "session_used": 6.0,
   "session_window_ends": "2026-04-25T19:02:11Z",
   "weekly_used": 23.0,
-  "weekly_window_ends": "2026-04-30T06:00:00Z"
+  "weekly_window_ends": "2026-04-30T06:00:00Z",
+  "continuous_with_prev": true
 }
 ```
 
@@ -133,8 +198,9 @@ The userscript must:
 
 - Not crash the page if the trayapp is unreachable. `GM.xmlHttpRequest` failures are
   swallowed with a console warning.
-- Not double-post the same snapshot. Hash the relevant fields and skip if unchanged
-  since the last successful post.
+- Not double-post on stable plateaus. The freshness-driven dedup (above)
+  handles this on the client side; the server's write-time slide
+  (`docs/data-model.md`) handles any duplicates that slip through.
 - Tolerate DOM changes. If the expected nodes are missing for >N seconds, post a
   `parse_error` payload to the local server (separate endpoint) so the trayapp can
   surface "userscript broke, please update" in the tray UI. The payload is a

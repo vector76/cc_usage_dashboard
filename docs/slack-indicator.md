@@ -151,8 +151,19 @@ corresponding headroom gate fails.
 ## Baseline freshness gate
 
 The gate passes iff a snapshot exists and is no older than `baseline_max_age`
-(default 8 minutes — userscript posts every 5 minutes, so this gives ~1.5×
-headroom for jitter). Missing snapshot fails the gate.
+(default 8 minutes). Missing snapshot fails the gate.
+
+The freshness clock reads the most-recent `quota_snapshots.received_at`,
+which the server's write-time slide (see `docs/data-model.md`) refreshes
+on every identical continuation as well as on net-new rows. Combined with
+the userscript's 60-second backstop and freshness-driven dedup (see
+`docs/userscript.md`), an active page that ticks its "Resets in …" text
+each minute keeps `received_at` well within the 8-minute window. A page
+that produces no meaningful change for longer than `baseline_max_age` —
+for example a deeply frozen limbo state with no fresh polls landing — is
+indistinguishable from "userscript stopped" by this gate alone, which is
+the conservative behaviour: the gate fails and `release_recommended`
+goes false.
 
 This is the only thing keeping `release_recommended` honest when the
 userscript stops posting (page closed, tampermonkey down, browser killed).

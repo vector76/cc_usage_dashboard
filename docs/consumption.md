@@ -17,19 +17,27 @@ which the dashboard doesn't model.
 ## Percent-consumed derivation
 
 The session and weekly numbers are the per-snapshot increases in
-`*_used` summed over the period. When the `*_window_ends` timestamp
-differs between two adjacent snapshots (i.e. the window reset between
-them), the new window contributes only `curr.used`; the unobserved
-tail of the prior window — between its last snapshot and the reset —
-is treated as zero. This under-reports if the prior session kept
-growing after the last snapshot, but in practice snapshots arrive
-right up to window end, so the missed tail is small.
+`*_used` summed over the period. The walker reads the explicit
+`continuous_with_prev` flag persisted on each snapshot row to decide
+whether two adjacent snapshots belong to the same window: a `true`
+flag means the later snapshot continues the prior window and
+contributes the non-negative delta; a `false` (or NULL) flag means
+the later snapshot is the start of a fresh segment, so the new
+window contributes only `curr.used`. The unobserved tail of the prior
+window — between its last snapshot and the reset — is treated as zero.
+This under-reports if the prior session kept growing after the last
+snapshot, but in practice snapshots arrive right up to window end, so
+the missed tail is small.
+
+NULL is treated as start (matching the bead-1 default), so snapshots
+written before migration v5 cannot be silently misclassified as
+continuations of an unrelated prior window.
 
 ```
 walk = [snapshot_at_or_before(period_start), ...snapshots in period]
 total = 0
 for prev, curr in pairs(walk):
-    if same_window(prev.ends, curr.ends):    # within 10 min tolerance
+    if curr.continuous_with_prev:        # explicit true; NULL is start
         total += max(0, curr.used - prev.used)
     else:
         total += curr.used
@@ -72,15 +80,18 @@ not bounded at 100.
   snapshot stream; an hour-long gap between snapshots gets attributed to
   whichever pair of snapshots brackets it. Periods with few snapshots
   under-report.
-- **Window-reset detection** treats two adjacent snapshots as belonging
-  to the same window when their `*_window_ends` values agree within 10
-  minutes. The userscript computes `window_ends` as
-  `Date.now() + minutesUntilReset`, so two snapshots in the same window
-  can drift by a few minutes between sends; actually-different windows
-  are at least multiple hours apart, so the generous tolerance is safe.
-  (The reanchor logic in `windows.reanchorIfStale` uses a tighter
-  2-minute tolerance because it only absorbs minute-rounded jitter on
-  the *same* reset boundary.)
+- **Window-reset detection** is now driven by the explicit
+  `continuous_with_prev` flag stored on each snapshot row, not by a
+  tolerance comparison on `*_window_ends`. The userscript decides the
+  flag at the source (cold start, > 15 min wall-clock gap, session
+  percent decrease, or `session_window_ends` jump > 1 hr → start;
+  otherwise continuation — see `docs/userscript.md`); the consumption
+  walker trusts the flag verbatim. The previous `windowMatchTolerance`
+  / `sameWindow` Δt heuristic in `internal/consumption/consumption.go`
+  is gone. (The reanchor logic in `windows.reanchorIfStale` still uses
+  a tighter 2-minute tolerance because it only absorbs minute-rounded
+  jitter on the *same* reset boundary; that is unrelated to
+  connectivity and unaffected by this change.)
 - **Unknown-model events** are still counted in `events_without_cost`
   and excluded from `consumed_usd_equivalent`. They have no effect on
   the percent numbers.
