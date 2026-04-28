@@ -43,13 +43,16 @@ type WindowState struct {
 
 // UsedSeriesPoint is one observation of % used at a point in time, sourced
 // from quota_snapshots within (or for the session chart, near) the window.
-// WindowEnds is the snapshot's reported reset time for this kind, so the
-// client can split the series into one polyline per window — without it,
-// the 15h session view would draw a single jagged line spanning resets.
+// WindowEnds is the snapshot's reported reset time for this kind; the
+// client still uses it for the pace diagonal, slack-zone polygon, and
+// right-edge labelling. ContinuousWithPrev drives polyline grouping: a
+// false value (including the NULL→false coercion) starts a new polyline,
+// so resets show as a gap in the 15h session view.
 type UsedSeriesPoint struct {
-	ObservedAt  time.Time  `json:"observed_at"`
-	PercentUsed float64    `json:"percent_used"`
-	WindowEnds  *time.Time `json:"window_ends,omitempty"`
+	ObservedAt         time.Time  `json:"observed_at"`
+	PercentUsed        float64    `json:"percent_used"`
+	WindowEnds         *time.Time `json:"window_ends,omitempty"`
+	ContinuousWithPrev bool       `json:"continuous_with_prev"`
 }
 
 // SeriesBucket is one bucket of summed consumption. Width is set by the
@@ -83,10 +86,11 @@ type State struct {
 
 // Handler serves the dashboard UI and state endpoint.
 type Handler struct {
-	store     *store.Store
-	slackCalc *slack.Calculator
-	now       func() time.Time
-	indexHTML []byte
+	store      *store.Store
+	slackCalc  *slack.Calculator
+	now        func() time.Time
+	indexHTML  []byte
+	groupingJS []byte
 }
 
 func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
@@ -94,11 +98,16 @@ func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dashboard: failed to load index.html: %w", err)
 	}
+	groupingJS, err := fs.ReadFile(staticFS, "static/grouping.js")
+	if err != nil {
+		return nil, fmt.Errorf("dashboard: failed to load grouping.js: %w", err)
+	}
 	return &Handler{
-		store:     s,
-		slackCalc: sc,
-		now:       func() time.Time { return time.Now().UTC() },
-		indexHTML: html,
+		store:      s,
+		slackCalc:  sc,
+		now:        func() time.Time { return time.Now().UTC() },
+		indexHTML:  html,
+		groupingJS: groupingJS,
 	}, nil
 }
 
@@ -112,8 +121,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", h.handleIndex)
 	mux.HandleFunc("GET /dashboard", h.handleIndex)
 	mux.HandleFunc("GET /api/dashboard/state", h.handleState)
+	mux.HandleFunc("GET /grouping.js", h.handleGroupingJS)
 	mux.HandleFunc("GET /favicon.png", h.handleFavicon)
 	mux.HandleFunc("GET /favicon.ico", h.handleFavicon)
+}
+
+func (h *Handler) handleGroupingJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(h.groupingJS)
 }
 
 func (h *Handler) handleFavicon(w http.ResponseWriter, r *http.Request) {
@@ -335,8 +351,9 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 // loadUsedSeries returns the per-snapshot %used time series for a window.
 // Reads session_used+session_window_ends or weekly_used+weekly_window_ends
 // depending on kind. Empty slice when no matching snapshots exist; never
-// returns nil. WindowEnds is included so the client can split the polyline
-// at session resets when rendering the 15h session view.
+// returns nil. ContinuousWithPrev is the snapshot's continuity flag (NULL
+// coerces to false), which the client uses to split the polyline at
+// session resets when rendering the 15h session view.
 func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time.Time) ([]UsedSeriesPoint, error) {
 	var usedCol, endsCol string
 	switch kind {
@@ -349,7 +366,7 @@ func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time
 	}
 
 	query := fmt.Sprintf(`
-		SELECT observed_at, %s, %s
+		SELECT observed_at, %s, %s, continuous_with_prev
 		FROM quota_snapshots
 		WHERE observed_at >= ? AND observed_at < ? AND %s IS NOT NULL
 		ORDER BY observed_at
@@ -364,12 +381,16 @@ func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time
 	for rows.Next() {
 		var p UsedSeriesPoint
 		var ends sql.NullTime
-		if err := rows.Scan(&p.ObservedAt, &p.PercentUsed, &ends); err != nil {
+		var cwp sql.NullBool
+		if err := rows.Scan(&p.ObservedAt, &p.PercentUsed, &ends, &cwp); err != nil {
 			return nil, err
 		}
 		if ends.Valid {
 			t := ends.Time
 			p.WindowEnds = &t
+		}
+		if cwp.Valid {
+			p.ContinuousWithPrev = cwp.Bool
 		}
 		out = append(out, p)
 	}
@@ -406,4 +427,3 @@ func (h *Handler) parseErrors24h(db *sql.DB, now time.Time) (int64, error) {
 	}
 	return count, nil
 }
-

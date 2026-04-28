@@ -49,6 +49,7 @@
   </div>
 </section>
 
+<script src="/grouping.js"></script>
 <script>
 function fmt(x, d) {
   if (x == null || (typeof x === "number" && !isFinite(x))) return "—";
@@ -176,7 +177,8 @@ function renderStatus(s) {
 //   - Solid blue line(s): actual % remaining over time, computed as
 //     100 - percent_used from each snapshot in win.series. With an
 //     extended domain the curve is split into one polyline per session
-//     (grouped by snapshot's window_ends), so resets show as a gap.
+//     (grouped by snapshot's continuous_with_prev flag), so resets
+//     show as a gap.
 //   - Volume bars: per-bucket sum of cost_usd_equivalent across the full
 //     domain. Y of the volume panel is auto-scaled to the largest bar.
 //   - Vertical tick at `start` marks the current window's left edge when
@@ -283,48 +285,20 @@ function renderBurnDown(svgID, win, opts) {
     "stroke-dasharray": "3 3"
   }));
 
-  // Observed % remaining series, grouped into one polyline per session.
-  // Two snapshots are considered "same session" when their window_ends
-  // agree within WINDOW_MATCH_TOLERANCE_MS (10 min). Userscript computes
-  // window_ends as `Date.now() + minutesUntilReset` and re-reads
-  // "Resets in X hr X min" from the DOM (which Anthropic refreshes on a
-  // few-minute cadence), so adjacent same-session snapshots can drift
-  // several minutes; actually-different windows are 5h+ apart, so a
-  // generous tolerance has no false-merge risk. Mirrors sameWindow() in
-  // internal/consumption/consumption.go.
-  const WINDOW_MATCH_TOLERANCE_MS = 10 * 60 * 1000;
+  // Observed % remaining series. Grouping into one polyline per session
+  // is delegated to groupPolylines() (see static/grouping.js): a point
+  // starts a new polyline whenever its continuous_with_prev flag is not
+  // strictly true. Single-point groups render as small markers.
   const series = (win.series || []).filter(p => {
     const t = new Date(p.observed_at).getTime();
     return t >= domainStart && t < domainEnd;
   });
 
   if (series.length > 0) {
-    const groups = [];
-    let cur = null;
-    for (const p of series) {
-      const we = p.window_ends ? new Date(p.window_ends).getTime() : null;
-      let sameAsPrev = false;
-      if (cur) {
-        const prevWe = cur.windowEndsMs;
-        if (we == null || prevWe == null) {
-          // Missing hint shouldn't manufacture a phantom reset; treat
-          // adjacent snapshots as same-session in that case.
-          sameAsPrev = true;
-        } else {
-          sameAsPrev = Math.abs(we - prevWe) <= WINDOW_MATCH_TOLERANCE_MS;
-        }
-      }
-      if (!sameAsPrev) {
-        cur = { windowEndsMs: we, points: [] };
-        groups.push(cur);
-      }
-      cur.points.push(p);
-    }
+    const groups = groupPolylines(series);
     for (const g of groups) {
-      if (g.points.length === 1) {
-        // A single observation has no line; render just a small marker
-        // so it's not invisible.
-        const p = g.points[0];
+      if (g.length === 1) {
+        const p = g[0];
         svg.appendChild(el("circle", {
           cx: sx(new Date(p.observed_at).getTime()),
           cy: syPct(100 - p.percent_used),
@@ -332,7 +306,7 @@ function renderBurnDown(svgID, win, opts) {
         }));
         continue;
       }
-      const pts = g.points.map(p =>
+      const pts = g.map(p =>
         `${sx(new Date(p.observed_at).getTime())},${syPct(100 - p.percent_used)}`
       ).join(" ");
       svg.appendChild(el("polyline", { points: pts, fill: "none", stroke: "#06c", "stroke-width": "2" }));
