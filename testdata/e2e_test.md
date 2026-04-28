@@ -225,6 +225,72 @@ kill $SERVER_PID
 - Query returns `source='tailer'`, `reason='malformed JSON line'`, and the
   original payload verbatim
 
+## Scenario 7: Continuity flag end-to-end
+
+Go test: `TestE2E_ContinuityFlagEndToEnd`
+
+```bash
+# Start server
+./trayapp &
+SERVER_PID=$!
+sleep 1
+
+# 1) Explicit start: continuous_with_prev=false anchors a new plateau
+curl -X POST http://localhost:27812/snapshot -H "Content-Type: application/json" -d '{
+  "observed_at": "2026-04-01T12:00:00Z", "source": "userscript",
+  "session_used": 5.0, "session_window_ends": "2026-04-01T17:00:00Z",
+  "continuous_with_prev": false
+}'
+
+# 2) Four identical follow-ups with continuous_with_prev=true. The first
+#    inserts a fresh continuation row (a start cannot be slid onto); the
+#    remaining three slide that row's observed_at forward in place.
+for i in 1 2 3 4; do
+  curl -X POST http://localhost:27812/snapshot -H "Content-Type: application/json" -d "{
+    \"observed_at\": \"2026-04-01T12:0${i}:00Z\", \"source\": \"userscript\",
+    \"session_used\": 5.0, \"session_window_ends\": \"2026-04-01T17:00:00Z\",
+    \"continuous_with_prev\": true
+  }"
+done
+
+# 3) A different session_used with continuous_with_prev=true breaks the
+#    plateau — the slide check sees a field mismatch and inserts.
+curl -X POST http://localhost:27812/snapshot -H "Content-Type: application/json" -d '{
+  "observed_at": "2026-04-01T12:05:00Z", "source": "userscript",
+  "session_used": 7.0, "session_window_ends": "2026-04-01T17:00:00Z",
+  "continuous_with_prev": true
+}'
+
+# 4) continuous_with_prev=false with values that match the previous row.
+#    The slide path is never entered, so a fresh row is inserted.
+curl -X POST http://localhost:27812/snapshot -H "Content-Type: application/json" -d '{
+  "observed_at": "2026-04-01T12:06:00Z", "source": "userscript",
+  "session_used": 7.0, "session_window_ends": "2026-04-01T17:00:00Z",
+  "continuous_with_prev": false
+}'
+
+# Verify DB row counts and the dashboard state response
+sqlite3 usage.db "SELECT COUNT(*) FROM quota_snapshots;"
+curl http://localhost:27812/api/dashboard/state | jq '.session.series[].continuous_with_prev'
+curl http://localhost:27812/metrics | grep snapshots_received_total
+
+# Cleanup
+kill $SERVER_PID
+```
+
+**Expected:**
+- After step 1: 1 row, `continuous_with_prev=0`. The dashboard `session.series`
+  has a single point with `continuous_with_prev=false`.
+- After step 2: 2 rows (the start plus one slid continuation). The
+  continuation row's `observed_at` equals the most recent arrival's
+  `observed_at`. The series surfaces `[false, true]`, and the second
+  point's `observed_at` matches the latest arrival.
+- After step 3: 3 rows — the slide is suppressed by the field mismatch.
+- After step 4: 4 rows — a `continuous_with_prev=false` arrival cannot
+  slide onto a start.
+- `snapshots_received_total` reaches 7 (one increment per arrival,
+  regardless of whether the row was inserted or slid).
+
 ## Manual Verification (Windows host only)
 
 The following items require Windows and are not covered by the Go suite:

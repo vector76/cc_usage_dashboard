@@ -7,15 +7,18 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/vector76/cc_usage_dashboard/internal/config"
+	"github.com/vector76/cc_usage_dashboard/internal/dashboard"
 	"github.com/vector76/cc_usage_dashboard/internal/server"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
@@ -500,5 +503,167 @@ func TestE2E_ParseErrorRoundTrip(t *testing.T) {
 	}
 	if gotPayload != payload {
 		t.Errorf("payload=%q, want %q", gotPayload, payload)
+	}
+}
+
+// Scenario 7: the continuous_with_prev flag round-trips through the full
+// pipeline. POST /snapshot persists it, the store's plateau-slide logic
+// collapses identical continuations onto a single row, and GET
+// /api/dashboard/state surfaces the flag (and the latest arrival's
+// timestamp on the slid row). The snapshots_received_total metric counts
+// arrivals, not stored rows.
+func TestE2E_ContinuityFlagEndToEnd(t *testing.T) {
+	env := newTestEnv(t, "")
+
+	fixed := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	env.srv.SetNow(func() time.Time { return fixed })
+	env.srv.WindowsEngine().SetNow(func() time.Time { return fixed })
+
+	const (
+		plateauUsed = 5.0
+		shiftedUsed = 7.0
+	)
+	sessionEnds := fixed.Add(5 * time.Hour)
+
+	mkSnap := func(observedAt time.Time, used float64, cwp *bool) map[string]any {
+		snap := map[string]any{
+			"observed_at":         observedAt.Format(time.RFC3339Nano),
+			"source":              "userscript",
+			"session_used":        used,
+			"session_window_ends": sessionEnds.Format(time.RFC3339Nano),
+		}
+		if cwp != nil {
+			snap["continuous_with_prev"] = *cwp
+		}
+		return snap
+	}
+	post := func(label string, body map[string]any) {
+		t.Helper()
+		w := env.do(t, "POST", "/snapshot", body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d body=%s", label, w.Code, w.Body.String())
+		}
+	}
+	countRows := func() int {
+		t.Helper()
+		var n int
+		if err := env.store.DB().QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&n); err != nil {
+			t.Fatalf("count quota_snapshots: %v", err)
+		}
+		return n
+	}
+	getSeries := func() []dashboard.UsedSeriesPoint {
+		t.Helper()
+		w := env.do(t, "GET", "/api/dashboard/state", nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /api/dashboard/state: status=%d body=%s", w.Code, w.Body.String())
+		}
+		var st dashboard.State
+		if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+			t.Fatalf("decode state: %v", err)
+		}
+		if st.Session == nil {
+			t.Fatalf("dashboard state missing session window: %s", w.Body.String())
+		}
+		return st.Session.Series
+	}
+
+	tr := func(b bool) *bool { return &b }
+
+	// Step 1: an explicit start (continuous_with_prev: false) lands a single
+	// row in quota_snapshots with the flag preserved as 0, and that flag is
+	// surfaced through the dashboard state response.
+	post("snap start", mkSnap(fixed, plateauUsed, tr(false)))
+
+	if got := countRows(); got != 1 {
+		t.Fatalf("after start: rows=%d, want 1", got)
+	}
+	var startCWP sql.NullInt64
+	if err := env.store.DB().QueryRow(
+		`SELECT continuous_with_prev FROM quota_snapshots ORDER BY id`,
+	).Scan(&startCWP); err != nil {
+		t.Fatalf("read start cwp: %v", err)
+	}
+	if !startCWP.Valid || startCWP.Int64 != 0 {
+		t.Errorf("start row continuous_with_prev=%v, want valid 0", startCWP)
+	}
+	pts := getSeries()
+	if len(pts) != 1 {
+		t.Fatalf("series after start: len=%d, want 1", len(pts))
+	}
+	if pts[0].ContinuousWithPrev {
+		t.Errorf("series[0].continuous_with_prev=true, want false (start row)")
+	}
+
+	// Step 2: four identical follow-ups marked continuous_with_prev:true.
+	// The first slides nothing (the latest row is an explicit start) and
+	// inserts a fresh continuation row; the remaining three slide that row
+	// forward in place. Final shape: 2 rows total, with row 2's observed_at
+	// equal to the most recent arrival.
+	var lastObs time.Time
+	for i := 1; i <= 4; i++ {
+		obs := fixed.Add(time.Duration(i) * time.Minute)
+		lastObs = obs
+		post(fmt.Sprintf("snap follow-up %d", i), mkSnap(obs, plateauUsed, tr(true)))
+	}
+	if got := countRows(); got != 2 {
+		t.Fatalf("after 4 follow-ups: rows=%d, want 2 (start + slid continuation)", got)
+	}
+	var (
+		row2Obs time.Time
+		row2CWP sql.NullInt64
+	)
+	if err := env.store.DB().QueryRow(
+		`SELECT observed_at, continuous_with_prev FROM quota_snapshots ORDER BY id LIMIT 1 OFFSET 1`,
+	).Scan(&row2Obs, &row2CWP); err != nil {
+		t.Fatalf("read row 2: %v", err)
+	}
+	if !row2Obs.Equal(lastObs) {
+		t.Errorf("row 2 observed_at=%v, want %v (slid forward to latest arrival)", row2Obs, lastObs)
+	}
+	if !row2CWP.Valid || row2CWP.Int64 != 1 {
+		t.Errorf("row 2 continuous_with_prev=%v, want valid 1", row2CWP)
+	}
+	pts = getSeries()
+	if len(pts) != 2 {
+		t.Fatalf("series after follow-ups: len=%d, want 2", len(pts))
+	}
+	if pts[0].ContinuousWithPrev {
+		t.Errorf("series[0].continuous_with_prev=true, want false (start row)")
+	}
+	if !pts[1].ContinuousWithPrev {
+		t.Errorf("series[1].continuous_with_prev=false, want true (continuation)")
+	}
+	if !pts[1].ObservedAt.Equal(lastObs) {
+		t.Errorf("series[1].observed_at=%v, want %v (latest arrival)", pts[1].ObservedAt, lastObs)
+	}
+
+	// Step 3: an arrival with continuous_with_prev:true but a *different*
+	// session_used breaks the plateau — the slide check sees mismatched
+	// fields and falls through to a normal insert.
+	post("snap shifted", mkSnap(fixed.Add(5*time.Minute), shiftedUsed, tr(true)))
+	if got := countRows(); got != 3 {
+		t.Fatalf("after value shift: rows=%d, want 3 (slide suppressed by mismatch)", got)
+	}
+
+	// Step 4: an arrival with continuous_with_prev:false whose values
+	// happen to match the previous row. The slide path runs only for
+	// continuous_with_prev:true arrivals, so a fresh row is inserted —
+	// a start always anchors, regardless of value match.
+	post("snap restart", mkSnap(fixed.Add(6*time.Minute), shiftedUsed, tr(false)))
+	if got := countRows(); got != 4 {
+		t.Fatalf("after restart: rows=%d, want 4 (slide must not cross a start)", got)
+	}
+
+	// The metric counts arrivals, not stored rows: 1 start + 4 follow-ups +
+	// 1 value shift + 1 restart = 7 POSTs. Match the full Prometheus line
+	// to avoid an accidental prefix match against e.g. "...total 70".
+	w := env.do(t, "GET", "/metrics", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /metrics: status=%d body=%s", w.Code, w.Body.String())
+	}
+	const wantLine = "snapshots_received_total 7\n"
+	if !strings.Contains(w.Body.String(), wantLine) {
+		t.Errorf("/metrics missing %q in body:\n%s", wantLine, w.Body.String())
 	}
 }
