@@ -75,7 +75,11 @@ The four meaningful-change signals are:
 3. **Limbo text appeared or disappeared.** The row text matched
    "Starts when a message is sent" on one side and not the other.
 4. **In limbo only**, `findLastUpdatedAgeMs` returned a value strictly *smaller*
-   than the persisted one — i.e. claude.ai's own poll fetched a fresh page.
+   than the most recently *observed* one — i.e. claude.ai's own poll fetched
+   a fresh page. The reference is a rolling in-memory counter updated on
+   every DOM read (whether or not we sent), not the last-sent age, because
+   the last-sent age pins to its floor of 0 once a send lands while the
+   page shows "just now" and would self-trap the trigger forever after.
    Null on either side is "no information" and must not fire.
 
 **Why "Last updated" is excluded as a generic trigger.** The "Last updated:
@@ -96,9 +100,11 @@ below for the version-key rationale and cold-start fallback.
 
 The record is written only after a successful POST, so an aborted send does
 not advance the anchor. The record carries the timestamp of the send, the
-percent, the verbatim reset text, the parsed `windowEndsMs`, the observed
-`session_active`, and the parsed `lastUpdatedAgeMs` — exactly the inputs the
-dedup and continuity rules consume.
+percent, the verbatim reset text, the parsed `windowEndsMs`, and the
+observed `session_active`. The "Last updated" age is *not* persisted — it
+lives only in a rolling in-memory counter for the limbo decrease trigger,
+because anchoring it to the last-sent state self-traps once the trigger
+ages-down to zero.
 
 ### `continuous_with_prev` flag on every POST
 

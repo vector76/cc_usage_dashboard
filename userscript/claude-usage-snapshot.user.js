@@ -44,6 +44,14 @@
     let domFirstMissingAt = null;
     let dispatchTimer = null;
 
+    // Rolling reference for the limbo "Last updated decrease" trigger.
+    // Updated on every DOM read regardless of whether we sent, because
+    // the staleness counter can roll back (claude.ai re-poll) between
+    // two successive reads even when nothing else changes — and because
+    // anchoring this to last-sent state self-traps once an "age=0" send
+    // lands. Lost on page reload; cold-start handles re-establishment.
+    let lastObservedAgeMs = null;
+
     // ---------- persistent state ----------
 
     // Mirror of userscript/lib/state.js — same source of truth, inlined
@@ -66,14 +74,13 @@
                 lastWindowEndsMs: parsed.lastWindowEndsMs,
             };
             if (parsed.lastSessionActive !== undefined) result.lastSessionActive = parsed.lastSessionActive;
-            if (parsed.lastUpdatedAgeMs !== undefined) result.lastUpdatedAgeMs = parsed.lastUpdatedAgeMs;
             return result;
         } catch (_) {
             return null;
         }
     }
 
-    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive, lastUpdatedAgeMs }) {
+    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive }) {
         try {
             const storage = (typeof globalThis !== 'undefined' && globalThis.localStorage) || null;
             if (!storage) return;
@@ -84,7 +91,6 @@
                 lastWindowEndsMs: windowEndsMs,
             };
             if (sessionActive !== undefined) record.lastSessionActive = sessionActive;
-            if (lastUpdatedAgeMs !== undefined) record.lastUpdatedAgeMs = lastUpdatedAgeMs;
             storage.setItem(STATE_STORAGE_KEY, JSON.stringify(record));
         } catch (_) {
             // Persistence is best-effort.
@@ -115,7 +121,11 @@
 
     // ---------- dedup decision (mirror of userscript/lib/dedup.js) ----------
 
-    function shouldSend(observation, prevState) {
+    // The parameter intentionally shadows the module-level
+    // `lastObservedAgeMs` so the body is textually identical to the
+    // single source of truth in userscript/lib/dedup.js; the shadow is
+    // local to this function and the module-level binding is unchanged.
+    function shouldSend(observation, prevState, lastObservedAgeMs) {
         if (!prevState) return 'send';
 
         if (observation.sessionUsed !== prevState.lastPercent) return 'send';
@@ -129,13 +139,17 @@
         if (nowLimbo) {
             // While in limbo the visible numbers don't move, so a strict
             // *decrease* in "Last updated" age is our only signal that a
-            // fresh poll landed. Null on either side is "no information"
-            // and must not fire. We deliberately do NOT fire on the age
-            // *incrementing* — that advances on pure wall-clock time and
-            // would re-introduce the spam dedup is meant to prevent.
+            // fresh poll landed. Compare against the rolling
+            // most-recently-observed age (not the persisted last-sent
+            // age, which would self-trap at its floor of 0). Null on
+            // either side is "no information" and must not fire. We do
+            // NOT fire on the age incrementing — that advances on pure
+            // wall-clock time and would re-introduce the spam dedup is
+            // meant to prevent.
             const cur = observation.lastUpdatedAgeMs;
-            const prev = prevState.lastUpdatedAgeMs;
-            if (cur != null && prev != null && cur < prev) return 'send';
+            if (cur != null && lastObservedAgeMs != null && cur < lastObservedAgeMs) {
+                return 'send';
+            }
         }
 
         return 'skip';
@@ -426,7 +440,17 @@
         domFirstMissingAt = null;
 
         const prevState = loadState();
-        if (shouldSend(extracted, prevState) === 'skip') return;
+        const decision = shouldSend(extracted, prevState, lastObservedAgeMs);
+
+        // Update the rolling observed-age *after* the comparison, so
+        // the next call sees this read as "previous." Update on every
+        // read regardless of decision; otherwise we'd never detect a
+        // staleness rollback during a long limbo plateau.
+        if (extracted.lastUpdatedAgeMs != null) {
+            lastObservedAgeMs = extracted.lastUpdatedAgeMs;
+        }
+
+        if (decision === 'skip') return;
 
         const windowEndsMs = extracted.sessionWindowEnds ? Date.parse(extracted.sessionWindowEnds) : null;
         const nowMs = Date.now();
@@ -449,7 +473,6 @@
                 resetText: extracted.resetText,
                 windowEndsMs,
                 sessionActive: extracted.sessionActive,
-                lastUpdatedAgeMs: extracted.lastUpdatedAgeMs,
             });
         });
     }
