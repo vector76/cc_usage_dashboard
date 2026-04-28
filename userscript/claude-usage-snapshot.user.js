@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.5.0
+// @version      0.6.0
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
