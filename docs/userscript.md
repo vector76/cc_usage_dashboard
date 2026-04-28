@@ -148,6 +148,26 @@ A single file `userscript/claude-usage-snapshot.user.js` in the repo. The user i
 once via their userscript manager. Auto-update can be configured via `@updateURL` and
 `@downloadURL` headers pointing at the file's GitHub raw URL — optional, off by default.
 
+## Pure-JS helpers and the test harness
+
+Pure-JS helpers (parsing, persistent state, dedup) live as CommonJS modules under
+`userscript/lib/` so `node --test` can `require()` them directly. The userscript itself
+is a single Tampermonkey-loaded IIFE with no build step, so each helper's function
+bodies are also **inlined** into `claude-usage-snapshot.user.js` alongside the
+existing utilities. The lib copy is the source of truth; the inlined copy is what
+runs on `claude.ai`. A header comment in the inlined block points at the lib file so
+the duplication is discoverable; edit both together. This keeps the test harness
+simple and the userscript install footprint a single file. If the helper count grows
+enough that the duplication becomes painful, a small concat step (Make target that
+prepends lib bodies into the user.js) is a fine future move.
+
+Persistent state lives under `localStorage` key `claude-usage-snapshot.state.v1`.
+The version suffix is intentional: a future schema change is handled by picking a
+new key, at which point the old key is naturally treated as absent (cold start).
+`loadState()` returns `null` on any read failure — corrupt JSON, missing fields,
+storage exceptions, or a value under a different version — so the dispatch path
+never throws on a poisoned record.
+
 ## Limitations (deliberate)
 
 - Only fires when the user has the page open. This is not a bug; it's the design.

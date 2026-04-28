@@ -43,6 +43,48 @@
     let domFirstMissingAt = null;
     let dispatchTimer = null;
 
+    // ---------- persistent state ----------
+
+    // Mirror of userscript/lib/state.js — same source of truth, inlined
+    // here so Tampermonkey runs without a build step. Edit both together.
+    const STATE_STORAGE_KEY = 'claude-usage-snapshot.state.v1';
+
+    function loadState() {
+        try {
+            const storage = (typeof globalThis !== 'undefined' && globalThis.localStorage) || null;
+            if (!storage) return null;
+            const raw = storage.getItem(STATE_STORAGE_KEY);
+            if (raw == null) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== 'object') return null;
+            if (typeof parsed.lastSentAtMs !== 'number') return null;
+            return {
+                lastSentAtMs: parsed.lastSentAtMs,
+                lastPercent: parsed.lastPercent,
+                lastResetText: parsed.lastResetText,
+                lastWindowEndsMs: parsed.lastWindowEndsMs,
+            };
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs }) {
+        try {
+            const storage = (typeof globalThis !== 'undefined' && globalThis.localStorage) || null;
+            if (!storage) return;
+            const record = {
+                lastSentAtMs: sentAtMs,
+                lastPercent: percent,
+                lastResetText: resetText,
+                lastWindowEndsMs: windowEndsMs,
+            };
+            storage.setItem(STATE_STORAGE_KEY, JSON.stringify(record));
+        } catch (_) {
+            // Persistence is best-effort.
+        }
+    }
+
     // ---------- utilities ----------
 
     function warn(...args) {
