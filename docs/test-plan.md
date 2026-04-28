@@ -41,6 +41,21 @@ development; run the full suite before declaring done.
 | CLI hook payload parsing            | `go test ./cmd/clusage-cli/...`                    | Hook stdin payload → `/log` POST                                                 |
 | End-to-end integration              | `go test ./internal/integration/...`               | Six scenarios documented in `testdata/e2e_test.md`                                |
 
+### Userscript unit tests
+
+Pure-JS logic destined for `userscript/claude-usage-snapshot.user.js`
+lives in `userscript/lib/*.js` (CommonJS modules) and is exercised by
+`userscript/test/*.test.js` using Node's built-in `node:test` runner —
+no extra dependencies. Run with:
+
+```bash
+make test-userscript        # equivalent to: npm --prefix userscript test
+```
+
+Expected: every `*.test.js` file under `userscript/test/` reports
+`pass`. The Go `make test` target does **not** invoke this; CI runs it
+via `make ci`.
+
 ### Build verification
 
 ```bash

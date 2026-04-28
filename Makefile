@@ -1,4 +1,4 @@
-.PHONY: test test-verbose vet lint build-cli build-trayapp build-trayapp-windows release clean ci help
+.PHONY: test test-verbose test-userscript vet lint build-cli build-trayapp build-trayapp-windows release clean ci help
 
 # Common build flags. -s and -w strip the symbol table and DWARF debug info
 # (~30% size reduction); -trimpath removes filesystem paths from the binary
@@ -9,8 +9,9 @@ GOFLAGS         := -trimpath
 
 help:
 	@echo "Available targets:"
-	@echo "  test                  - Run all tests"
-	@echo "  test-verbose          - Run all tests with verbose output"
+	@echo "  test                  - Run all Go tests (also see test-userscript)"
+	@echo "  test-verbose          - Run all Go tests with verbose output"
+	@echo "  test-userscript       - Run userscript JS unit tests (node:test)"
 	@echo "  vet                   - Run go vet"
 	@echo "  lint                  - Run go vet + gofmt check"
 	@echo "  build-cli             - Build CLI binary for Linux (debug)"
@@ -21,9 +22,13 @@ help:
 
 test:
 	go test ./...
+	@echo "(userscript JS tests are not run here; use 'make test-userscript')"
 
 test-verbose:
 	go test -v ./...
+
+test-userscript:
+	npm --prefix userscript test
 
 vet:
 	go vet ./...
@@ -50,5 +55,5 @@ release:
 clean:
 	rm -f clusage-cli trayapp trayapp.exe
 
-ci: vet test build-cli build-trayapp
+ci: vet test test-userscript build-cli build-trayapp
 	@echo "CI checks passed"
