@@ -519,11 +519,12 @@ async function refresh() {
     renderStatus(s);
     // Session: extend domain 10h backwards so the current 5h window
     // sits in the rightmost third and the prior two sessions are
-    // visible for context. Slack zone = "50pp above pace" (pure
-    // triangle).
+    // visible for context. Slack zone = "50pp above pace" UNION
+    // "≥98% remaining" (mirrors SessionAbsoluteThreshold=0.98).
     renderBurnDown("chart-session", s.session, {
       lookbackMs: 10 * 3600 * 1000,
       slackSurplusPct: 50,
+      slackFloorPct: 98,
     });
     // Weekly slack zone = "10pp above pace" UNION "≥80% remaining".
     renderBurnDown("chart-weekly", s.weekly, {
