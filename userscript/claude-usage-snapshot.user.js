@@ -91,6 +91,28 @@
         }
     }
 
+    // ---------- continuity decision (mirror of userscript/lib/continuity.js) ----------
+
+    const WALL_CLOCK_GAP_MS = 15 * 60 * 1000;
+    const WINDOW_ENDS_JUMP_MS = 60 * 60 * 1000;
+
+    function decideContinuity(observation, prevState, nowMs) {
+        if (!prevState) return false;
+
+        if (nowMs - prevState.lastSentAtMs > WALL_CLOCK_GAP_MS) return false;
+
+        if (observation.percent < prevState.lastPercent) return false;
+
+        const cur = observation.windowEndsMs;
+        const prev = prevState.lastWindowEndsMs;
+        if (typeof cur === 'number' && typeof prev === 'number' &&
+            Math.abs(cur - prev) > WINDOW_ENDS_JUMP_MS) {
+            return false;
+        }
+
+        return true;
+    }
+
     // ---------- dedup decision (mirror of userscript/lib/dedup.js) ----------
 
     function shouldSend(observation, prevState) {
@@ -125,7 +147,7 @@
         try { console.warn('[claude-usage-snapshot]', ...args); } catch (_) { /* ignore */ }
     }
 
-    function postJSON(url, body) {
+    function postJSON(url, body, onSuccess) {
         try {
             const payload = JSON.stringify(body);
             GM.xmlHttpRequest({
@@ -139,6 +161,10 @@
                 onload: (resp) => {
                     if (resp.status < 200 || resp.status >= 300) {
                         warn('POST non-2xx', url, resp.status);
+                        return;
+                    }
+                    if (typeof onSuccess === 'function') {
+                        try { onSuccess(); } catch (e) { warn('onSuccess threw', e); }
                     }
                 },
             });
@@ -356,10 +382,11 @@
 
     // ---------- snapshot dispatch ----------
 
-    function buildSnapshotBody(extracted) {
+    function buildSnapshotBody(extracted, continuousWithPrev) {
         const body = {
             observed_at: new Date(extracted.observedAtMs || Date.now()).toISOString(),
             source: 'userscript',
+            continuous_with_prev: continuousWithPrev,
         };
         if (extracted.sessionUsed !== null) body.session_used = extracted.sessionUsed;
         if (extracted.weeklyUsed !== null) body.weekly_used = extracted.weeklyUsed;
@@ -401,14 +428,29 @@
         const prevState = loadState();
         if (shouldSend(extracted, prevState) === 'skip') return;
 
-        postJSON(ENDPOINT_SNAPSHOT, buildSnapshotBody(extracted));
-        recordSentState({
-            sentAtMs: Date.now(),
-            percent: extracted.sessionUsed,
-            resetText: extracted.resetText,
-            windowEndsMs: extracted.sessionWindowEnds ? Date.parse(extracted.sessionWindowEnds) : null,
-            sessionActive: extracted.sessionActive,
-            lastUpdatedAgeMs: extracted.lastUpdatedAgeMs,
+        const windowEndsMs = extracted.sessionWindowEnds ? Date.parse(extracted.sessionWindowEnds) : null;
+        const nowMs = Date.now();
+        const continuousWithPrev = decideContinuity(
+            {
+                percent: extracted.sessionUsed,
+                resetText: extracted.resetText,
+                windowEndsMs,
+                sessionActive: extracted.sessionActive,
+                observedAtMs: extracted.observedAtMs,
+            },
+            prevState,
+            nowMs,
+        );
+
+        postJSON(ENDPOINT_SNAPSHOT, buildSnapshotBody(extracted, continuousWithPrev), () => {
+            recordSentState({
+                sentAtMs: Date.now(),
+                percent: extracted.sessionUsed,
+                resetText: extracted.resetText,
+                windowEndsMs,
+                sessionActive: extracted.sessionActive,
+                lastUpdatedAgeMs: extracted.lastUpdatedAgeMs,
+            });
         });
     }
 
