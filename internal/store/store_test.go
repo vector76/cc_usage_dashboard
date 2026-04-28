@@ -422,6 +422,350 @@ func TestInsertQuotaSnapshotContinuousWithPrev(t *testing.T) {
 	}
 }
 
+func TestInsertQuotaSnapshotSlideCollapsesPlateau(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	sessionEnds := base.Add(5 * time.Hour)
+	weeklyEnds := base.Add(7 * 24 * time.Hour)
+
+	// Start row: explicit-false continuity, never slid through.
+	startID, err := store.InsertQuotaSnapshot(
+		base, base, "userscript",
+		floatPtr(25.0), &sessionEnds,
+		floatPtr(40.0), &weeklyEnds,
+		boolPtr(true),
+		boolPtr(false),
+		`{"start":1}`,
+	)
+	if err != nil {
+		t.Fatalf("insert start: %v", err)
+	}
+
+	// First continuation: identical match fields. Slide is suppressed
+	// because the prior row is an explicit start, so a new row is added.
+	firstContObserved := base.Add(1 * time.Minute)
+	firstContID, err := store.InsertQuotaSnapshot(
+		firstContObserved, firstContObserved, "userscript",
+		floatPtr(25.0), &sessionEnds,
+		floatPtr(40.0), &weeklyEnds,
+		boolPtr(true),
+		boolPtr(true),
+		`{"first_continuation":1}`,
+	)
+	if err != nil {
+		t.Fatalf("insert first continuation: %v", err)
+	}
+	if firstContID == startID {
+		t.Fatalf("first continuation should not slide over start row")
+	}
+
+	// Four further continuations should all slide over the first.
+	var lastObserved, lastReceived time.Time
+	for i := 2; i <= 5; i++ {
+		observed := base.Add(time.Duration(i) * time.Minute)
+		received := observed.Add(2 * time.Second)
+		id, err := store.InsertQuotaSnapshot(
+			observed, received, "userscript",
+			floatPtr(25.0), &sessionEnds,
+			floatPtr(40.0), &weeklyEnds,
+			boolPtr(true),
+			boolPtr(true),
+			`{"later_continuation":`+time.Duration(i).String()+`}`,
+		)
+		if err != nil {
+			t.Fatalf("insert continuation %d: %v", i, err)
+		}
+		if id != firstContID {
+			t.Fatalf("continuation %d should slide onto id=%d, got %d", i, firstContID, id)
+		}
+		lastObserved, lastReceived = observed, received
+	}
+
+	var rowCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&rowCount); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if rowCount != 2 {
+		t.Fatalf("expected 2 rows after plateau, got %d", rowCount)
+	}
+
+	var observedStr, receivedStr, rawJSON string
+	if err := store.db.QueryRow(`
+		SELECT observed_at, received_at, raw_json FROM quota_snapshots WHERE id = ?
+	`, firstContID).Scan(&observedStr, &receivedStr, &rawJSON); err != nil {
+		t.Fatalf("select slid row: %v", err)
+	}
+	if observedStr != FormatTime(lastObserved) {
+		t.Errorf("observed_at: got %s, want %s", observedStr, FormatTime(lastObserved))
+	}
+	if receivedStr != FormatTime(lastReceived) {
+		t.Errorf("received_at: got %s, want %s", receivedStr, FormatTime(lastReceived))
+	}
+	if rawJSON != `{"first_continuation":1}` {
+		t.Errorf("raw_json should be preserved as the first continuation's, got %s", rawJSON)
+	}
+}
+
+func TestInsertQuotaSnapshotSlideSuppressedWhenValuesDiffer(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	sessionEnds := base.Add(5 * time.Hour)
+	weeklyEnds := base.Add(7 * 24 * time.Hour)
+
+	if _, err := store.InsertQuotaSnapshot(
+		base, base, "userscript",
+		floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
+		boolPtr(true), boolPtr(false), `{}`,
+	); err != nil {
+		t.Fatalf("insert start: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		observed := base.Add(time.Duration(i) * time.Minute)
+		if _, err := store.InsertQuotaSnapshot(
+			observed, observed, "userscript",
+			floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
+			boolPtr(true), boolPtr(true), `{}`,
+		); err != nil {
+			t.Fatalf("insert continuation %d: %v", i, err)
+		}
+	}
+
+	// Different session_used + continuous=true → slide suppressed.
+	observed := base.Add(10 * time.Minute)
+	if _, err := store.InsertQuotaSnapshot(
+		observed, observed, "userscript",
+		floatPtr(26.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
+		boolPtr(true), boolPtr(true), `{}`,
+	); err != nil {
+		t.Fatalf("insert differing continuation: %v", err)
+	}
+
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 rows after differing continuation, got %d", count)
+	}
+}
+
+func TestInsertQuotaSnapshotSlideDoesNotCrossStart(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	sessionEnds := base.Add(5 * time.Hour)
+	weeklyEnds := base.Add(7 * 24 * time.Hour)
+
+	if _, err := store.InsertQuotaSnapshot(
+		base, base, "userscript",
+		floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
+		boolPtr(true), boolPtr(false), `{}`,
+	); err != nil {
+		t.Fatalf("insert start: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		observed := base.Add(time.Duration(i) * time.Minute)
+		if _, err := store.InsertQuotaSnapshot(
+			observed, observed, "userscript",
+			floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
+			boolPtr(true), boolPtr(true), `{}`,
+		); err != nil {
+			t.Fatalf("insert continuation %d: %v", i, err)
+		}
+	}
+
+	// All match fields identical, but continuous_with_prev=false marks a
+	// fresh start. The slide must NOT cross it.
+	newStartObserved := base.Add(10 * time.Minute)
+	newStartID, err := store.InsertQuotaSnapshot(
+		newStartObserved, newStartObserved, "userscript",
+		floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
+		boolPtr(true), boolPtr(false), `{"new_start":1}`,
+	)
+	if err != nil {
+		t.Fatalf("insert new start: %v", err)
+	}
+
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 rows after new start, got %d", count)
+	}
+
+	var latestID int64
+	if err := store.db.QueryRow(`
+		SELECT id FROM quota_snapshots ORDER BY observed_at DESC LIMIT 1
+	`).Scan(&latestID); err != nil {
+		t.Fatalf("select latest: %v", err)
+	}
+	if latestID != newStartID {
+		t.Fatalf("latest row should be the new start (id=%d), got id=%d", newStartID, latestID)
+	}
+}
+
+func TestInsertQuotaSnapshotSlideSuppressedPerField(t *testing.T) {
+	base := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	sessionEnds := base.Add(5 * time.Hour)
+	weeklyEnds := base.Add(7 * 24 * time.Hour)
+
+	cases := []struct {
+		name string
+		// mutate produces the new arrival's match fields starting from the
+		// plateau values.
+		mutate func() (sUsed *float64, sEnds *time.Time, wUsed *float64, wEnds *time.Time, sActive *bool)
+	}{
+		{
+			name: "session_used",
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
+				return floatPtr(26.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true)
+			},
+		},
+		{
+			name: "weekly_used",
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
+				return floatPtr(25.0), &sessionEnds, floatPtr(41.0), &weeklyEnds, boolPtr(true)
+			},
+		},
+		{
+			name: "session_window_ends",
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
+				newEnds := sessionEnds.Add(1 * time.Minute)
+				return floatPtr(25.0), &newEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true)
+			},
+		},
+		{
+			name: "weekly_window_ends",
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
+				newEnds := weeklyEnds.Add(1 * time.Minute)
+				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &newEnds, boolPtr(true)
+			},
+		},
+		{
+			name: "session_active",
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
+				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(false)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := createTestStore(t)
+			defer store.Close()
+
+			if _, err := store.InsertQuotaSnapshot(
+				base, base, "userscript",
+				floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
+				boolPtr(true), boolPtr(false), `{}`,
+			); err != nil {
+				t.Fatalf("insert start: %v", err)
+			}
+			if _, err := store.InsertQuotaSnapshot(
+				base.Add(1*time.Minute), base.Add(1*time.Minute), "userscript",
+				floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
+				boolPtr(true), boolPtr(true), `{}`,
+			); err != nil {
+				t.Fatalf("insert plateau seed: %v", err)
+			}
+
+			sUsed, sEnds, wUsed, wEnds, sActive := tc.mutate()
+			if _, err := store.InsertQuotaSnapshot(
+				base.Add(2*time.Minute), base.Add(2*time.Minute), "userscript",
+				sUsed, sEnds, wUsed, wEnds,
+				sActive, boolPtr(true), `{}`,
+			); err != nil {
+				t.Fatalf("insert differing continuation: %v", err)
+			}
+
+			var count int
+			if err := store.db.QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&count); err != nil {
+				t.Fatalf("count rows: %v", err)
+			}
+			if count != 3 {
+				t.Errorf("differing %s should suppress slide; expected 3 rows, got %d", tc.name, count)
+			}
+		})
+	}
+}
+
+func TestInsertQuotaSnapshotContinuationOnColdDB(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	id, err := store.InsertQuotaSnapshot(
+		now, now, "userscript",
+		floatPtr(25.0), nil,
+		floatPtr(40.0), nil,
+		nil,
+		boolPtr(true),
+		`{}`,
+	)
+	if err != nil {
+		t.Fatalf("insert into empty DB: %v", err)
+	}
+	if id == 0 {
+		t.Fatalf("expected non-zero id")
+	}
+
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 row on cold DB insert, got %d", count)
+	}
+}
+
+func TestInsertQuotaSnapshotSlideScopedBySource(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	sessionEnds := base.Add(5 * time.Hour)
+
+	// Plateau on source A.
+	if _, err := store.InsertQuotaSnapshot(
+		base, base, "userscript",
+		floatPtr(25.0), &sessionEnds, nil, nil,
+		nil, boolPtr(false), `{}`,
+	); err != nil {
+		t.Fatalf("insert A start: %v", err)
+	}
+	if _, err := store.InsertQuotaSnapshot(
+		base.Add(1*time.Minute), base.Add(1*time.Minute), "userscript",
+		floatPtr(25.0), &sessionEnds, nil, nil,
+		nil, boolPtr(true), `{}`,
+	); err != nil {
+		t.Fatalf("insert A continuation: %v", err)
+	}
+
+	// A continuation from a *different* source must not slide on A's
+	// plateau even with identical match fields.
+	if _, err := store.InsertQuotaSnapshot(
+		base.Add(2*time.Minute), base.Add(2*time.Minute), "headless",
+		floatPtr(25.0), &sessionEnds, nil, nil,
+		nil, boolPtr(true), `{}`,
+	); err != nil {
+		t.Fatalf("insert B continuation: %v", err)
+	}
+
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("expected 3 rows (slide must be source-scoped), got %d", count)
+	}
+}
+
 func TestInsertParseError(t *testing.T) {
 	store := createTestStore(t)
 	defer store.Close()

@@ -90,6 +90,29 @@ Storing NULL on absence and treating NULL as "start"/"unknown" keeps
 older clients (which never set this field) safe by default — the
 engine will not assume continuity it cannot prove.
 
+**Write-time plateau compaction.** When a snapshot arrives with
+`continuous_with_prev = 1` and every "match" field
+(`session_used`, `weekly_used`, `session_window_ends`,
+`weekly_window_ends`, `session_active`) is identical to the most
+recent row from the same `source`, the existing row's `observed_at`
+and `received_at` are slid forward in place instead of inserting a
+duplicate. The slide is suppressed when the prior row is itself an
+explicit start (`continuous_with_prev = 0`), so a fresh page load
+always anchors a new row.
+
+The audit-trail rules:
+
+- `observed_at` is refreshed so the chart sees the latest sighting —
+  otherwise plateaus would visually end at the first observation.
+- `received_at` is refreshed so freshness queries
+  (`last_snapshot_age_seconds`, slack-gate freshness) stay honest on
+  a stable plateau.
+- `raw_json` is preserved as the original payload's audit artifact;
+  it is not overwritten across slides.
+
+The slide is scoped to a single `source` so unrelated ingestion
+paths (userscript vs. headless) cannot collapse onto each other.
+
 ### `windows`
 
 Derived/cached state for the current and recent session and weekly windows. Maintained by

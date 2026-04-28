@@ -122,6 +122,14 @@ func (s *Store) InsertUsageEvent(
 // session_used and weekly_used are 0–100 percentages.
 // sessionActive is nil when the source did not report it; persisted as NULL.
 // continuousWithPrev is nil when absent; persisted as NULL.
+//
+// Plateau compaction: when the arrival is marked continuous and every
+// "match" field is identical to the latest row from the same source, the
+// existing row's observed_at and received_at are slid forward in place
+// instead of inserting a duplicate. raw_json is preserved on the surviving
+// row as an audit artifact. The slide is suppressed when the latest row is
+// itself an explicit start (continuous_with_prev = 0), so a fresh page
+// load always anchors a new row.
 func (s *Store) InsertQuotaSnapshot(
 	observedAt, receivedAt time.Time,
 	source string,
@@ -149,6 +157,22 @@ func (s *Store) InsertQuotaSnapshot(
 			continuousWithPrevArg = 0
 		}
 	}
+
+	if continuousWithPrev != nil && *continuousWithPrev {
+		slidID, slid, err := s.tryPlateauSlide(
+			observedAt, receivedAt, source,
+			sessionUsed, sessionWindowEnds,
+			weeklyUsed, weeklyWindowEnds,
+			sessionActive,
+		)
+		if err != nil {
+			return 0, err
+		}
+		if slid {
+			return slidID, nil
+		}
+	}
+
 	result, err := s.db.Exec(`
 		INSERT INTO quota_snapshots (
 			observed_at, received_at, source,
@@ -175,6 +199,104 @@ func (s *Store) InsertQuotaSnapshot(
 	}
 
 	return id, nil
+}
+
+// tryPlateauSlide refreshes the latest row's timestamps in place when the
+// new arrival continues an identical plateau. Returns (id, true, nil) if a
+// slide happened; (0, false, nil) means the caller should insert as usual.
+func (s *Store) tryPlateauSlide(
+	observedAt, receivedAt time.Time,
+	source string,
+	sessionUsed *float64,
+	sessionWindowEnds *time.Time,
+	weeklyUsed *float64,
+	weeklyWindowEnds *time.Time,
+	sessionActive *bool,
+) (int64, bool, error) {
+	var (
+		prevID                 int64
+		prevSessionUsed        sql.NullFloat64
+		prevWeeklyUsed         sql.NullFloat64
+		prevSessionWindowEnds  sql.NullString
+		prevWeeklyWindowEnds   sql.NullString
+		prevSessionActive      sql.NullInt64
+		prevContinuousWithPrev sql.NullInt64
+	)
+	err := s.db.QueryRow(`
+		SELECT id, session_used, weekly_used,
+		       session_window_ends, weekly_window_ends,
+		       session_active, continuous_with_prev
+		FROM quota_snapshots
+		WHERE source = ?
+		ORDER BY observed_at DESC
+		LIMIT 1
+	`, source).Scan(
+		&prevID, &prevSessionUsed, &prevWeeklyUsed,
+		&prevSessionWindowEnds, &prevWeeklyWindowEnds,
+		&prevSessionActive, &prevContinuousWithPrev,
+	)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to read latest snapshot for slide: %w", err)
+	}
+
+	// Don't slide on top of a row that is itself an explicit start.
+	if prevContinuousWithPrev.Valid && prevContinuousWithPrev.Int64 == 0 {
+		return 0, false, nil
+	}
+
+	if !nullableFloatEqual(prevSessionUsed, sessionUsed) ||
+		!nullableFloatEqual(prevWeeklyUsed, weeklyUsed) ||
+		!nullableTimeEqual(prevSessionWindowEnds, sessionWindowEnds) ||
+		!nullableTimeEqual(prevWeeklyWindowEnds, weeklyWindowEnds) ||
+		!nullableBoolEqual(prevSessionActive, sessionActive) {
+		return 0, false, nil
+	}
+
+	if _, err := s.db.Exec(`
+		UPDATE quota_snapshots
+		SET observed_at = ?, received_at = ?
+		WHERE id = ?
+	`, FormatTime(observedAt), FormatTime(receivedAt), prevID); err != nil {
+		return 0, false, fmt.Errorf("failed to slide quota snapshot: %w", err)
+	}
+	return prevID, true, nil
+}
+
+func nullableFloatEqual(a sql.NullFloat64, b *float64) bool {
+	if a.Valid != (b != nil) {
+		return false
+	}
+	if !a.Valid {
+		return true
+	}
+	return a.Float64 == *b
+}
+
+func nullableTimeEqual(a sql.NullString, b *time.Time) bool {
+	if a.Valid != (b != nil) {
+		return false
+	}
+	if !a.Valid {
+		return true
+	}
+	return a.String == FormatTime(*b)
+}
+
+func nullableBoolEqual(a sql.NullInt64, b *bool) bool {
+	if a.Valid != (b != nil) {
+		return false
+	}
+	if !a.Valid {
+		return true
+	}
+	var bv int64
+	if *b {
+		bv = 1
+	}
+	return a.Int64 == bv
 }
 
 // InsertParseError inserts a parse error record.

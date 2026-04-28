@@ -1293,3 +1293,91 @@ func TestEventEvidenceSuppressedByInactiveSnapshot(t *testing.T) {
 	}
 }
 
+// Plateau compaction in the store slides the latest row's observed_at and
+// received_at forward in place. The window engine's snapshot lookups order
+// by observed_at, so they should still see the latest plateau values
+// (boundary, session_active, session_used) after a slide — and the slid
+// observed_at should reflect the latest sighting.
+func TestSnapshotLookupsHonorSlidObservedAt(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	t0 := time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC)
+	sessionEnds := t0.Add(5 * time.Hour)
+	active := true
+
+	if _, err := s.InsertQuotaSnapshot(
+		t0, t0, "userscript",
+		floatPtr(25.0), &sessionEnds,
+		nil, nil,
+		&active,
+		boolPtr(false),
+		"{}",
+	); err != nil {
+		t.Fatalf("insert start: %v", err)
+	}
+
+	tLater := t0.Add(15 * time.Minute)
+	if _, err := s.InsertQuotaSnapshot(
+		tLater, tLater, "userscript",
+		floatPtr(25.0), &sessionEnds,
+		nil, nil,
+		&active,
+		boolPtr(true),
+		"{}",
+	); err != nil {
+		t.Fatalf("insert continuation: %v", err)
+	}
+
+	// Drive a final plateau slide.
+	tLatest := t0.Add(45 * time.Minute)
+	if _, err := s.InsertQuotaSnapshot(
+		tLatest, tLatest, "userscript",
+		floatPtr(25.0), &sessionEnds,
+		nil, nil,
+		&active,
+		boolPtr(true),
+		"{}",
+	); err != nil {
+		t.Fatalf("insert second continuation: %v", err)
+	}
+
+	// Sanity: there should be exactly two rows (start + slid continuation).
+	var rowCount int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&rowCount); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if rowCount != 2 {
+		t.Fatalf("expected 2 rows after plateau, got %d", rowCount)
+	}
+
+	gotBoundary, err := engine.findSessionBoundary()
+	if err != nil {
+		t.Fatalf("findSessionBoundary: %v", err)
+	}
+	if !gotBoundary.Equal(sessionEnds) {
+		t.Errorf("findSessionBoundary: got %v, want %v", gotBoundary, sessionEnds)
+	}
+
+	gotActive, gotUsed, gotObserved, err := engine.findMostRecentSessionActive()
+	if err != nil {
+		t.Fatalf("findMostRecentSessionActive: %v", err)
+	}
+	if gotActive == nil || !*gotActive {
+		t.Errorf("session_active: got %v, want true", gotActive)
+	}
+	if gotUsed == nil || *gotUsed != 25.0 {
+		t.Errorf("session_used: got %v, want 25.0", gotUsed)
+	}
+	if !gotObserved.Equal(tLatest) {
+		t.Errorf("observed_at after slide: got %v, want %v", gotObserved, tLatest)
+	}
+}
+
+func floatPtr(f float64) *float64 {
+	return &f
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
