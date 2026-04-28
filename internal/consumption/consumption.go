@@ -14,15 +14,6 @@ import (
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
-// windowMatchTolerance treats two snapshots as belonging to the same window
-// when their *_window_ends timestamps agree within this slack. The
-// userscript computes window_ends as `Date.now() + minutesUntilReset`,
-// so two snapshots in the same session can drift by minutes between
-// sends; meanwhile actually-different windows are at least multiple
-// hours apart, so the only failure mode of a generous tolerance is
-// theoretical, not practical.
-const windowMatchTolerance = 10 * time.Minute
-
 // Result is the JSON response from GET /consumption.
 type Result struct {
 	Period                 string    `json:"period"`
@@ -116,23 +107,22 @@ func (c *Calculator) aggregateEvents(res *Result, startTime, endTime time.Time) 
 	return nil
 }
 
-// snapshot is one observation of a window's percent-used value, with the
-// reported window-end timestamp used to detect window resets between
-// successive snapshots.
+// snapshot is one observation of a window's percent-used value, paired with
+// the persisted continuity flag (true = continuation of the prior snapshot,
+// false/NULL = start / unsafe to delta against the previous row).
 type snapshot struct {
-	observedAt time.Time
-	used       float64    // 0-100
-	windowEnds *time.Time // nil if the snapshot didn't carry a reset hint
+	observedAt         time.Time
+	used               float64 // 0-100
+	continuousWithPrev bool    // false when the source row's flag was NULL or 0
 }
 
 // percentConsumed walks the snapshots for the requested window kind and
-// sums the per-snapshot increases in `*_used`. When a window reset is
-// detected between snapshots (different *_window_ends, beyond
-// windowMatchTolerance) the new window contributes only `curr.used`; the
-// unobserved tail of the previous window — between its last snapshot and
-// the reset — is treated as zero. Snapshots typically arrive right up to
-// window end, so any missed tail is small; in exchange we avoid inflating
-// the total by charging for usage that may not have happened.
+// sums the per-snapshot increases in `*_used`. Between two adjacent
+// snapshots, a continuation contributes the non-negative delta; a start
+// (continuous_with_prev = false / NULL) contributes its raw `*_used` as a
+// fresh window's worth. The unobserved tail of the prior window — between
+// its last snapshot and the reset — is treated as zero; snapshots typically
+// arrive right up to window end, so any missed tail is small.
 //
 // Anchor: the most recent snapshot at or before periodStart, if any.
 // Without an anchor, the first in-period snapshot establishes the baseline
@@ -142,16 +132,16 @@ type snapshot struct {
 // Returns nil if no snapshots exist for the kind anywhere on or before
 // periodEnd, signalling "couldn't measure" rather than 0.
 func (c *Calculator) percentConsumed(kind string, startTime, endTime time.Time) (*float64, error) {
-	usedCol, endsCol := "session_used", "session_window_ends"
+	usedCol := "session_used"
 	if kind == "weekly" {
-		usedCol, endsCol = "weekly_used", "weekly_window_ends"
+		usedCol = "weekly_used"
 	}
 
-	anchor, err := c.snapshotAtOrBefore(usedCol, endsCol, startTime)
+	anchor, err := c.snapshotAtOrBefore(usedCol, startTime)
 	if err != nil {
 		return nil, err
 	}
-	inPeriod, err := c.snapshotsInRange(usedCol, endsCol, startTime, endTime)
+	inPeriod, err := c.snapshotsInRange(usedCol, startTime, endTime)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +150,6 @@ func (c *Calculator) percentConsumed(kind string, startTime, endTime time.Time) 
 		return nil, nil
 	}
 
-	// Compose the walk: anchor (if any) followed by the in-period snapshots.
 	walk := make([]snapshot, 0, len(inPeriod)+1)
 	if anchor != nil {
 		walk = append(walk, *anchor)
@@ -170,7 +159,7 @@ func (c *Calculator) percentConsumed(kind string, startTime, endTime time.Time) 
 	total := 0.0
 	for i := 1; i < len(walk); i++ {
 		prev, curr := walk[i-1], walk[i]
-		if sameWindow(prev.windowEnds, curr.windowEnds) {
+		if curr.continuousWithPrev {
 			delta := curr.used - prev.used
 			if delta < 0 {
 				delta = 0
@@ -183,36 +172,34 @@ func (c *Calculator) percentConsumed(kind string, startTime, endTime time.Time) 
 	return &total, nil
 }
 
-func (c *Calculator) snapshotAtOrBefore(usedCol, endsCol string, t time.Time) (*snapshot, error) {
+func (c *Calculator) snapshotAtOrBefore(usedCol string, t time.Time) (*snapshot, error) {
 	query := fmt.Sprintf(`
-		SELECT observed_at, %s, %s
+		SELECT observed_at, %s, continuous_with_prev
 		FROM quota_snapshots
 		WHERE %s IS NOT NULL AND observed_at <= ?
 		ORDER BY observed_at DESC
 		LIMIT 1
-	`, usedCol, endsCol, usedCol)
+	`, usedCol, usedCol)
 	var s snapshot
-	var ends sql.NullTime
-	err := c.db.QueryRow(query, store.FormatTime(t)).Scan(&s.observedAt, &s.used, &ends)
+	var cont sql.NullInt64
+	err := c.db.QueryRow(query, store.FormatTime(t)).Scan(&s.observedAt, &s.used, &cont)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("snapshot anchor query: %w", err)
 	}
-	if ends.Valid {
-		s.windowEnds = &ends.Time
-	}
+	s.continuousWithPrev = cont.Valid && cont.Int64 != 0
 	return &s, nil
 }
 
-func (c *Calculator) snapshotsInRange(usedCol, endsCol string, startTime, endTime time.Time) ([]snapshot, error) {
+func (c *Calculator) snapshotsInRange(usedCol string, startTime, endTime time.Time) ([]snapshot, error) {
 	query := fmt.Sprintf(`
-		SELECT observed_at, %s, %s
+		SELECT observed_at, %s, continuous_with_prev
 		FROM quota_snapshots
 		WHERE %s IS NOT NULL AND observed_at > ? AND observed_at <= ?
 		ORDER BY observed_at ASC
-	`, usedCol, endsCol, usedCol)
+	`, usedCol, usedCol)
 	rows, err := c.db.Query(query, store.FormatTime(startTime), store.FormatTime(endTime))
 	if err != nil {
 		return nil, fmt.Errorf("snapshot range query: %w", err)
@@ -221,31 +208,14 @@ func (c *Calculator) snapshotsInRange(usedCol, endsCol string, startTime, endTim
 	var out []snapshot
 	for rows.Next() {
 		var s snapshot
-		var ends sql.NullTime
-		if err := rows.Scan(&s.observedAt, &s.used, &ends); err != nil {
+		var cont sql.NullInt64
+		if err := rows.Scan(&s.observedAt, &s.used, &cont); err != nil {
 			return nil, err
 		}
-		if ends.Valid {
-			s.windowEnds = &ends.Time
-		}
+		s.continuousWithPrev = cont.Valid && cont.Int64 != 0
 		out = append(out, s)
 	}
 	return out, rows.Err()
-}
-
-// sameWindow reports whether two snapshot window-end hints refer to the same
-// window. Snapshot reset times have minute resolution, so we tolerate a small
-// jitter. If either side lacks a hint we conservatively assume the same
-// window — a missing hint shouldn't manufacture a phantom reset.
-func sameWindow(a, b *time.Time) bool {
-	if a == nil || b == nil {
-		return true
-	}
-	d := a.Sub(*b)
-	if d < 0 {
-		d = -d
-	}
-	return d <= windowMatchTolerance
 }
 
 // parsePeriod parses a period string like "24h", "7d", "30d". Go's

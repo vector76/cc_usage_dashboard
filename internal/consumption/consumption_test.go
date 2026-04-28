@@ -36,9 +36,14 @@ func insertEvent(t *testing.T, s *store.Store, occurred time.Time, costUSD *floa
 	}
 }
 
-func insertSnapshot(t *testing.T, s *store.Store, observed time.Time, sessionUsed, weeklyUsed *float64, sessionEnds, weeklyEnds *time.Time) {
+// insertSnapshot inserts a quota snapshot. continuousWithPrev maps to the
+// persisted column the consumption walker now keys off; pass nil to leave it
+// NULL (which is treated as "start" by percentConsumed). sessionEnds /
+// weeklyEnds are no longer read by consumption but are still accepted so
+// callers exercising other engines can supply them.
+func insertSnapshot(t *testing.T, s *store.Store, observed time.Time, sessionUsed, weeklyUsed *float64, sessionEnds, weeklyEnds *time.Time, continuousWithPrev *bool) {
 	t.Helper()
-	_, err := s.InsertQuotaSnapshot(observed, observed, "test", sessionUsed, sessionEnds, weeklyUsed, weeklyEnds, nil, nil, "{}")
+	_, err := s.InsertQuotaSnapshot(observed, observed, "test", sessionUsed, sessionEnds, weeklyUsed, weeklyEnds, nil, continuousWithPrev, "{}")
 	if err != nil {
 		t.Fatalf("insert snapshot: %v", err)
 	}
@@ -48,6 +53,7 @@ func ptrF(f float64) *float64 { return &f }
 func ptrT(t time.Time) *time.Time {
 	return &t
 }
+func ptrB(b bool) *bool { return &b }
 
 func near(a, b, eps float64) bool {
 	d := a - b
@@ -89,18 +95,18 @@ func TestCalculate_USDAndEventBuckets(t *testing.T) {
 }
 
 // TestPercent_AnchorAndDeltaSameWindow: anchor at period start sets the
-// baseline; subsequent in-window snapshots accumulate deltas.
+// baseline; subsequent continuous snapshots accumulate deltas.
 func TestPercent_AnchorAndDeltaSameWindow(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
 	c, s := newCalc(t, now)
 	defer s.Close()
 
-	sessionEnds := now.Add(2 * time.Hour) // same session end across snapshots
+	sessionEnds := now.Add(2 * time.Hour)
 	// Anchor 1 hour before period start at 20% used.
-	insertSnapshot(t, s, now.Add(-25*time.Hour), ptrF(20), nil, ptrT(sessionEnds), nil)
-	// In-period: 35% then 60%.
-	insertSnapshot(t, s, now.Add(-12*time.Hour), ptrF(35), nil, ptrT(sessionEnds), nil)
-	insertSnapshot(t, s, now.Add(-2*time.Hour), ptrF(60), nil, ptrT(sessionEnds), nil)
+	insertSnapshot(t, s, now.Add(-25*time.Hour), ptrF(20), nil, ptrT(sessionEnds), nil, nil)
+	// In-period: 35% then 60%, both continuations of their predecessors.
+	insertSnapshot(t, s, now.Add(-12*time.Hour), ptrF(35), nil, ptrT(sessionEnds), nil, ptrB(true))
+	insertSnapshot(t, s, now.Add(-2*time.Hour), ptrF(60), nil, ptrT(sessionEnds), nil, ptrB(true))
 
 	res, err := c.Calculate("24h")
 	if err != nil {
@@ -115,26 +121,22 @@ func TestPercent_AnchorAndDeltaSameWindow(t *testing.T) {
 	}
 }
 
-// TestPercent_WindowResetsAccumulate: at a window reset the new window
-// contributes only its curr.used; the unobserved tail of the prior window
-// is dropped. The 24h period spanning multiple sessions can still exceed
-// 100% when each session is heavily used.
+// TestPercent_WindowResetsAccumulate: a snapshot whose continuity flag is
+// false ("start") contributes its full *_used as a fresh window's worth.
+// The 24h period spanning multiple sessions can still exceed 100% when each
+// session is heavily used.
 func TestPercent_WindowResetsAccumulate(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
 	c, s := newCalc(t, now)
 	defer s.Close()
 
-	end1 := now.Add(-20 * time.Hour)
-	end2 := now.Add(-15 * time.Hour)
-	end3 := now.Add(-10 * time.Hour)
-
-	// Anchor: 80% used in window ending at end1.
-	insertSnapshot(t, s, now.Add(-25*time.Hour), ptrF(80), nil, ptrT(end1), nil)
-	// Window 2 (ends end2): two snapshots 10% then 90%.
-	insertSnapshot(t, s, now.Add(-19*time.Hour), ptrF(10), nil, ptrT(end2), nil)
-	insertSnapshot(t, s, now.Add(-16*time.Hour), ptrF(90), nil, ptrT(end2), nil)
-	// Window 3 (ends end3): 25%.
-	insertSnapshot(t, s, now.Add(-12*time.Hour), ptrF(25), nil, ptrT(end3), nil)
+	// Anchor: 80% used.
+	insertSnapshot(t, s, now.Add(-25*time.Hour), ptrF(80), nil, nil, nil, nil)
+	// New session begins: 10% (start), then 90% (continuation).
+	insertSnapshot(t, s, now.Add(-19*time.Hour), ptrF(10), nil, nil, nil, ptrB(false))
+	insertSnapshot(t, s, now.Add(-16*time.Hour), ptrF(90), nil, nil, nil, ptrB(true))
+	// Another reset: 25% (start).
+	insertSnapshot(t, s, now.Add(-12*time.Hour), ptrF(25), nil, nil, nil, ptrB(false))
 
 	res, err := c.Calculate("24h")
 	if err != nil {
@@ -143,10 +145,9 @@ func TestPercent_WindowResetsAccumulate(t *testing.T) {
 	if res.ConsumedSessionPct == nil {
 		t.Fatal("expected non-nil session pct")
 	}
-	// Walk:
-	//  anchor(80,end1) → (10,end2): reset → curr.used = 10
-	//  (10,end2)       → (90,end2): same  → 90-10     = 80
-	//  (90,end2)       → (25,end3): reset → curr.used = 25
+	// anchor → 10 (start) = 10
+	// 10     → 90 (cont)  = 80
+	// 90     → 25 (start) = 25
 	// Total = 115.
 	if !near(*res.ConsumedSessionPct, 115, 1e-9) {
 		t.Errorf("session pct: got %v want 115", *res.ConsumedSessionPct)
@@ -160,9 +161,8 @@ func TestPercent_NoAnchorUsesFirstInPeriodAsBaseline(t *testing.T) {
 	c, s := newCalc(t, now)
 	defer s.Close()
 
-	sessionEnds := now.Add(2 * time.Hour)
-	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(40), nil, ptrT(sessionEnds), nil)
-	insertSnapshot(t, s, now.Add(-2*time.Hour), ptrF(75), nil, ptrT(sessionEnds), nil)
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(40), nil, nil, nil, nil)
+	insertSnapshot(t, s, now.Add(-2*time.Hour), ptrF(75), nil, nil, nil, ptrB(true))
 
 	res, err := c.Calculate("24h")
 	if err != nil {
@@ -185,10 +185,9 @@ func TestPercent_NegativeDeltaClampsToZero(t *testing.T) {
 	c, s := newCalc(t, now)
 	defer s.Close()
 
-	sessionEnds := now.Add(2 * time.Hour)
-	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(60), nil, ptrT(sessionEnds), nil)
-	insertSnapshot(t, s, now.Add(-5*time.Hour), ptrF(55), nil, ptrT(sessionEnds), nil) // dip
-	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(80), nil, ptrT(sessionEnds), nil)
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(60), nil, nil, nil, nil)
+	insertSnapshot(t, s, now.Add(-5*time.Hour), ptrF(55), nil, nil, nil, ptrB(true)) // dip
+	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(80), nil, nil, nil, ptrB(true))
 
 	res, err := c.Calculate("24h")
 	if err != nil {
@@ -200,32 +199,61 @@ func TestPercent_NegativeDeltaClampsToZero(t *testing.T) {
 	}
 }
 
-// TestPercent_ToleranceMatchesNearbyEnds: minute-level rounding in snapshot
-// reset times must not be misread as a window reset.
-func TestPercent_ToleranceMatchesNearbyEnds(t *testing.T) {
+// TestPercent_ContinuationIgnoresWindowEndsDrift: with the explicit
+// continuity flag, drift in *_window_ends between adjacent snapshots — even
+// well beyond the old 10-minute heuristic tolerance — must not be
+// misinterpreted as a window reset.
+func TestPercent_ContinuationIgnoresWindowEndsDrift(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
 	c, s := newCalc(t, now)
 	defer s.Close()
 
 	endA := now.Add(2 * time.Hour)
-	endB := endA.Add(60 * time.Second) // 1 min jitter, within windowMatchTolerance
+	endB := endA.Add(45 * time.Minute) // far past the old 10-minute tolerance
 
-	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(20), nil, ptrT(endA), nil)
-	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(30), nil, ptrT(endB), nil)
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(20), nil, ptrT(endA), nil, nil)
+	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(30), nil, ptrT(endB), nil, ptrB(true))
 
 	res, err := c.Calculate("24h")
 	if err != nil {
 		t.Fatalf("Calculate: %v", err)
 	}
-	// Same window per tolerance → delta 10, not (100-20)+30 = 110.
+	// Continuation per flag → delta 10, not (30 as a fresh start).
 	if !near(*res.ConsumedSessionPct, 10, 1e-9) {
-		t.Errorf("session pct: got %v want 10 (tolerance not applied)", *res.ConsumedSessionPct)
+		t.Errorf("session pct: got %v want 10 (flag-driven continuation)", *res.ConsumedSessionPct)
+	}
+}
+
+// TestPercent_NullFlagTreatedAsStart: a NULL continuity flag mid-series is
+// treated as a start, matching the migration default for snapshots written
+// before the flag existed.
+func TestPercent_NullFlagTreatedAsStart(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	c, s := newCalc(t, now)
+	defer s.Close()
+
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(20), nil, nil, nil, nil)
+	// NULL flag in the middle: contributes its raw used as a fresh start.
+	insertSnapshot(t, s, now.Add(-5*time.Hour), ptrF(30), nil, nil, nil, nil)
+	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(50), nil, nil, nil, ptrB(true))
+
+	res, err := c.Calculate("24h")
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	// No anchor (all snapshots fall inside the period); the first
+	// in-period row only sets a baseline.
+	// (20)  → 30 (NULL=start) = 30
+	// 30    → 50 (cont)       = 20
+	// Total = 50.
+	if !near(*res.ConsumedSessionPct, 50, 1e-9) {
+		t.Errorf("session pct: got %v want 50", *res.ConsumedSessionPct)
 	}
 }
 
 // TestPercent_WeeklyAndSessionAreIndependent: the same snapshot stream
 // drives separate session_pct and weekly_pct walks against their own
-// *_window_ends columns.
+// *_used columns.
 func TestPercent_WeeklyAndSessionAreIndependent(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
 	c, s := newCalc(t, now)
@@ -233,8 +261,8 @@ func TestPercent_WeeklyAndSessionAreIndependent(t *testing.T) {
 
 	sessionEnds := now.Add(2 * time.Hour)
 	weeklyEnds := now.Add(48 * time.Hour)
-	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(20), ptrF(5), ptrT(sessionEnds), ptrT(weeklyEnds))
-	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(60), ptrF(8), ptrT(sessionEnds), ptrT(weeklyEnds))
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(20), ptrF(5), ptrT(sessionEnds), ptrT(weeklyEnds), nil)
+	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(60), ptrF(8), ptrT(sessionEnds), ptrT(weeklyEnds), ptrB(true))
 
 	res, err := c.Calculate("24h")
 	if err != nil {
@@ -327,4 +355,3 @@ func TestParsePeriod(t *testing.T) {
 		})
 	}
 }
-
