@@ -116,6 +116,7 @@ func TestWeeklyWindowEndsFromSnapshot(t *testing.T) {
 		nil, nil,
 		nil, &weeklyEnds,
 		nil,
+		nil,
 		"{}",
 	)
 	if err != nil {
@@ -193,6 +194,7 @@ func TestWeeklyWindowOnSundayDoesNotExpireImmediately(t *testing.T) {
 		now, now, "userscript",
 		nil, nil,
 		&weekly, nil,
+		nil,
 		nil,
 		"{}",
 	); err != nil {
@@ -369,6 +371,7 @@ func TestActiveWindowReanchorsToSnapshotBoundary(t *testing.T) {
 		nil, nil,
 		&weekly, &authoritativeEnds,
 		nil,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -437,6 +440,7 @@ func TestExpiredSessionInactiveSnapshotSuppressesPhantomWindow(t *testing.T) {
 		nil, nil,
 		nil, nil,
 		&inactive,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -499,6 +503,7 @@ func TestExpiredSessionNullSessionActiveNoFreshEventLeavesWindowClosed(t *testin
 		nil, nil,
 		nil, nil,
 		nil,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -559,6 +564,7 @@ func TestExpiredSessionActiveSnapshotOpensNewWindow(t *testing.T) {
 		nil, &sessionEnds,
 		nil, nil,
 		&active,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -625,6 +631,7 @@ func TestActiveSessionInactiveSnapshotZeroUsedClosesWindowEarly(t *testing.T) {
 		&usedZero, nil,
 		nil, nil,
 		&inactive,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -687,6 +694,7 @@ func TestActiveSessionInactiveSnapshotNonzeroUsedKeepsWindowOpen(t *testing.T) {
 		&usedNonzero, nil,
 		nil, nil,
 		&inactive,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -750,6 +758,7 @@ func TestActiveSessionMostRecentRulePrefersNewerActiveSnapshot(t *testing.T) {
 		&usedZero, nil,
 		nil, nil,
 		&inactive,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert older snapshot: %v", err)
@@ -766,6 +775,7 @@ func TestActiveSessionMostRecentRulePrefersNewerActiveSnapshot(t *testing.T) {
 		&usedNewer, nil,
 		nil, nil,
 		&active,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert newer snapshot: %v", err)
@@ -805,6 +815,7 @@ func TestBaselineFromSnapshot(t *testing.T) {
 		&older, nil,
 		nil, nil,
 		nil,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("failed to insert older snapshot: %v", err)
@@ -815,6 +826,7 @@ func TestBaselineFromSnapshot(t *testing.T) {
 		now.Add(-1*time.Minute), now.Add(-1*time.Minute), "test",
 		&newer, nil,
 		nil, nil,
+		nil,
 		nil,
 		"{}",
 	); err != nil {
@@ -894,6 +906,7 @@ func TestBaselineCorrection(t *testing.T) {
 		laterTime, laterTime, "test",
 		&newBaseline, nil,
 		nil, nil,
+		nil,
 		nil,
 		"{}",
 	)
@@ -1012,6 +1025,7 @@ func TestEventAfterEarlyClosedWindowOpensEventAnchoredWindow(t *testing.T) {
 		&usedZero, nil,
 		nil, nil,
 		&inactive,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert inactive snapshot: %v", err)
@@ -1044,6 +1058,7 @@ func TestEventAfterEarlyClosedWindowOpensEventAnchoredWindow(t *testing.T) {
 		nil, nil,
 		nil, nil,
 		&active,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert active snapshot: %v", err)
@@ -1112,6 +1127,7 @@ func TestEventAnchoredWindowReanchorsOnSnapshotBoundary(t *testing.T) {
 		nil, &authoritativeEnds,
 		nil, nil,
 		&active,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)
@@ -1171,6 +1187,7 @@ func TestEventAnchoredWindowSeedsBaselineFromPriorSnapshot(t *testing.T) {
 		&older, nil,
 		nil, nil,
 		nil,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert older snapshot: %v", err)
@@ -1180,6 +1197,7 @@ func TestEventAnchoredWindowSeedsBaselineFromPriorSnapshot(t *testing.T) {
 		postExpiry.Add(-1*time.Minute), postExpiry.Add(-1*time.Minute), "userscript",
 		&newer, nil,
 		nil, nil,
+		nil,
 		nil,
 		"{}",
 	); err != nil {
@@ -1254,6 +1272,7 @@ func TestEventEvidenceSuppressedByInactiveSnapshot(t *testing.T) {
 		nil, nil,
 		nil, nil,
 		&inactive,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert inactive snapshot: %v", err)

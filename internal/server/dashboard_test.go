@@ -143,14 +143,14 @@ func TestDashboardStateNoOpenSessionSynthesizesHypothetical(t *testing.T) {
 	used := 42.5
 	if _, err := testStore.InsertQuotaSnapshot(
 		now.Add(-3*time.Hour), now.Add(-3*time.Hour), "userscript",
-		&used, nil, nil, nil, nil, "{}",
+		&used, nil, nil, nil, nil, nil, "{}",
 	); err != nil {
 		t.Fatalf("insert in-history snapshot: %v", err)
 	}
 	out := 10.0
 	if _, err := testStore.InsertQuotaSnapshot(
 		now.Add(-12*time.Hour), now.Add(-12*time.Hour), "userscript",
-		&out, nil, nil, nil, nil, "{}",
+		&out, nil, nil, nil, nil, nil, "{}",
 	); err != nil {
 		t.Fatalf("insert out-of-history snapshot: %v", err)
 	}

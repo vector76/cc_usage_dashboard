@@ -19,8 +19,9 @@ type SnapshotRequest struct {
 	WeeklyUsed        *float64   `json:"weekly_used"`
 	WeeklyWindowEnds  *time.Time `json:"weekly_window_ends"`
 	// Pointer so an absent field (NULL) is distinguishable from explicit false.
-	SessionActive *bool  `json:"session_active,omitempty"`
-	RawDOMText    string `json:"raw_dom_text,omitempty"`
+	SessionActive      *bool  `json:"session_active,omitempty"`
+	ContinuousWithPrev *bool  `json:"continuous_with_prev,omitempty"`
+	RawDOMText         string `json:"raw_dom_text,omitempty"`
 }
 
 // Sanity bounds for snapshot timestamps. Anything outside these ranges is
@@ -70,6 +71,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		req.WeeklyUsed,
 		req.WeeklyWindowEnds,
 		req.SessionActive,
+		req.ContinuousWithPrev,
 		string(rawJSON),
 	)
 
@@ -134,4 +136,3 @@ func validateSnapshotTimestamps(req *SnapshotRequest, now time.Time) error {
 	}
 	return nil
 }
-

@@ -209,6 +209,64 @@ func TestSnapshotInWindowUpdatesBaseline(t *testing.T) {
 	}
 }
 
+// TestSnapshotPersistsContinuousWithPrev checks the tri-state for the
+// continuity flag: true→1, false→0, omitted→NULL.
+func TestSnapshotPersistsContinuousWithPrev(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]any
+		want sql.NullInt64
+	}{
+		{
+			name: "true persists as 1",
+			body: map[string]any{"continuous_with_prev": true},
+			want: sql.NullInt64{Int64: 1, Valid: true},
+		},
+		{
+			name: "false persists as 0",
+			body: map[string]any{"continuous_with_prev": false},
+			want: sql.NullInt64{Int64: 0, Valid: true},
+		},
+		{
+			name: "omitted persists as NULL",
+			body: map[string]any{},
+			want: sql.NullInt64{Valid: false},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, testStore := createTestServer(t)
+			defer testStore.Close()
+
+			fixed := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+			srv.windowsEngine.SetNow(func() time.Time { return fixed })
+			srv.SetNow(func() time.Time { return fixed })
+
+			tc.body["observed_at"] = fixed
+			tc.body["source"] = "userscript"
+
+			body, _ := json.Marshal(tc.body)
+			req := jsonPOST("/snapshot", body)
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d (body=%s)", w.Code, w.Body.String())
+			}
+
+			var got sql.NullInt64
+			if err := testStore.DB().QueryRow(
+				`SELECT continuous_with_prev FROM quota_snapshots ORDER BY id DESC LIMIT 1`,
+			).Scan(&got); err != nil {
+				t.Fatalf("failed to read continuous_with_prev: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("continuous_with_prev: got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSnapshotPersistsSessionActive checks the tri-state: true→1, false→0, omitted→NULL.
 func TestSnapshotPersistsSessionActive(t *testing.T) {
 	cases := []struct {

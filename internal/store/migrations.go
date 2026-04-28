@@ -124,6 +124,15 @@ ALTER TABLE windows RENAME COLUMN baseline_total TO baseline_percent_used;
 ALTER TABLE quota_snapshots ADD COLUMN session_active INTEGER;
 `,
 	},
+	{
+		Version: 5,
+		Name:    "add_quota_snapshots_continuous_with_prev",
+		// Nullable INTEGER; NULL means absent — downstream consumers treat
+		// NULL as "start"/"unknown" for safety.
+		SQL: `
+ALTER TABLE quota_snapshots ADD COLUMN continuous_with_prev INTEGER;
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.

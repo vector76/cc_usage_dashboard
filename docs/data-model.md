@@ -53,6 +53,7 @@ later, headless scrape).
 | weekly_used           | REAL         | "All models" weekly % used (0–100). Nullable.  |
 | weekly_window_ends    | TIMESTAMP    | When the weekly window resets.                 |
 | session_active        | INTEGER      | Tri-state limbo signal. Nullable. See below.   |
+| continuous_with_prev  | INTEGER      | Tri-state continuity flag. Nullable. See below.|
 | raw_json              | TEXT         | Full payload for replay.                       |
 
 `session_active` is a tri-state column added by migration v4
@@ -71,6 +72,23 @@ The window engine consumes this column to refuse minting phantom
 session windows, to early-close an active window when limbo is
 confirmed, and to gate event-anchored re-opening. See
 `docs/no-active-session.md` for the end-to-end flow.
+
+`continuous_with_prev` is a tri-state column added by migration v5
+(`add_quota_snapshots_continuous_with_prev`) as a nullable `INTEGER`,
+mirroring the `session_active` shape. It records whether the snapshot
+the userscript posted is observed to be continuous with the previous
+snapshot the same source had in hand (e.g. same active session window,
+no gap that suggests a fresh page load or refresh).
+
+- `NULL` — the source did not report the field. Treated as
+  "start"/"unknown" by downstream consumers; do not infer continuity.
+- `0` (false) — the source positively detected a discontinuity from
+  its prior snapshot.
+- `1` (true) — the source observed continuity with its prior snapshot.
+
+Storing NULL on absence and treating NULL as "start"/"unknown" keeps
+older clients (which never set this field) safe by default — the
+engine will not assume continuity it cannot prove.
 
 ### `windows`
 

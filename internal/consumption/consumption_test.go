@@ -38,7 +38,7 @@ func insertEvent(t *testing.T, s *store.Store, occurred time.Time, costUSD *floa
 
 func insertSnapshot(t *testing.T, s *store.Store, observed time.Time, sessionUsed, weeklyUsed *float64, sessionEnds, weeklyEnds *time.Time) {
 	t.Helper()
-	_, err := s.InsertQuotaSnapshot(observed, observed, "test", sessionUsed, sessionEnds, weeklyUsed, weeklyEnds, nil, "{}")
+	_, err := s.InsertQuotaSnapshot(observed, observed, "test", sessionUsed, sessionEnds, weeklyUsed, weeklyEnds, nil, nil, "{}")
 	if err != nil {
 		t.Fatalf("insert snapshot: %v", err)
 	}

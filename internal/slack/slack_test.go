@@ -334,6 +334,7 @@ func seedFreshSnapshot(t *testing.T, s *store.Store, receivedAt time.Time, sessi
 		&sessionUsed, nil,
 		&sessionUsed, nil,
 		nil,
+		nil,
 		"{}",
 	); err != nil {
 		t.Fatalf("insert snapshot: %v", err)

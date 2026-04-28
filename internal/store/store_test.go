@@ -28,8 +28,8 @@ func TestOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("expected schema version 4, got %d", version)
+	if version != 5 {
+		t.Errorf("expected schema version 5, got %d", version)
 	}
 }
 
@@ -63,14 +63,14 @@ func TestMigrateFromV3AddsSessionActive(t *testing.T) {
 	// Restore the full set and run remaining migrations.
 	migrations = saved
 	if err := ApplyMigrations(db); err != nil {
-		t.Fatalf("failed to apply v4 migration: %v", err)
+		t.Fatalf("failed to apply v4+ migrations: %v", err)
 	}
 
 	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 4 {
-		t.Errorf("expected schema version 4 after migrating, got %d", version)
+	if version != 5 {
+		t.Errorf("expected schema version 5 after migrating, got %d", version)
 	}
 	if !columnExists(t, db, "quota_snapshots", "session_active") {
 		t.Fatalf("session_active column missing after migration")
@@ -91,6 +91,66 @@ func TestMigrateFromV3AddsSessionActive(t *testing.T) {
 	}
 	if sessionActive.Valid {
 		t.Errorf("expected session_active to default to NULL, got %d", sessionActive.Int64)
+	}
+}
+
+func TestMigrateFromV4AddsContinuousWithPrev(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open memory DB: %v", err)
+	}
+	defer db.Close()
+
+	// Apply only migrations up through v4 to simulate a database from before
+	// the continuity flag landed.
+	saved := migrations
+	defer func() { migrations = saved }()
+	migrations = saved[:4]
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("failed to apply v1-v4 migrations: %v", err)
+	}
+
+	var version int
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 4 {
+		t.Fatalf("expected schema version 4, got %d", version)
+	}
+	if columnExists(t, db, "quota_snapshots", "continuous_with_prev") {
+		t.Fatalf("continuous_with_prev column should not exist before migration")
+	}
+
+	migrations = saved
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("failed to apply v5 migration: %v", err)
+	}
+
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 5 {
+		t.Errorf("expected schema version 5 after migrating, got %d", version)
+	}
+	if !columnExists(t, db, "quota_snapshots", "continuous_with_prev") {
+		t.Fatalf("continuous_with_prev column missing after migration")
+	}
+
+	// Insert a row without continuous_with_prev and confirm NULL is the default.
+	now := time.Now()
+	_, err = db.Exec(`
+		INSERT INTO quota_snapshots (observed_at, received_at, source, raw_json)
+		VALUES (?, ?, ?, ?)
+	`, FormatTime(now), FormatTime(now), "userscript", "{}")
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	var continuousWithPrev sql.NullInt64
+	if err := db.QueryRow("SELECT continuous_with_prev FROM quota_snapshots LIMIT 1").Scan(&continuousWithPrev); err != nil {
+		t.Fatalf("select failed: %v", err)
+	}
+	if continuousWithPrev.Valid {
+		t.Errorf("expected continuous_with_prev to default to NULL, got %d", continuousWithPrev.Int64)
 	}
 }
 
@@ -252,6 +312,7 @@ func TestInsertQuotaSnapshot(t *testing.T) {
 		floatPtr(25.0), timePtr(time.Now().Add(5*time.Hour)),
 		floatPtr(40.0), timePtr(time.Now().Add(7*24*time.Hour)),
 		nil,
+		nil,
 		`{"session_used": 25.0}`,
 	)
 
@@ -298,6 +359,7 @@ func TestInsertQuotaSnapshotSessionActive(t *testing.T) {
 				nil, nil,
 				nil, nil,
 				tc.input,
+				nil,
 				"{}",
 			)
 			if err != nil {
@@ -312,6 +374,49 @@ func TestInsertQuotaSnapshotSessionActive(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("session_active: got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInsertQuotaSnapshotContinuousWithPrev(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	cases := []struct {
+		name  string
+		input *bool
+		want  sql.NullInt64
+	}{
+		{"true", boolPtr(true), sql.NullInt64{Int64: 1, Valid: true}},
+		{"false", boolPtr(false), sql.NullInt64{Int64: 0, Valid: true}},
+		{"nil", nil, sql.NullInt64{Valid: false}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			observedAt := time.Now()
+			id, err := store.InsertQuotaSnapshot(
+				observedAt, observedAt,
+				"userscript",
+				nil, nil,
+				nil, nil,
+				nil,
+				tc.input,
+				"{}",
+			)
+			if err != nil {
+				t.Fatalf("InsertQuotaSnapshot failed: %v", err)
+			}
+
+			var got sql.NullInt64
+			if err := store.db.QueryRow(
+				`SELECT continuous_with_prev FROM quota_snapshots WHERE id = ?`, id,
+			).Scan(&got); err != nil {
+				t.Fatalf("select failed: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("continuous_with_prev: got %+v, want %+v", got, tc.want)
 			}
 		})
 	}
