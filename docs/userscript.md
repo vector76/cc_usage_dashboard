@@ -130,6 +130,32 @@ The server uses the flag for write-time plateau compaction (see
 `docs/data-model.md`) and the dashboard uses it to decide where to break the
 burn-down polyline (see `docs/overview.md`).
 
+### Visibility-API spoof
+
+The userscript header sets `@run-at document-start` so we can install a
+visibility-API spoof (`userscript/lib/visibility.js`,
+`installVisibilitySpoof`) before any other script reads the API.
+`document.hidden` is forced to `false`, `document.visibilityState` is forced
+to `"visible"` (and the `webkit*` mirrors), and a capture-phase listener on
+the document calls `stopImmediatePropagation()` on every
+`visibilitychange` / `webkitvisibilitychange` event so application handlers
+never fire.
+
+The spoof targets a specific failure mode: when the OS screensaver kicks
+in or the window is minimized, claude.ai's poll loop pauses itself based
+on the visibility signal, the page's "Last updated" stops moving, and
+the userscript correctly suppresses sends (dedup) — leaving an honest but
+undesired gap in the chart. With the spoof installed, claude.ai's app
+stays unaware that the OS considers the tab hidden.
+
+Limit: this only addresses pauses claude.ai performs *itself* on the JS
+visibility signal. Browser-level throttling of timers,
+`requestAnimationFrame`, and task scheduling sits below the JS API and
+cannot be reached from a userscript. If claude.ai's polling cadence is
+limited by that, the spoof will not be enough; the next escalation is a
+silent-audio loop to keep Chromium's per-tab throttling state in
+"foreground."
+
 ## Why `GM.xmlHttpRequest`, not `fetch()`
 
 A plain `fetch()` from `https://claude.ai` to `http://localhost:27812` will fail in
@@ -222,8 +248,9 @@ once via their userscript manager. Auto-update can be configured via `@updateURL
 
 ## Pure-JS helpers and the test harness
 
-Pure-JS helpers (parsing, persistent state, dedup) live as CommonJS modules under
-`userscript/lib/` so `node --test` can `require()` them directly. The userscript itself
+Pure-JS helpers (parsing, persistent state, dedup, continuity, visibility spoof)
+live as CommonJS modules under `userscript/lib/` so `node --test` can
+`require()` them directly. The userscript itself
 is a single Tampermonkey-loaded IIFE with no build step, so each helper's function
 bodies are also **inlined** into `claude-usage-snapshot.user.js` alongside the
 existing utilities. The lib copy is the source of truth; the inlined copy is what

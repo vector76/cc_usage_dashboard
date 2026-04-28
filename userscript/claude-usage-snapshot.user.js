@@ -10,11 +10,60 @@
 // @connect      127.0.0.1
 // @updateURL    https://raw.githubusercontent.com/vector76/cc_usage_dashboard/main/userscript/claude-usage-snapshot.user.js
 // @downloadURL  https://raw.githubusercontent.com/vector76/cc_usage_dashboard/main/userscript/claude-usage-snapshot.user.js
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
     'use strict';
+
+    // ---------- visibility spoof (mirror of userscript/lib/visibility.js) ----------
+    //
+    // Installed first thing, before any other script reads the
+    // visibility API. See lib/visibility.js for full rationale; the
+    // short version is that claude.ai's poll loop pauses when the OS
+    // reports the tab as hidden (screensaver, minimize), and we want
+    // to keep it polling so the userscript still has fresh DOM to
+    // observe. `@run-at document-start` (above) is what lets this
+    // beat claude.ai's app init.
+    function installVisibilitySpoof(doc) {
+        if (!doc) return;
+
+        function defineAlwaysVisible(propName, value) {
+            try {
+                Object.defineProperty(doc, propName, {
+                    configurable: true,
+                    get() { return value; },
+                });
+            } catch (_) {
+                // Some hosts may have already locked the property
+                // as non-configurable; silently no-op.
+            }
+        }
+
+        defineAlwaysVisible('hidden', false);
+        defineAlwaysVisible('visibilityState', 'visible');
+        defineAlwaysVisible('webkitHidden', false);
+        defineAlwaysVisible('webkitVisibilityState', 'visible');
+
+        // Suppress visibilitychange events at the capture phase
+        // before any application-registered listener on `document`
+        // can observe them. (visibilitychange does not bubble to
+        // window, so listeners there are out of scope.) Cover the
+        // prefixed variant too.
+        if (typeof doc.addEventListener === 'function') {
+            const swallow = (e) => {
+                if (typeof e.stopImmediatePropagation === 'function') {
+                    e.stopImmediatePropagation();
+                }
+                if (typeof e.stopPropagation === 'function') {
+                    e.stopPropagation();
+                }
+            };
+            doc.addEventListener('visibilitychange', swallow, true);
+            doc.addEventListener('webkitvisibilitychange', swallow, true);
+        }
+    }
+    installVisibilitySpoof(typeof document !== 'undefined' ? document : null);
 
     const ENDPOINT_SNAPSHOT = 'http://localhost:27812/snapshot';
     const ENDPOINT_PARSE_ERROR = 'http://localhost:27812/parse_error';
