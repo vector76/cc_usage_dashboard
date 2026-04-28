@@ -116,3 +116,56 @@ test('loadState returns null when persisted record is missing lastSentAtMs', () 
 
     assert.strictEqual(loadState(), null);
 });
+
+test('round-trip persists sessionActive=false and lastUpdatedAgeMs', () => {
+    const stub = makeMemoryStorage();
+    _setStorageForTests(stub);
+
+    recordSentState({
+        sentAtMs: 1714200000000,
+        percent: 0,
+        resetText: null,
+        windowEndsMs: null,
+        sessionActive: false,
+        lastUpdatedAgeMs: 60_000,
+    });
+
+    const loaded = loadState();
+    assert.strictEqual(loaded.lastSessionActive, false);
+    assert.strictEqual(loaded.lastUpdatedAgeMs, 60_000);
+});
+
+test('round-trip persists lastUpdatedAgeMs=null (parser unparsable case)', () => {
+    const stub = makeMemoryStorage();
+    _setStorageForTests(stub);
+
+    recordSentState({
+        sentAtMs: 1714200000000,
+        percent: 42,
+        resetText: 'Resets in 1 hr',
+        windowEndsMs: 1714203600000,
+        sessionActive: false,
+        lastUpdatedAgeMs: null,
+    });
+
+    const loaded = loadState();
+    assert.strictEqual(loaded.lastUpdatedAgeMs, null);
+    assert.strictEqual(loaded.lastSessionActive, false);
+});
+
+test('omitted optional fields are absent from the loaded record (not undefined keys)', () => {
+    const stub = makeMemoryStorage();
+    _setStorageForTests(stub);
+
+    recordSentState({
+        sentAtMs: 1714200000000,
+        percent: 42,
+        resetText: 'Resets in 1 hr',
+        windowEndsMs: 1714203600000,
+        // sessionActive and lastUpdatedAgeMs intentionally omitted.
+    });
+
+    const loaded = loadState();
+    assert.ok(!('lastSessionActive' in loaded), 'lastSessionActive should be absent');
+    assert.ok(!('lastUpdatedAgeMs' in loaded), 'lastUpdatedAgeMs should be absent');
+});

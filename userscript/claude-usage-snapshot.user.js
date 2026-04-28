@@ -22,8 +22,9 @@
     const USAGE_PATH = '/settings/usage';
     // Backstop polling — primary signal is a MutationObserver on aria-valuenow,
     // so the interval only catches edge cases (observer torn down by SPA
-    // re-render, tab woken from background throttle, etc.).
-    const POST_INTERVAL_MS = 5 * 60 * 1000;
+    // re-render, tab woken from background throttle, etc.). Each tick is
+    // gated by the dedup decision, so a fast cadence is cheap.
+    const POST_INTERVAL_MS = 60 * 1000;
     const DOM_WAIT_TIMEOUT_MS = 30 * 1000;
     const DOM_MISSING_REPORT_MS = 5 * 60 * 1000;
     const PARSE_ERROR_REPORT_COOLDOWN_MS = 60 * 60 * 1000;
@@ -58,18 +59,21 @@
             const parsed = JSON.parse(raw);
             if (!parsed || typeof parsed !== 'object') return null;
             if (typeof parsed.lastSentAtMs !== 'number') return null;
-            return {
+            const result = {
                 lastSentAtMs: parsed.lastSentAtMs,
                 lastPercent: parsed.lastPercent,
                 lastResetText: parsed.lastResetText,
                 lastWindowEndsMs: parsed.lastWindowEndsMs,
             };
+            if (parsed.lastSessionActive !== undefined) result.lastSessionActive = parsed.lastSessionActive;
+            if (parsed.lastUpdatedAgeMs !== undefined) result.lastUpdatedAgeMs = parsed.lastUpdatedAgeMs;
+            return result;
         } catch (_) {
             return null;
         }
     }
 
-    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs }) {
+    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive, lastUpdatedAgeMs }) {
         try {
             const storage = (typeof globalThis !== 'undefined' && globalThis.localStorage) || null;
             if (!storage) return;
@@ -79,10 +83,40 @@
                 lastResetText: resetText,
                 lastWindowEndsMs: windowEndsMs,
             };
+            if (sessionActive !== undefined) record.lastSessionActive = sessionActive;
+            if (lastUpdatedAgeMs !== undefined) record.lastUpdatedAgeMs = lastUpdatedAgeMs;
             storage.setItem(STATE_STORAGE_KEY, JSON.stringify(record));
         } catch (_) {
             // Persistence is best-effort.
         }
+    }
+
+    // ---------- dedup decision (mirror of userscript/lib/dedup.js) ----------
+
+    function shouldSend(observation, prevState) {
+        if (!prevState) return 'send';
+
+        if (observation.sessionUsed !== prevState.lastPercent) return 'send';
+
+        if (observation.resetText !== prevState.lastResetText) return 'send';
+
+        const wasLimbo = prevState.lastSessionActive === false;
+        const nowLimbo = observation.sessionActive === false;
+        if (wasLimbo !== nowLimbo) return 'send';
+
+        if (nowLimbo) {
+            // While in limbo the visible numbers don't move, so a strict
+            // *decrease* in "Last updated" age is our only signal that a
+            // fresh poll landed. Null on either side is "no information"
+            // and must not fire. We deliberately do NOT fire on the age
+            // *incrementing* — that advances on pure wall-clock time and
+            // would re-introduce the spam dedup is meant to prevent.
+            const cur = observation.lastUpdatedAgeMs;
+            const prev = prevState.lastUpdatedAgeMs;
+            if (cur != null && prev != null && cur < prev) return 'send';
+        }
+
+        return 'skip';
     }
 
     // ---------- utilities ----------
@@ -234,23 +268,28 @@
         return target.toISOString();
     }
 
-    // Returns { sessionUsed, weeklyUsed, sessionWindowEnds, weeklyWindowEnds, sessionActive, observedAtMs }
+    // Returns { sessionUsed, weeklyUsed, sessionWindowEnds, weeklyWindowEnds,
+    //           sessionActive, observedAtMs, resetText, lastUpdatedAgeMs }
     // or null when neither section yields a usable bar. observedAtMs is the
     // wall-clock time the page's numbers were accurate (Date.now() minus the
     // "Last updated" staleness, or Date.now() when the indicator is missing).
     // sessionActive is false only when the limbo label is positively detected;
-    // it is left undefined otherwise (we never assert it is true).
+    // it is left undefined otherwise (we never assert it is true). resetText
+    // is the verbatim "Resets in …" text on the session row (null in limbo or
+    // when missing), used by the dedup layer to spot string ticks. lastUpdatedAgeMs
+    // is the raw "Last updated" staleness in ms (null when unparsable).
     function extractQuota() {
         const headings = Array.from(document.querySelectorAll('h2'))
             .map(h => ({ node: h, text: (h.textContent || '').trim() }));
         const bars = document.querySelectorAll('[role="progressbar"][aria-label="Usage"]');
 
-        const ageMs = findLastUpdatedAgeMs();
-        const observedAtMs = Date.now() - (ageMs || 0);
+        const lastUpdatedAgeMs = findLastUpdatedAgeMs();
+        const observedAtMs = Date.now() - (lastUpdatedAgeMs || 0);
 
         let sessionUsed = null, weeklyUsed = null;
         let sessionEnds = null, weeklyEnds = null;
         let sessionActive;
+        let sessionResetText = null;
 
         for (const bar of bars) {
             const heading = precedingHeading(bar, headings);
@@ -261,7 +300,8 @@
 
             if (heading === SESSION_HEADING && sessionUsed === null) {
                 sessionUsed = value;
-                sessionEnds = parseSessionEnds(findRowResetText(bar), observedAtMs);
+                sessionResetText = findRowResetText(bar);
+                sessionEnds = parseSessionEnds(sessionResetText, observedAtMs);
                 if (isSessionLimbo(bar)) sessionActive = false;
             } else if (heading === WEEKLY_HEADING && weeklyUsed === null) {
                 weeklyUsed = value;
@@ -272,7 +312,16 @@
         }
 
         if (sessionUsed === null && weeklyUsed === null) return null;
-        return { sessionUsed, weeklyUsed, sessionWindowEnds: sessionEnds, weeklyWindowEnds: weeklyEnds, sessionActive, observedAtMs };
+        return {
+            sessionUsed,
+            weeklyUsed,
+            sessionWindowEnds: sessionEnds,
+            weeklyWindowEnds: weeklyEnds,
+            sessionActive,
+            observedAtMs,
+            resetText: sessionResetText,
+            lastUpdatedAgeMs,
+        };
     }
 
     // ---------- diagnostics ----------
@@ -322,8 +371,9 @@
         return body;
     }
 
-    // No client-side dedup: identical-value observations are kept so plateau
-    // duration is preserved. Server is responsible for any read-time rollup.
+    // Freshness-driven dedup: emit only when at least one meaningful-change
+    // signal has fired since the last successful send. The decision lives in
+    // shouldSend(); see lib/dedup.js for the canonical logic and rationale.
     function tryDispatch() {
         if (!onUsagePage()) {
             domFirstMissingAt = null;
@@ -347,7 +397,19 @@
         }
 
         domFirstMissingAt = null;
+
+        const prevState = loadState();
+        if (shouldSend(extracted, prevState) === 'skip') return;
+
         postJSON(ENDPOINT_SNAPSHOT, buildSnapshotBody(extracted));
+        recordSentState({
+            sentAtMs: Date.now(),
+            percent: extracted.sessionUsed,
+            resetText: extracted.resetText,
+            windowEndsMs: extracted.sessionWindowEnds ? Date.parse(extracted.sessionWindowEnds) : null,
+            sessionActive: extracted.sessionActive,
+            lastUpdatedAgeMs: extracted.lastUpdatedAgeMs,
+        });
     }
 
     function scheduleDispatch() {
