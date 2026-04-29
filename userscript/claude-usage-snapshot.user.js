@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.6.0
+// @version      0.6.1
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -368,7 +368,12 @@
     // when missing), used by the dedup layer to spot string ticks. lastUpdatedAgeMs
     // is the raw "Last updated" staleness in ms (null when unparsable).
     function extractQuota() {
-        const headings = Array.from(document.querySelectorAll('h2'))
+        // Anthropic moved the section headings from <h2> to <h3> as of late
+        // April 2026 and started appending plan-tier badges to the heading
+        // text (e.g. "Plan usage limitsMax (20x)"). We accept either tag and
+        // match the section name as a *prefix* so a trailing badge doesn't
+        // break extraction.
+        const headings = Array.from(document.querySelectorAll('h2, h3'))
             .map(h => ({ node: h, text: (h.textContent || '').trim() }));
         const bars = document.querySelectorAll('[role="progressbar"][aria-label="Usage"]');
 
@@ -387,12 +392,12 @@
             const value = parseFloat(bar.getAttribute('aria-valuenow'));
             if (Number.isNaN(value)) continue;
 
-            if (heading === SESSION_HEADING && sessionUsed === null) {
+            if (heading.startsWith(SESSION_HEADING) && sessionUsed === null) {
                 sessionUsed = value;
                 sessionResetText = findRowResetText(bar);
                 sessionEnds = parseSessionEnds(sessionResetText, observedAtMs);
                 if (isSessionLimbo(bar)) sessionActive = false;
-            } else if (heading === WEEKLY_HEADING && weeklyUsed === null) {
+            } else if (heading.startsWith(WEEKLY_HEADING) && weeklyUsed === null) {
                 weeklyUsed = value;
                 // Weekly hint is an absolute clock time ("Resets Thu 11:00 PM"),
                 // so page staleness doesn't shift it.

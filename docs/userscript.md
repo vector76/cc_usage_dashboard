@@ -19,8 +19,13 @@ path is exactly `/settings/usage`. On that path:
 
 1. Wait for at least one `[role="progressbar"][aria-label="Usage"]` node to render
    (MutationObserver, with a sane timeout).
-2. **Anchor on `<h2>` section headings, not row labels.** For each progressbar, find
-   the most recent preceding `<h2>` in document order. Only two sections are kept:
+2. **Anchor on section headings, not row labels.** For each progressbar, find
+   the most recent preceding `<h2>` or `<h3>` in document order (Anthropic
+   has used both in different revisions). Section names are matched as a
+   *prefix* — a heading whose text starts with `Plan usage limits` or
+   `Weekly limits` qualifies, even if a plan-tier badge has been concatenated
+   onto the end (e.g. `"Plan usage limitsMax (20x)"`). Only two sections are
+   kept:
    - `Plan usage limits` → first bar in this section is "Current session"
      (% of the rolling 5-hour window).
    - `Weekly limits` → first bar in this section is the aggregate "All models"
@@ -28,7 +33,9 @@ path is exactly `/settings/usage`. On that path:
    Sub-rows under "Weekly limits" (Sonnet only, Claude Design, future additions),
    the "Additional features" section (routines), and the extra-usage section are
    all ignored. Anchoring on section titles is more durable than matching row
-   labels — Anthropic edits row text often, section headings rarely.
+   labels — Anthropic edits row text often, section headings rarely. The
+   tag and prefix-match generosity here is a hedge against future cosmetic
+   reshuffles of the heading element.
 3. Read `aria-valuenow` (0–100) directly. We do not text-scrape the "X% used" label.
 4. Parse the page's "Last updated: N minutes ago" indicator into a staleness
    delta. The percent values and the "Resets in …" hint are accurate as of
