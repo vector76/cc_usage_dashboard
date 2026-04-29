@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.6.1
+// @version      0.6.2
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -258,13 +258,19 @@
     }
 
     // Walk up from a progressbar to locate the row's reset hint. The label
-    // column for each row carries a sibling <p> like "Resets in 19 min" or
-    // "Resets Thu 11:00 PM"; we stop at the first ancestor that contains one.
+    // column for each row carries text like "Resets in 19 min" or
+    // "Resets Thu 11:00 PM" or "Resets May 1". Anthropic has shipped this
+    // hint inside <p>, <span>, and <div> elements at various points, so
+    // we scan any leaf element (one with no element children) under each
+    // ancestor and stop at the first whose trimmed text starts with
+    // "Resets". The leaf restriction prevents matching a row container
+    // whose textContent starts with the hint but trails into other copy.
     function findRowResetText(bar) {
         let node = bar.parentElement;
         for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
-            for (const p of node.querySelectorAll(':scope p')) {
-                const t = (p.textContent || '').trim();
+            for (const el of node.querySelectorAll(':scope *')) {
+                if (el.children.length > 0) continue;
+                const t = (el.textContent || '').trim();
                 if (/^Resets\b/i.test(t)) return t;
             }
         }
@@ -273,15 +279,16 @@
 
     // Detect the "no active session" limbo label on the session row. When no
     // session window is open, Anthropic replaces the "Resets in …" hint with
-    // copy like "Starts when a message is sent". We scope the walk to the
-    // session row's ancestors (same shape as findRowResetText) so similar
+    // copy like "Starts when a message is sent". Same leaf-element walk as
+    // findRowResetText: scope to the session row's ancestors so similar
     // marketing/help text elsewhere on the page can't trigger a false match.
     function isSessionLimbo(bar) {
         const needle = 'starts when a message is sent';
         let node = bar.parentElement;
         for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
-            for (const p of node.querySelectorAll(':scope p')) {
-                const t = (p.textContent || '').toLowerCase();
+            for (const el of node.querySelectorAll(':scope *')) {
+                if (el.children.length > 0) continue;
+                const t = (el.textContent || '').toLowerCase();
                 if (t.includes(needle)) return true;
             }
         }
