@@ -347,7 +347,9 @@
     // timezone. We pick the next future occurrence of that weekday at that
     // local time and convert to UTC. Format variants like "Resets May 1"
     // (when far enough out that Anthropic switches to a date) are not
-    // currently parsed; null falls back to the server's calendar default.
+    // currently parsed; null causes the server to skip minting a weekly
+    // window until a parseable hint arrives, and the dashboard renders a
+    // [now, now+7d] hypothetical projection in the meantime.
     const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     function parseWeeklyEnds(text) {
         if (!text) return null;

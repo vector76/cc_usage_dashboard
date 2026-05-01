@@ -67,14 +67,18 @@ func TestFirstEventCreatesSessionWindow(t *testing.T) {
 	}
 }
 
-func TestFirstEventCreatesWeeklyWindow(t *testing.T) {
+// TestEventAloneDoesNotCreateWeeklyWindow: a usage event without an
+// authoritative boundary (no quota_snapshot supplying weekly_window_ends)
+// must not trigger weekly minting. The engine declines and the dashboard
+// renders a hypothetical [now, now+7d]; this prevents anchoring the
+// weekly window on a calendar guess.
+func TestEventAloneDoesNotCreateWeeklyWindow(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()
 
 	now := time.Date(2026, 4, 26, 10, 30, 0, 0, time.UTC)
 	engine.SetNow(func() time.Time { return now })
 
-	// Insert an event
 	_, err := s.InsertUsageEvent(
 		now, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
 		100, 50, 0, 0, nil, "", "{}",
@@ -83,20 +87,18 @@ func TestFirstEventCreatesWeeklyWindow(t *testing.T) {
 		t.Fatalf("failed to insert event: %v", err)
 	}
 
-	// Update windows
 	if err := engine.UpdateWindows(); err != nil {
 		t.Fatalf("UpdateWindows failed: %v", err)
 	}
 
-	// Check that a weekly window was created
 	var count int
-	row := s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'weekly' AND closed = 0`)
+	row := s.DB().QueryRow(`SELECT COUNT(*) FROM windows WHERE kind = 'weekly'`)
 	if err := row.Scan(&count); err != nil {
 		t.Fatalf("query failed: %v", err)
 	}
 
-	if count != 1 {
-		t.Fatalf("expected 1 weekly window, got %d", count)
+	if count != 0 {
+		t.Fatalf("expected 0 weekly windows (no boundary supplied), got %d", count)
 	}
 }
 
@@ -143,85 +145,32 @@ func TestWeeklyWindowEndsFromSnapshot(t *testing.T) {
 	}
 }
 
-func TestWeeklyWindowDefaultBoundary(t *testing.T) {
+// TestWeeklyWindowEmptyDBNoMint asserts that ensureWeeklyWindow refuses
+// to mint a phantom weekly window when the DB is empty. The broader rule
+// — no minting without a future weekly_window_ends — covers this case
+// too, but the empty-DB scenario is worth pinning because it was the
+// original symptom that motivated removing the calendar fallback (a
+// brand-new install would otherwise show a chart anchored on last Monday
+// UTC). The dashboard renders a hypothetical [now, now+7d] in this case.
+func TestWeeklyWindowEmptyDBNoMint(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()
 
-	// Wednesday April 22 2026 12:00 UTC. Default boundary is the midnight
-	// at the start of the upcoming Monday: Monday April 27 00:00 UTC. The
-	// older formulation subtracted 24h, which put ends_at in the past on a
-	// Sunday and caused the freshly-created window to be born expired.
-	now := time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 5, 1, 14, 30, 0, 0, time.UTC)
 	engine.SetNow(func() time.Time { return now })
 
 	if err := engine.UpdateWindows(); err != nil {
-		t.Fatalf("UpdateWindows failed: %v", err)
+		t.Fatalf("UpdateWindows on empty DB: %v", err)
 	}
 
-	var endsAt time.Time
-	row := s.DB().QueryRow(`SELECT ends_at FROM windows WHERE kind = 'weekly' AND closed = 0`)
-	if err := row.Scan(&endsAt); err != nil {
-		t.Fatalf("query failed: %v", err)
+	var n int
+	if err := s.DB().QueryRow(
+		`SELECT COUNT(*) FROM windows WHERE kind = 'weekly'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count weekly windows: %v", err)
 	}
-
-	wantEnds := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC)
-	if !endsAt.Equal(wantEnds) {
-		t.Errorf("default weekly ends_at: got %v, want %v", endsAt, wantEnds)
-	}
-
-	// Regression guard: the window must be in the future relative to `now`.
-	// Without this, a fresh weekly window could be created already-expired,
-	// excluding a contemporaneous snapshot from the in-window baseline pass.
-	if !endsAt.After(now) {
-		t.Errorf("default weekly ends_at must be after now; got %v vs now %v", endsAt, now)
-	}
-}
-
-// TestWeeklyWindowOnSundayDoesNotExpireImmediately is a regression test for
-// the bug where, on a Sunday, the default fallback (Sunday 00:00 UTC of the
-// current week) put ends_at in the past, so a snapshot recorded later that
-// same Sunday fell outside the synthesized window and never seeded the
-// weekly baseline.
-func TestWeeklyWindowOnSundayDoesNotExpireImmediately(t *testing.T) {
-	engine, s := createTestEngine(t)
-	defer s.Close()
-
-	// Sunday April 26 2026 20:12 UTC — the failure mode was reported here.
-	now := time.Date(2026, 4, 26, 20, 12, 0, 0, time.UTC)
-	engine.SetNow(func() time.Time { return now })
-
-	weekly := 24.0
-	if _, err := s.InsertQuotaSnapshot(
-		now, now, "userscript",
-		nil, nil,
-		&weekly, nil,
-		nil,
-		nil,
-		nil,
-		"{}",
-	); err != nil {
-		t.Fatalf("insert snapshot: %v", err)
-	}
-
-	if err := engine.UpdateWindows(); err != nil {
-		t.Fatalf("UpdateWindows: %v", err)
-	}
-
-	var startedAt, endsAt time.Time
-	var baseline sql.NullFloat64
-	row := s.DB().QueryRow(`SELECT started_at, ends_at, baseline_percent_used FROM windows WHERE kind = 'weekly' AND closed = 0`)
-	if err := row.Scan(&startedAt, &endsAt, &baseline); err != nil {
-		t.Fatalf("query failed: %v", err)
-	}
-
-	if !endsAt.After(now) {
-		t.Fatalf("weekly ends_at=%v is not after now=%v; window is born expired", endsAt, now)
-	}
-	if !startedAt.Before(now) || !endsAt.After(now) {
-		t.Errorf("snapshot must fall inside the weekly window; got [%v, %v) for now=%v", startedAt, endsAt, now)
-	}
-	if !baseline.Valid || baseline.Float64 != weekly {
-		t.Errorf("expected weekly baseline_percent_used=%v, got %v", weekly, baseline)
+	if n != 0 {
+		t.Errorf("expected 0 weekly windows on empty DB, got %d", n)
 	}
 }
 
@@ -311,9 +260,8 @@ func TestWeeklyLimboWithBoundaryStillOpensWindow(t *testing.T) {
 // the same stale boundary (born expired), and repeats on every snapshot tick
 // — a loop that floods the windows table with zombie rows. Observed in
 // production: 38 closed weekly rows accumulated over a single ~38-minute
-// limbo gap. The fix is to treat a stale boundary the same as no boundary,
-// which routes to the limbo-refusal branch (when weekly_active=false is on
-// file) or the calendar fallback (otherwise).
+// limbo gap. The fix is to treat a stale boundary the same as no boundary
+// and refuse to mint, regardless of whether weekly_active=false is on file.
 func TestWeeklyStaleBoundaryDoesNotLoop(t *testing.T) {
 	t.Run("with weekly_active=false: refuse to mint", func(t *testing.T) {
 		engine, s := createTestEngine(t)
@@ -384,11 +332,13 @@ func TestWeeklyStaleBoundaryDoesNotLoop(t *testing.T) {
 		}
 	})
 
-	t.Run("with weekly_active=NULL: fall through to calendar fallback", func(t *testing.T) {
+	t.Run("with weekly_active=NULL: refuse to mint", func(t *testing.T) {
 		// Same setup but the userscript doesn't supply weekly_active
-		// (e.g. older v0.6.x userscript). The stale-boundary fix routes
-		// through to nextMondayMidnight, which gives a future ends_at —
-		// no born-expired loop.
+		// (e.g. older v0.6.x userscript). With the calendar fallback
+		// removed, the engine treats this case the same as limbo:
+		// no usable boundary → no minting. The dashboard's hypothetical
+		// [now, now+7d] covers the gap until the userscript reports a
+		// fresh weekly_window_ends.
 		engine, s := createTestEngine(t)
 		defer s.Close()
 
@@ -440,23 +390,11 @@ func TestWeeklyStaleBoundaryDoesNotLoop(t *testing.T) {
 		).Scan(&closed); err != nil {
 			t.Fatalf("query closed: %v", err)
 		}
-		// Calendar fallback minted exactly one open weekly row, with a
-		// future ends_at; subsequent ticks see the existing row's
-		// ends_at as still-future and don't re-mint.
-		if open != 1 {
-			t.Errorf("expected 1 open weekly row (calendar fallback), got %d", open)
+		if open != 0 {
+			t.Errorf("expected 0 open weekly rows under stale-boundary + weekly_active=NULL, got %d", open)
 		}
 		if closed != 1 {
 			t.Errorf("expected exactly 1 closed weekly row (the original), got %d (re-mint loop?)", closed)
-		}
-		var endsAt time.Time
-		if err := s.DB().QueryRow(
-			`SELECT ends_at FROM windows WHERE kind='weekly' AND closed=0`,
-		).Scan(&endsAt); err != nil {
-			t.Fatalf("query ends_at: %v", err)
-		}
-		if !endsAt.After(postRollover) {
-			t.Errorf("calendar-fallback weekly ends_at=%v must be after now=%v (born expired?)", endsAt, postRollover)
 		}
 	})
 }
@@ -569,20 +507,30 @@ func TestWindowExpiry(t *testing.T) {
 	}
 }
 
-// TestActiveWindowReanchorsToSnapshotBoundary is a regression for the case
-// where a window was born under the calendar fallback (because no snapshot
-// had supplied an authoritative boundary yet), then the userscript later
-// started reporting the real reset time. ensureWeeklyWindow used to consult
-// snapshots only at creation, leaving the active window stuck on the wrong
-// boundary until it expired — which for weekly is up to 7 days.
+// TestActiveWindowReanchorsToSnapshotBoundary is a regression for the
+// case where an active weekly window's boundary needs to be updated when
+// a fresh snapshot reports a different reset time than the one the
+// window was born with. ensureWeeklyWindow used to consult snapshots
+// only at creation, leaving the active window stuck on the wrong
+// boundary until it expired — up to 7 days.
 func TestActiveWindowReanchorsToSnapshotBoundary(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()
 
-	// Sunday April 26 2026 21:00 UTC, with no snapshots yet — the engine
-	// will fall back to the calendar default for the weekly window.
+	// Sunday April 26 2026 21:00 UTC. The first snapshot supplies an
+	// initial boundary; a later snapshot reports a different one.
 	now := time.Date(2026, 4, 26, 21, 0, 0, 0, time.UTC)
 	engine.SetNow(func() time.Time { return now })
+
+	initialEnds := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	if _, err := s.InsertQuotaSnapshot(
+		now, now, "userscript",
+		nil, nil,
+		nil, &initialEnds,
+		nil, nil, nil, "{}",
+	); err != nil {
+		t.Fatalf("insert initial snapshot: %v", err)
+	}
 
 	if err := engine.UpdateWindows(); err != nil {
 		t.Fatalf("first UpdateWindows: %v", err)
@@ -594,18 +542,19 @@ func TestActiveWindowReanchorsToSnapshotBoundary(t *testing.T) {
 	).Scan(&oldStart, &oldEnds); err != nil {
 		t.Fatalf("query initial weekly window: %v", err)
 	}
-	wantOldEnds := time.Date(2026, 4, 27, 0, 0, 0, 0, time.UTC) // calendar default
-	if !oldEnds.Equal(wantOldEnds) {
-		t.Fatalf("calendar-default ends_at: got %v, want %v", oldEnds, wantOldEnds)
+	if !oldEnds.Equal(initialEnds) {
+		t.Fatalf("initial ends_at: got %v, want %v", oldEnds, initialEnds)
 	}
 
-	// Userscript v0.3 starts reporting the real reset time (Friday 04:00 UTC,
-	// = Thursday 11pm Eastern). The currently-active window should be
-	// re-anchored, not left stuck on the calendar fallback.
+	// A later snapshot reports a different reset time (e.g. Anthropic's
+	// hint became more precise, or the parser recovered). The active
+	// window should be re-anchored in place, not left on the old boundary.
+	later := now.Add(15 * time.Minute)
+	engine.SetNow(func() time.Time { return later })
 	authoritativeEnds := time.Date(2026, 5, 1, 4, 0, 0, 0, time.UTC)
 	weekly := 24.0
 	if _, err := s.InsertQuotaSnapshot(
-		now, now, "userscript",
+		later, later, "userscript",
 		nil, nil,
 		&weekly, &authoritativeEnds,
 		nil,

@@ -138,24 +138,25 @@ For session windows, three behaviours flow from that:
   guessing a 5-hour boundary out of thin air.
 
 For weekly windows, only the **refuse-to-mint** behaviour applies,
-and it is gated more narrowly than the session version: when no real
-open weekly row exists, no snapshot supplies a `weekly_window_ends`
-that is **strictly in the future** (`findWeeklyBoundary()` returns
-zero, or returns a timestamp ≤ `now`), AND the most recent snapshot
-reports `weekly_active=false`, the engine returns without inserting a
-row. The `After(now)` clause is critical: at every weekly reset
-`findWeeklyBoundary()` returns the just-passed boundary from
+and it is gated on the boundary alone: when no real open weekly row
+exists and no snapshot supplies a `weekly_window_ends` that is
+**strictly in the future** (`findWeeklyBoundary()` returns zero, or
+returns a timestamp ≤ `now`), the engine returns without inserting
+a row — regardless of whether `weekly_active` is `false`, `true`,
+or absent. The `After(now)` clause is critical: at every weekly
+reset `findWeeklyBoundary()` returns the just-passed boundary from
 pre-rollover snapshots, and a stale boundary is functionally the
 same as no boundary — minting with it would produce a born-expired
 row that the next tick closes and re-mints, a loop that floods the
 table with zombie rows (38 closed rows accumulated in a single
-~38-minute limbo gap before this guard was added). When a snapshot
-supplies a *future* boundary, that boundary wins over the limbo
-signal — this differs from the session path, where
-`session_active=false` is checked before the boundary is consulted.
-There is no early-closure path for weekly: an existing real weekly
-row is left alone and heals via re-anchor (when a snapshot supplies
-a real future boundary) or natural expiry.
+~38-minute limbo gap before this guard was added). The engine has
+no calendar fallback: anchoring a window on a guess (e.g. last
+Monday UTC) would surface a real-looking week with no data instead
+of letting the dashboard project a hypothetical `[now, now + 7d]`
+from the current time. There is no early-closure path for weekly
+either: an existing real weekly row is left alone and heals via
+re-anchor (when a snapshot supplies a real future boundary) or
+natural expiry.
 
 `reanchorIfStale` carries the same future-only guard for the
 existing-row path: it refuses to push an active window's `ends_at`
@@ -212,13 +213,11 @@ See `docs/configuration.md` for the threshold's semantics and
 `docs/slack-indicator.md` for the full gate structure.
 
 The weekly headroom gate has a parallel three-leg structure with the
-same deadlock-breaker. When `ensureWeeklyWindow` refuses to mint
-under `weekly_active=false`, `resp.Weekly` is nil, and the third leg
-fires so the queue is unblocked — symmetric to the session path.
-Before this change weekly-absent was unreachable in practice (the
-engine always minted a calendar-fallback row), so the slack gate's
-deadlock-breaker was session-only; the symmetric weekly leg was
-added when the refuse-to-mint guard landed.
+same deadlock-breaker. When `ensureWeeklyWindow` refuses to mint —
+under `weekly_active=false` limbo, an absent or stale
+`weekly_window_ends`, or an empty DB — `resp.Weekly` is nil, and the
+third leg fires so the queue is unblocked, symmetric to the session
+path.
 
 ## Invariants
 

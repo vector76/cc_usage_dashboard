@@ -49,8 +49,9 @@ path is exactly `/settings/usage`. On that path:
      local time, converted to UTC. Absolute clock-time hints are unaffected
      by page staleness.
    These land in `session_window_ends` / `weekly_window_ends` so the server can
-   anchor the windows on Anthropic's actual reset boundary instead of a calendar
-   guess.
+   anchor the windows on Anthropic's actual reset boundary. Without a parseable
+   hint the server declines to mint and the dashboard renders a `[now, now+7d]`
+   hypothetical projection.
 6. POST to `http://localhost:27812/snapshot`.
 
 **Trigger sources, in priority order:**
@@ -215,7 +216,10 @@ row is parseable the other field is omitted and the trayapp records what was fou
 `*_window_ends` are RFC3339 timestamps derived from each row's "Resets …" hint;
 they're omitted when the hint is in a format the parser doesn't recognize (e.g.
 "Resets May 1" when the boundary is far enough out that Anthropic switches to a
-date), in which case the server falls back to its calendar default.
+date). The server requires a future `weekly_window_ends` to mint a weekly window;
+in its absence (older script, parser miss, or limbo) the engine declines to mint
+and the dashboard renders a `[now, now+7d]` projection until a parseable hint
+arrives.
 
 `session_active` and `weekly_active` are optional booleans the script
 emits **only** when it positively detects "no active window" limbo on

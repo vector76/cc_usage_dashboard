@@ -209,6 +209,58 @@ func TestDashboardStateNoOpenSessionSynthesizesHypothetical(t *testing.T) {
 	}
 }
 
+// TestDashboardStateHypotheticalSessionLoadsPreWindowVolume: when the
+// session is synthesized as hypothetical, the bar-chart volume buckets
+// for the 10h pre-window history are loaded so usage from prior sessions
+// still renders below the percent curve. Buckets outside the lookback
+// must be excluded.
+func TestDashboardStateHypotheticalSessionLoadsPreWindowVolume(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	srv.dashboardHandler.SetNow(func() time.Time { return now })
+
+	// One event 3h ago (inside the 10h lookback) and one 12h ago (outside).
+	inCost := 0.42
+	if _, err := testStore.InsertUsageEvent(
+		now.Add(-3*time.Hour), "api", "sess-in", "msg-in", "/proj", "model-x",
+		1000, 500, 0, 0, &inCost, "reported", "{}",
+	); err != nil {
+		t.Fatalf("insert in-history event: %v", err)
+	}
+	outCost := 0.99
+	if _, err := testStore.InsertUsageEvent(
+		now.Add(-12*time.Hour), "api", "sess-out", "msg-out", "/proj", "model-x",
+		1000, 500, 0, 0, &outCost, "reported", "{}",
+	); err != nil {
+		t.Fatalf("insert out-of-history event: %v", err)
+	}
+
+	state := fetchDashboardState(t, srv)
+
+	if state.Session == nil || !state.Session.Hypothetical {
+		t.Fatalf("expected hypothetical Session, got %+v", state.Session)
+	}
+
+	// Exactly one bucket — the 3h-ago one. The 12h-ago event is older
+	// than the 10h lookback and must not appear.
+	if len(state.Session.Volume) != 1 {
+		t.Fatalf("Volume len = %d, want 1; got %+v", len(state.Session.Volume), state.Session.Volume)
+	}
+	b := state.Session.Volume[0]
+	if b.CostUSD != inCost {
+		t.Errorf("Volume[0].CostUSD = %v, want %v", b.CostUSD, inCost)
+	}
+	historyStart := now.Add(-10 * time.Hour)
+	if b.BucketStart.Before(historyStart) || !b.BucketStart.Before(now) {
+		t.Errorf("Volume[0].BucketStart = %v, want in [%v, %v)", b.BucketStart, historyStart, now)
+	}
+	if state.Session.BucketSecs <= 0 {
+		t.Errorf("BucketSecs = %d, want > 0", state.Session.BucketSecs)
+	}
+}
+
 // TestDashboardStateNoOpenWeeklySynthesizesHypothetical: when no real
 // open weekly window exists (e.g. because the engine refused to mint one
 // under weekly limbo), the response carries a hypothetical Weekly window
@@ -248,6 +300,44 @@ func TestDashboardStateNoOpenWeeklySynthesizesHypothetical(t *testing.T) {
 	}
 	if state.Weekly.BaselinePercentUsed == nil || *state.Weekly.BaselinePercentUsed != 0 {
 		t.Errorf("expected Weekly.BaselinePercentUsed=0, got %v", state.Weekly.BaselinePercentUsed)
+	}
+}
+
+// TestDashboardStateEmptyDBSynthesizesHypotheticalWeekly: with a fully
+// empty database (no quota_snapshots, no usage_events) the engine must
+// refuse to mint the calendar-default weekly phantom. The dashboard
+// then synthesizes a hypothetical Weekly anchored on `now` rather than
+// showing a real-looking week with no data anchored on last Monday UTC.
+func TestDashboardStateEmptyDBSynthesizesHypotheticalWeekly(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	now := time.Date(2026, 5, 1, 14, 30, 0, 0, time.UTC)
+	srv.dashboardHandler.SetNow(func() time.Time { return now })
+	srv.windowsEngine.SetNow(func() time.Time { return now })
+
+	// Drive the windows engine on the empty DB so any leftover assumption
+	// about calendar minting would surface as a real (non-hypothetical)
+	// weekly row in the response.
+	if err := srv.windowsEngine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows on empty DB: %v", err)
+	}
+
+	state := fetchDashboardState(t, srv)
+
+	if state.Weekly == nil {
+		t.Fatal("expected synthesized hypothetical Weekly, got nil")
+	}
+	if !state.Weekly.Hypothetical {
+		t.Errorf("expected Weekly.Hypothetical=true, got false (engine minted a phantom?)")
+	}
+	if !state.Weekly.StartedAt.Equal(now) {
+		t.Errorf("Weekly.StartedAt = %v, want %v (anchored on `now`, not last Monday UTC)",
+			state.Weekly.StartedAt, now)
+	}
+	wantEnds := now.Add(7 * 24 * time.Hour)
+	if !state.Weekly.EndsAt.Equal(wantEnds) {
+		t.Errorf("Weekly.EndsAt = %v, want %v", state.Weekly.EndsAt, wantEnds)
 	}
 }
 

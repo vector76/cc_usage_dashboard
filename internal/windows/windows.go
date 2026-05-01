@@ -266,9 +266,11 @@ func (e *Engine) ensureWeeklyWindow() error {
 
 	if err == nil {
 		// Window exists. Re-anchor on snapshot boundary if needed (see
-		// comment in ensureSessionWindow); same reason — old weekly
-		// windows born under the calendar fallback can be stuck on the
-		// wrong boundary for up to a week.
+		// comment in ensureSessionWindow); same reason — a window born
+		// from one snapshot's boundary can drift if a later snapshot
+		// reports a more precise or corrected reset time, and the
+		// active window should follow rather than wait up to 7 days
+		// for natural expiry.
 		if window.EndsAt.After(now) {
 			if err := e.reanchorIfStale(window.ID, window.EndsAt, "weekly", 7*24*time.Hour); err != nil {
 				return err
@@ -285,35 +287,28 @@ func (e *Engine) ensureWeeklyWindow() error {
 		return fmt.Errorf("failed to query windows: %w", err)
 	}
 
-	// Try to get window boundary from the most recent snapshot. The
-	// boundary is "usable" only when it is also strictly in the future:
-	// findWeeklyBoundary returns the most recent snapshot whose
-	// weekly_window_ends is non-null, but at a weekly reset that value
-	// is the just-passed boundary, and minting a window with a past
-	// ends_at produces a born-expired row that the next tick closes
+	// Mint a new weekly window iff a snapshot supplies an authoritative
+	// boundary (weekly_window_ends) that is strictly in the future. The
+	// After(now) check guards against minting on a just-passed boundary,
+	// which would produce a born-expired row that the next tick closes
 	// and re-mints — a loop that floods the windows table with zombie
-	// rows. The After(now) check mirrors the analogous guard in
-	// ensureSessionWindow.
+	// rows.
+	//
+	// When no usable boundary is available — userscript reports limbo
+	// (weekly_active=false), the DB is empty, an older userscript never
+	// emitted weekly_window_ends, or a stale boundary lingers across a
+	// rollover — refuse to mint. The dashboard then synthesizes a
+	// hypothetical [now, now+7d] (see synthesizeHypotheticalWeekly), so
+	// the chart always projects from the current time rather than from
+	// a calendar-aligned guess. This mirrors the session path, which
+	// also mints nothing in the absence of authoritative evidence. See
+	// docs/no-active-session.md.
 	endsAt, err := e.findWeeklyBoundary()
-	if err != nil || endsAt.IsZero() || !endsAt.After(now) {
-		// No usable snapshot-supplied boundary. If the most recent
-		// snapshot reports the weekly window as inactive (limbo),
-		// refuse to mint a phantom — Anthropic considers there to be
-		// no active weekly window, and zero open weekly rows is a
-		// permitted state. The dashboard renders a hypothetical
-		// [now, now+7d] in this case. (See docs/no-active-session.md
-		// for the symmetric session treatment and rationale.)
-		weeklyActive, err := e.findMostRecentWeeklyActive()
-		if err != nil {
-			return err
-		}
-		if weeklyActive != nil && !*weeklyActive {
-			return nil
-		}
-		// Default: midnight UTC at the start of the upcoming Monday
-		// (i.e. end-of-Sunday boundary). Must be in the future relative
-		// to `now` or the window is born already-expired.
-		endsAt = e.nextMondayMidnight(now)
+	if err != nil {
+		return err
+	}
+	if endsAt.IsZero() || !endsAt.After(now) {
+		return nil
 	}
 
 	startTime := endsAt.Add(-7 * 24 * time.Hour)
@@ -411,8 +406,10 @@ func (e *Engine) findBaseline(kind string, t time.Time) (*float64, string, error
 // Why: snapshot-supplied boundaries ("Resets in 4 hr 55 min") have minute
 // resolution; the same instant rendered into the page can drift ±1 min as
 // the user lingers. We tolerate up to 2 min of drift to avoid thrashing
-// while still re-anchoring windows born under a calendar-default fallback
-// that's hours or days off the truth.
+// while still re-anchoring when a later snapshot reports a materially
+// different reset time than the one the window was born with (e.g. a
+// coarse "Resets May 1" hint replaced by a precise "Resets in 23 hr 14
+// min").
 //
 // Refuse to re-anchor onto a snapshot boundary that's already in the past:
 // findWeeklyBoundary (and findSessionBoundary) return the most recent
@@ -515,33 +512,6 @@ func (e *Engine) findMostRecentSessionActive() (*bool, *float64, time.Time, erro
 	return activePtr, usedPtr, observedAt, nil
 }
 
-// findMostRecentWeeklyActive returns the weekly_active value from the most
-// recent quota_snapshots row. Nil pointer when the column is NULL or when no
-// snapshots exist. The userscript only sets weekly_active=false when it
-// positively observes the "Starts when a message is sent" limbo label on the
-// weekly row; absence does not assert active.
-func (e *Engine) findMostRecentWeeklyActive() (*bool, error) {
-	var active sql.NullInt64
-	err := e.db.QueryRow(`
-		SELECT weekly_active
-		FROM quota_snapshots
-		ORDER BY observed_at DESC
-		LIMIT 1
-	`).Scan(&active)
-
-	if err == sql.ErrNoRows {
-		return nil, nil
-	} else if err != nil {
-		return nil, fmt.Errorf("failed to query weekly snapshot: %w", err)
-	}
-
-	if !active.Valid {
-		return nil, nil
-	}
-	v := active.Int64 != 0
-	return &v, nil
-}
-
 // findWeeklyBoundary extracts the weekly window boundary from the most recent snapshot.
 func (e *Engine) findWeeklyBoundary() (time.Time, error) {
 	var boundary time.Time
@@ -560,14 +530,5 @@ func (e *Engine) findWeeklyBoundary() (time.Time, error) {
 	}
 
 	return boundary, nil
-}
-
-// nextMondayMidnight returns the next Monday at midnight UTC.
-func (e *Engine) nextMondayMidnight(t time.Time) time.Time {
-	// Monday = 1
-	for t.Weekday() != time.Monday {
-		t = t.Add(24 * time.Hour)
-	}
-	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 }
 

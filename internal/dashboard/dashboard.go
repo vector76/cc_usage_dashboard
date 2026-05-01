@@ -34,10 +34,12 @@ type WindowState struct {
 	// rows for buckets that have data.
 	BucketSecs int `json:"bucket_secs"`
 	// Hypothetical is true when no real open window backs this state and
-	// the handler synthesized a placeholder spanning [now, now+5h] so the
-	// UI has somewhere to project pace against. ID is 0 in that case and
-	// in-window Series/Volume are empty; pre-window history is still
-	// populated for the session view's 10h lookback.
+	// the handler synthesized a placeholder spanning [now, now+5h] (session)
+	// or [now, now+7d] (weekly) so the UI has somewhere to project pace
+	// against. ID is 0 in that case and in-window Series/Volume are empty.
+	// The session view additionally loads the 10h pre-window snapshot
+	// history into Series and the matching cost buckets into Volume so the
+	// ghost lookback isn't blank; weekly has no analogous pre-window region.
 	Hypothetical bool `json:"hypothetical,omitempty"`
 }
 
@@ -272,10 +274,12 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 // synthesizeHypotheticalSession builds a placeholder WindowState for the
 // session view when no real open session row exists in the windows table.
 // The synthesized window spans [now, now+5h] so the UI has a stable domain
-// to render; in-window Series/Volume are intentionally empty (there can be
-// no observations inside a window that has not begun in real life), but
-// the 10h pre-window snapshot history is still loaded so the user can see
-// the prior session(s) on the chart even without an active one.
+// to render; in-window observations are necessarily empty (no events can
+// land inside a window that has not begun in real life), but the 10h
+// pre-window snapshot history is loaded into Series and the matching
+// pre-window cost buckets are loaded into Volume so the user sees the
+// prior session(s) on both the % curve and the bar chart even without
+// an active session.
 func (h *Handler) synthesizeHypotheticalSession(db *sql.DB) (*WindowState, error) {
 	now := h.now()
 	startedAt := now
@@ -283,6 +287,11 @@ func (h *Handler) synthesizeHypotheticalSession(db *sql.DB) (*WindowState, error
 
 	historyStart := startedAt.Add(-10 * time.Hour)
 	series, err := h.loadUsedSeries(db, "session", historyStart, startedAt)
+	if err != nil {
+		return nil, err
+	}
+	bucketSecs := bucketSecsForKind("session")
+	volume, err := h.loadVolumeSeries(db, historyStart, startedAt, bucketSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -294,8 +303,8 @@ func (h *Handler) synthesizeHypotheticalSession(db *sql.DB) (*WindowState, error
 		EndsAt:              endsAt,
 		BaselinePercentUsed: &zero,
 		Series:              series,
-		Volume:              []SeriesBucket{},
-		BucketSecs:          bucketSecsForKind("session"),
+		Volume:              volume,
+		BucketSecs:          bucketSecs,
 		Hypothetical:        true,
 	}, nil
 }
