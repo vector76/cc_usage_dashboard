@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.7.0
+// @version      0.7.1
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -80,9 +80,16 @@
 
     // Section heading texts that anchor extraction. Row labels under each
     // heading change as Anthropic adjusts plan features (Sonnet only, Claude
-    // Design, Routines, …); section names move much less. The first
-    // progressbar following each heading is the one we keep.
-    const SESSION_HEADING = 'Plan usage limits';
+    // Design, Routines, …); section names move occasionally too. We match
+    // any of the known variants as a prefix so a trailing plan-tier badge
+    // ("Your usage limitsTeam", "Plan usage limitsMax (20x)") doesn't break
+    // extraction. The first progressbar following each heading is the one
+    // we keep.
+    //
+    // Known session-heading history:
+    //   "Plan usage limits" — through April 2026
+    //   "Your usage limits" — observed May 2026
+    const SESSION_HEADINGS = ['Your usage limits', 'Plan usage limits'];
     const WEEKLY_HEADING = 'Weekly limits';
 
     // Coalesce burst mutations (multiple bars updating in one React commit)
@@ -388,9 +395,10 @@
     function extractQuota() {
         // Anthropic moved the section headings from <h2> to <h3> as of late
         // April 2026 and started appending plan-tier badges to the heading
-        // text (e.g. "Plan usage limitsMax (20x)"). We accept either tag and
-        // match the section name as a *prefix* so a trailing badge doesn't
-        // break extraction.
+        // text (e.g. "Plan usage limitsMax (20x)", "Your usage limitsTeam").
+        // We accept either tag and match the section name as a *prefix*
+        // against the known variants in SESSION_HEADINGS / WEEKLY_HEADING
+        // so a trailing badge or rename doesn't break extraction.
         const headings = Array.from(document.querySelectorAll('h2, h3'))
             .map(h => ({ node: h, text: (h.textContent || '').trim() }));
         const bars = document.querySelectorAll('[role="progressbar"][aria-label="Usage"]');
@@ -411,7 +419,7 @@
             const value = parseFloat(bar.getAttribute('aria-valuenow'));
             if (Number.isNaN(value)) continue;
 
-            if (heading.startsWith(SESSION_HEADING) && sessionUsed === null) {
+            if (SESSION_HEADINGS.some(h => heading.startsWith(h)) && sessionUsed === null) {
                 sessionUsed = value;
                 sessionResetText = findRowResetText(bar);
                 sessionEnds = parseSessionEnds(sessionResetText, observedAtMs);
@@ -451,14 +459,16 @@
     // else.
     function buildFingerprint() {
         try {
-            const headings = Array.from(document.querySelectorAll('h2'))
+            // Match the same tag set extractQuota anchors on so a heading
+            // rename or h2→h3 shuffle is visible in the fingerprint.
+            const headings = Array.from(document.querySelectorAll('h2, h3'))
                 .map(h => (h.textContent || '').trim().slice(0, 80))
                 .filter(Boolean)
                 .slice(0, 30);
             const fp = {
                 pathname: location.pathname,
-                h2_count: headings.length,
-                h2_texts: headings,
+                heading_count: headings.length,
+                heading_texts: headings,
                 progressbar_count: document.querySelectorAll('[role="progressbar"]').length,
                 usage_progressbar_count: document.querySelectorAll('[role="progressbar"][aria-label="Usage"]').length,
                 user_agent_short: (navigator.userAgent || '').slice(0, 120),
