@@ -305,6 +305,162 @@ func TestWeeklyLimboWithBoundaryStillOpensWindow(t *testing.T) {
 	}
 }
 
+// Regression: at a weekly boundary crossing, findWeeklyBoundary returns the
+// just-passed timestamp from earlier snapshots. Without an After(now) guard,
+// the engine closes the expired window, then immediately mints a new one with
+// the same stale boundary (born expired), and repeats on every snapshot tick
+// — a loop that floods the windows table with zombie rows. Observed in
+// production: 38 closed weekly rows accumulated over a single ~38-minute
+// limbo gap. The fix is to treat a stale boundary the same as no boundary,
+// which routes to the limbo-refusal branch (when weekly_active=false is on
+// file) or the calendar fallback (otherwise).
+func TestWeeklyStaleBoundaryDoesNotLoop(t *testing.T) {
+	t.Run("with weekly_active=false: refuse to mint", func(t *testing.T) {
+		engine, s := createTestEngine(t)
+		defer s.Close()
+
+		// Anchor a week with boundary at staleEnds, then advance the clock
+		// past it. Any snapshot row from before the rollover would have had
+		// weekly_window_ends=staleEnds; that's what findWeeklyBoundary will
+		// return long after the rollover.
+		staleEnds := time.Date(2026, 5, 1, 4, 0, 0, 0, time.UTC)
+		preRollover := staleEnds.Add(-1 * time.Hour)
+		engine.SetNow(func() time.Time { return preRollover })
+
+		weeklyUsed := 41.0
+		if _, err := s.InsertQuotaSnapshot(
+			preRollover, preRollover, "userscript",
+			nil, nil,
+			&weeklyUsed, &staleEnds,
+			nil, nil, nil, "{}",
+		); err != nil {
+			t.Fatalf("insert pre-rollover snapshot: %v", err)
+		}
+		if err := engine.UpdateWindows(); err != nil {
+			t.Fatalf("UpdateWindows pre-rollover: %v", err)
+		}
+
+		// Advance past the boundary into limbo.
+		postRollover := staleEnds.Add(15 * time.Minute)
+		engine.SetNow(func() time.Time { return postRollover })
+
+		// Userscript reports weekly_active=false; no new boundary.
+		inactive := false
+		zero := 0.0
+		if _, err := s.InsertQuotaSnapshot(
+			postRollover, postRollover, "userscript",
+			nil, nil,
+			&zero, nil,
+			nil, &inactive, nil, "{}",
+		); err != nil {
+			t.Fatalf("insert post-rollover snapshot: %v", err)
+		}
+
+		// Run a few times to simulate snapshot-tick cadence.
+		for i := 0; i < 5; i++ {
+			if err := engine.UpdateWindows(); err != nil {
+				t.Fatalf("UpdateWindows tick %d: %v", i, err)
+			}
+		}
+
+		var open, closed int
+		if err := s.DB().QueryRow(
+			`SELECT COUNT(*) FROM windows WHERE kind='weekly' AND closed=0`,
+		).Scan(&open); err != nil {
+			t.Fatalf("query open: %v", err)
+		}
+		if err := s.DB().QueryRow(
+			`SELECT COUNT(*) FROM windows WHERE kind='weekly' AND closed=1`,
+		).Scan(&closed); err != nil {
+			t.Fatalf("query closed: %v", err)
+		}
+		if open != 0 {
+			t.Errorf("expected 0 open weekly rows under limbo + stale boundary, got %d", open)
+		}
+		// Exactly one closed row: the original pre-rollover window. No
+		// re-mint loop means no additional closed rows.
+		if closed != 1 {
+			t.Errorf("expected exactly 1 closed weekly row (the original), got %d (re-mint loop?)", closed)
+		}
+	})
+
+	t.Run("with weekly_active=NULL: fall through to calendar fallback", func(t *testing.T) {
+		// Same setup but the userscript doesn't supply weekly_active
+		// (e.g. older v0.6.x userscript). The stale-boundary fix routes
+		// through to nextMondayMidnight, which gives a future ends_at —
+		// no born-expired loop.
+		engine, s := createTestEngine(t)
+		defer s.Close()
+
+		staleEnds := time.Date(2026, 5, 1, 4, 0, 0, 0, time.UTC)
+		preRollover := staleEnds.Add(-1 * time.Hour)
+		engine.SetNow(func() time.Time { return preRollover })
+
+		weeklyUsed := 41.0
+		if _, err := s.InsertQuotaSnapshot(
+			preRollover, preRollover, "userscript",
+			nil, nil,
+			&weeklyUsed, &staleEnds,
+			nil, nil, nil, "{}",
+		); err != nil {
+			t.Fatalf("insert pre-rollover: %v", err)
+		}
+		if err := engine.UpdateWindows(); err != nil {
+			t.Fatalf("UpdateWindows pre-rollover: %v", err)
+		}
+
+		postRollover := staleEnds.Add(15 * time.Minute)
+		engine.SetNow(func() time.Time { return postRollover })
+
+		// No weekly_active emitted; no new boundary either.
+		zero := 0.0
+		if _, err := s.InsertQuotaSnapshot(
+			postRollover, postRollover, "userscript",
+			nil, nil,
+			&zero, nil,
+			nil, nil, nil, "{}",
+		); err != nil {
+			t.Fatalf("insert post-rollover: %v", err)
+		}
+
+		for i := 0; i < 5; i++ {
+			if err := engine.UpdateWindows(); err != nil {
+				t.Fatalf("UpdateWindows tick %d: %v", i, err)
+			}
+		}
+
+		var open, closed int
+		if err := s.DB().QueryRow(
+			`SELECT COUNT(*) FROM windows WHERE kind='weekly' AND closed=0`,
+		).Scan(&open); err != nil {
+			t.Fatalf("query open: %v", err)
+		}
+		if err := s.DB().QueryRow(
+			`SELECT COUNT(*) FROM windows WHERE kind='weekly' AND closed=1`,
+		).Scan(&closed); err != nil {
+			t.Fatalf("query closed: %v", err)
+		}
+		// Calendar fallback minted exactly one open weekly row, with a
+		// future ends_at; subsequent ticks see the existing row's
+		// ends_at as still-future and don't re-mint.
+		if open != 1 {
+			t.Errorf("expected 1 open weekly row (calendar fallback), got %d", open)
+		}
+		if closed != 1 {
+			t.Errorf("expected exactly 1 closed weekly row (the original), got %d (re-mint loop?)", closed)
+		}
+		var endsAt time.Time
+		if err := s.DB().QueryRow(
+			`SELECT ends_at FROM windows WHERE kind='weekly' AND closed=0`,
+		).Scan(&endsAt); err != nil {
+			t.Fatalf("query ends_at: %v", err)
+		}
+		if !endsAt.After(postRollover) {
+			t.Errorf("calendar-fallback weekly ends_at=%v must be after now=%v (born expired?)", endsAt, postRollover)
+		}
+	})
+}
+
 func TestMultipleEventsInSameWindow(t *testing.T) {
 	engine, s := createTestEngine(t)
 	defer s.Close()

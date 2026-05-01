@@ -75,8 +75,11 @@ The window engine consumes these columns to refuse minting phantom
 windows. For `session_active` it also early-closes an active window
 when limbo is confirmed and gates event-anchored re-opening; for
 `weekly_active` only the refuse-to-mint behaviour applies, and only
-when no `weekly_window_ends` is on file from any snapshot. See
-`docs/no-active-session.md` for the end-to-end flow.
+when no snapshot supplies a `weekly_window_ends` that is strictly in
+the future (a stale past boundary counts as "no usable boundary" —
+otherwise the engine would loop on close-and-mint of born-expired
+weekly windows at every weekly reset). See `docs/no-active-session.md`
+for the end-to-end flow.
 
 `continuous_with_prev` is a tri-state column added by migration v5
 (`add_quota_snapshots_continuous_with_prev`) as a nullable `INTEGER`,

@@ -139,22 +139,28 @@ For session windows, three behaviours flow from that:
 
 For weekly windows, only the **refuse-to-mint** behaviour applies,
 and it is gated more narrowly than the session version: when no real
-open weekly row exists, `findWeeklyBoundary()` returns zero (no
-snapshot in history has supplied a `weekly_window_ends`), AND the
-most recent snapshot reports `weekly_active=false`, the engine
-returns without inserting a row. (Without this guard, the calendar
-fallback `nextMondayMidnight` would mint a phantom row anchored to
-Monday 00:00 UTC — visible as "Sunday 7:00 PM" in US Eastern — even
-when no real weekly window is open.) When *any* snapshot in history
-has supplied a boundary, that boundary wins over the limbo signal —
-this differs from the session path, where `session_active=false` is
-checked before the boundary is consulted. The narrower rule reflects
-the user's reported scenario (userscript only ever saw limbo, no
-boundary ever sent) and avoids speculative early-refusal when an
-authoritative weekly reset time is on file. There is no early-closure
-path for weekly: an existing real weekly row is left alone and heals
-via re-anchor (when a snapshot supplies a real boundary) or natural
-expiry.
+open weekly row exists, no snapshot supplies a `weekly_window_ends`
+that is **strictly in the future** (`findWeeklyBoundary()` returns
+zero, or returns a timestamp ≤ `now`), AND the most recent snapshot
+reports `weekly_active=false`, the engine returns without inserting a
+row. The `After(now)` clause is critical: at every weekly reset
+`findWeeklyBoundary()` returns the just-passed boundary from
+pre-rollover snapshots, and a stale boundary is functionally the
+same as no boundary — minting with it would produce a born-expired
+row that the next tick closes and re-mints, a loop that floods the
+table with zombie rows (38 closed rows accumulated in a single
+~38-minute limbo gap before this guard was added). When a snapshot
+supplies a *future* boundary, that boundary wins over the limbo
+signal — this differs from the session path, where
+`session_active=false` is checked before the boundary is consulted.
+There is no early-closure path for weekly: an existing real weekly
+row is left alone and heals via re-anchor (when a snapshot supplies
+a real future boundary) or natural expiry.
+
+`reanchorIfStale` carries the same future-only guard for the
+existing-row path: it refuses to push an active window's `ends_at`
+onto a past snapshot boundary, which would otherwise produce the
+same born-expired loop one layer deeper.
 
 The combined effect is that the windows table reflects what actually
 happened, not what a snapshot's `session_used` / `weekly_used` value
@@ -232,7 +238,9 @@ added when the refuse-to-mint guard landed.
   either a future `session_window_ends` or a fresh `usage_event`
   past the last closed window can mint a new row.
 - The weekly equivalent is narrower: `weekly_active=false` only blocks
-  minting when no snapshot in history has supplied a
-  `weekly_window_ends`. If any snapshot has, that boundary wins over
-  the limbo signal — the engine consults the boundary first and only
-  checks `weekly_active` in the no-boundary branch.
+  minting when no snapshot supplies a `weekly_window_ends` that is
+  strictly in the future. A stale (past) boundary is treated the same
+  as no boundary, both for the open path (`ensureWeeklyWindow`) and
+  the re-anchor path (`reanchorIfStale`). Without the future-only
+  guard, the engine would loop on close-and-mint of born-expired
+  windows at every weekly reset.

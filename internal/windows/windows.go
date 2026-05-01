@@ -285,16 +285,24 @@ func (e *Engine) ensureWeeklyWindow() error {
 		return fmt.Errorf("failed to query windows: %w", err)
 	}
 
-	// Try to get window boundary from the most recent snapshot
+	// Try to get window boundary from the most recent snapshot. The
+	// boundary is "usable" only when it is also strictly in the future:
+	// findWeeklyBoundary returns the most recent snapshot whose
+	// weekly_window_ends is non-null, but at a weekly reset that value
+	// is the just-passed boundary, and minting a window with a past
+	// ends_at produces a born-expired row that the next tick closes
+	// and re-mints — a loop that floods the windows table with zombie
+	// rows. The After(now) check mirrors the analogous guard in
+	// ensureSessionWindow.
 	endsAt, err := e.findWeeklyBoundary()
-	if err != nil || endsAt.IsZero() {
-		// No snapshot-supplied boundary. If the most recent snapshot
-		// reports the weekly window as inactive (limbo), refuse to mint
-		// a phantom — Anthropic considers there to be no active weekly
-		// window, and zero open weekly rows is a permitted state. The
-		// dashboard renders a hypothetical [now, now+7d] in this case.
-		// (See docs/no-active-session.md for the symmetric session
-		// treatment and rationale.)
+	if err != nil || endsAt.IsZero() || !endsAt.After(now) {
+		// No usable snapshot-supplied boundary. If the most recent
+		// snapshot reports the weekly window as inactive (limbo),
+		// refuse to mint a phantom — Anthropic considers there to be
+		// no active weekly window, and zero open weekly rows is a
+		// permitted state. The dashboard renders a hypothetical
+		// [now, now+7d] in this case. (See docs/no-active-session.md
+		// for the symmetric session treatment and rationale.)
 		weeklyActive, err := e.findMostRecentWeeklyActive()
 		if err != nil {
 			return err
@@ -405,6 +413,14 @@ func (e *Engine) findBaseline(kind string, t time.Time) (*float64, string, error
 // the user lingers. We tolerate up to 2 min of drift to avoid thrashing
 // while still re-anchoring windows born under a calendar-default fallback
 // that's hours or days off the truth.
+//
+// Refuse to re-anchor onto a snapshot boundary that's already in the past:
+// findWeeklyBoundary (and findSessionBoundary) return the most recent
+// non-null boundary regardless of staleness, so right after a reset the
+// returned timestamp is the just-passed boundary. Re-anchoring an active
+// window onto that would push its ends_at into the past, immediately
+// expiring it and triggering the same close-and-mint loop the
+// ensureWeeklyWindow After(now) guard prevents on the open path.
 func (e *Engine) reanchorIfStale(windowID int64, currentEndsAt time.Time, kind string, duration time.Duration) error {
 	const tolerance = 2 * time.Minute
 
@@ -418,7 +434,7 @@ func (e *Engine) reanchorIfStale(windowID int64, currentEndsAt time.Time, kind s
 	default:
 		return nil
 	}
-	if err != nil || snapshotEnds.IsZero() {
+	if err != nil || snapshotEnds.IsZero() || !snapshotEnds.After(e.now()) {
 		return nil
 	}
 
