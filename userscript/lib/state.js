@@ -42,13 +42,14 @@ function loadState() {
             lastWindowEndsMs: parsed.lastWindowEndsMs,
         };
         if (parsed.lastSessionActive !== undefined) result.lastSessionActive = parsed.lastSessionActive;
+        if (parsed.lastWeeklyActive !== undefined) result.lastWeeklyActive = parsed.lastWeeklyActive;
         return result;
     } catch (_) {
         return null;
     }
 }
 
-function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive }) {
+function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive, weeklyActive }) {
     try {
         const storage = _resolveStorage();
         if (!storage) return;
@@ -59,6 +60,7 @@ function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionAc
             lastWindowEndsMs: windowEndsMs,
         };
         if (sessionActive !== undefined) record.lastSessionActive = sessionActive;
+        if (weeklyActive !== undefined) record.lastWeeklyActive = weeklyActive;
         storage.setItem(STATE_STORAGE_KEY, JSON.stringify(record));
     } catch (_) {
         // Persistence is best-effort; never throw out of the dispatch path.

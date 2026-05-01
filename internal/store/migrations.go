@@ -133,6 +133,16 @@ ALTER TABLE quota_snapshots ADD COLUMN session_active INTEGER;
 ALTER TABLE quota_snapshots ADD COLUMN continuous_with_prev INTEGER;
 `,
 	},
+	{
+		Version: 6,
+		Name:    "add_quota_snapshots_weekly_active",
+		// Nullable INTEGER; NULL means the field was not reported by the
+		// source. Symmetric with session_active (migration v4) — see
+		// docs/no-active-session.md.
+		SQL: `
+ALTER TABLE quota_snapshots ADD COLUMN weekly_active INTEGER;
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.

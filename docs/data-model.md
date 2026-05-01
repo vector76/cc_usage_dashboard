@@ -53,24 +53,29 @@ later, headless scrape).
 | weekly_used           | REAL         | "All models" weekly % used (0–100). Nullable.  |
 | weekly_window_ends    | TIMESTAMP    | When the weekly window resets.                 |
 | session_active        | INTEGER      | Tri-state limbo signal. Nullable. See below.   |
+| weekly_active         | INTEGER      | Tri-state limbo signal. Nullable. See below.   |
 | continuous_with_prev  | INTEGER      | Tri-state continuity flag. Nullable. See below.|
 | raw_json              | TEXT         | Full payload for replay.                       |
 
 `session_active` is a tri-state column added by migration v4
-(`add_quota_snapshots_session_active`) as a nullable `INTEGER`:
+(`add_quota_snapshots_session_active`) as a nullable `INTEGER`.
+`weekly_active` is the same shape, added by migration v6
+(`add_quota_snapshots_weekly_active`):
 
 - `NULL` — the source did not report the field. Treat as "unknown"; do
-  not infer presence or absence of an active session window from this.
-- `0` (false) — the source positively detected "no active session"
+  not infer presence or absence of an active window from this.
+- `0` (false) — the source positively detected "no active window"
   limbo (Anthropic's UI shows "Starts when a message is sent" instead
-  of a "Resets in …" hint).
+  of a "Resets in …" hint on the corresponding row).
 - `1` (true) — reserved. The userscript never asserts true; absence
   encodes "unknown" instead. Other ingestion sources may set 1
   explicitly if they have a positive signal.
 
-The window engine consumes this column to refuse minting phantom
-session windows, to early-close an active window when limbo is
-confirmed, and to gate event-anchored re-opening. See
+The window engine consumes these columns to refuse minting phantom
+windows. For `session_active` it also early-closes an active window
+when limbo is confirmed and gates event-anchored re-opening; for
+`weekly_active` only the refuse-to-mint behaviour applies, and only
+when no `weekly_window_ends` is on file from any snapshot. See
 `docs/no-active-session.md` for the end-to-end flow.
 
 `continuous_with_prev` is a tri-state column added by migration v5
@@ -93,10 +98,10 @@ engine will not assume continuity it cannot prove.
 **Write-time plateau compaction.** When a snapshot arrives with
 `continuous_with_prev = 1` and every "match" field
 (`session_used`, `weekly_used`, `session_window_ends`,
-`weekly_window_ends`, `session_active`) is identical to the most
-recent row from the same `source`, the existing row's `observed_at`
-and `received_at` are slid forward in place instead of inserting a
-duplicate. The slide is suppressed when the prior row is itself an
+`weekly_window_ends`, `session_active`, `weekly_active`) is identical
+to the most recent row from the same `source`, the existing row's
+`observed_at` and `received_at` are slid forward in place instead of
+inserting a duplicate. The slide is suppressed when the prior row is itself an
 explicit start (`continuous_with_prev = 0`), so a fresh page load
 always anchors a new row.
 

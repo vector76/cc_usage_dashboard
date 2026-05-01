@@ -20,6 +20,7 @@ type SnapshotRequest struct {
 	WeeklyWindowEnds  *time.Time `json:"weekly_window_ends"`
 	// Pointer so an absent field (NULL) is distinguishable from explicit false.
 	SessionActive      *bool  `json:"session_active,omitempty"`
+	WeeklyActive       *bool  `json:"weekly_active,omitempty"`
 	ContinuousWithPrev *bool  `json:"continuous_with_prev,omitempty"`
 	RawDOMText         string `json:"raw_dom_text,omitempty"`
 }
@@ -71,6 +72,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		req.WeeklyUsed,
 		req.WeeklyWindowEnds,
 		req.SessionActive,
+		req.WeeklyActive,
 		req.ContinuousWithPrev,
 		string(rawJSON),
 	)

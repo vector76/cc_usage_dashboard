@@ -1,12 +1,14 @@
 # No-active-session model
 
-Anthropic's quota UI has a state where no 5-hour session window is
-currently open: the "Current session" row replaces its "Resets in N hr
-M min" hint with the phrase **"Starts when a message is sent."** This
-page documents how that state propagates end-to-end through the
-trayapp, from userscript detection to the slack gate, so behaviour in
-limbo is consistent and intentional rather than an accident of which
-component happens to default to what.
+Anthropic's quota UI has a state where no quota window is currently
+open: the corresponding row replaces its "Resets in N hr M min" /
+"Resets <Day> H:MM PM" hint with the phrase **"Starts when a message
+is sent."** This applies independently to the 5-hour "Current session"
+row and the weekly "All models" row. This page documents how that
+state propagates end-to-end through the trayapp, from userscript
+detection to the slack gate, so behaviour in limbo is consistent and
+intentional rather than an accident of which component happens to
+default to what.
 
 ## Why this needs special handling
 
@@ -28,11 +30,12 @@ tri-valued signal carried from the source through to the gate. No
 component invents the state on its own; each one acts on the same
 authoritative bit.
 
-## Tri-state signal: `session_active`
+## Tri-state signal: `session_active` / `weekly_active`
 
-Throughout the system, `session_active` is **tri-valued**:
+Throughout the system, `session_active` and `weekly_active` are each
+**tri-valued**:
 
-- `true` — a session window is genuinely active.
+- `true` — the corresponding window is genuinely active.
 - `false` — limbo is positively detected. There is no active window
   and the source is sure of it.
 - `unknown` (NULL / field absent) — the source cannot positively
@@ -44,15 +47,29 @@ the absence of the field to mean "I saw a normal Resets hint, so
 nothing limbo-specific to report." Other ingestion paths may set it
 explicitly when they have a positive truth signal.
 
+The weekly path mirrors the session path one-to-one: same DOM scan,
+same nullable INTEGER column (`weekly_active`, migration v6), same
+"refuse to mint phantoms" guard in the windows engine, same
+hypothetical placeholder in the dashboard. The only behavioural
+asymmetry is that the weekly engine does **not** early-close an
+existing real weekly row when limbo is observed (no analogue of the
+session early-closure path); a stale phantom weekly row heals via
+re-anchor when a snapshot supplies a real `weekly_window_ends`, or
+via natural expiry.
+
 ## End-to-end flow
 
-### 1. Userscript: detect limbo, emit `session_active=false`
+### 1. Userscript: detect limbo, emit `session_active=false` / `weekly_active=false`
 
-`userscript/claude-usage-snapshot.user.js` scans the Current session
-row's DOM for the literal text "Starts when a message is sent" (case-
-insensitive). When found, the snapshot POST body includes
-`"session_active": false`. When not found, the field is omitted —
-absence encodes "unknown," not "active." See `docs/userscript.md` and
+`userscript/claude-usage-snapshot.user.js` scans both the Current
+session row's DOM and the Weekly row's DOM for the literal text
+"Starts when a message is sent" (case-insensitive) via a shared
+`isLimboLabel(bar)` helper. When found on the session row, the
+snapshot POST body includes `"session_active": false`; when found on
+the weekly row, it includes `"weekly_active": false`. When not found,
+the corresponding field is omitted — absence encodes "unknown," not
+"active." Both fields are independent: the page commonly shows one
+row in limbo while the other is normal. See `docs/userscript.md` and
 `docs/data-sources.md`.
 
 **Cadence under limbo is sparse and freshness-driven, not periodic.**
@@ -81,17 +98,21 @@ exits.
 
 ### 2. Snapshot ingestion: persist tri-state to `quota_snapshots`
 
-The `/snapshot` handler accepts `session_active` as a nullable
-boolean. The `quota_snapshots.session_active` column (added by
-migration v4 `add_quota_snapshots_session_active`) is a nullable
-`INTEGER` storing `0` for false, `1` for true, and `NULL` for unknown.
-The pointer-typed DTO field preserves the absent / explicit-false
+The `/snapshot` handler accepts `session_active` and `weekly_active`
+as nullable booleans. The `quota_snapshots.session_active` column
+(added by migration v4 `add_quota_snapshots_session_active`) and
+`quota_snapshots.weekly_active` column (added by migration v6
+`add_quota_snapshots_weekly_active`) are both nullable `INTEGER`
+storing `0` for false, `1` for true, and `NULL` for unknown. The
+pointer-typed DTO fields preserve the absent / explicit-false
 distinction across the JSON boundary. See `docs/data-model.md`.
 
 ### 3. Window engine: refuse phantoms, close early, anchor on events
 
-The windows engine treats `session_active=false` as authoritative for
-the moment of observation. Three behaviours flow from that:
+The windows engine treats `session_active=false` / `weekly_active=false`
+as authoritative for the moment of observation.
+
+For session windows, three behaviours flow from that:
 
 - **Refuse to mint phantoms.** When ensuring a session window from a
   snapshot, the engine consults the most recent `session_active`
@@ -116,17 +137,40 @@ the moment of observation. Three behaviours flow from that:
   still produce a window when real activity is observed, instead of
   guessing a 5-hour boundary out of thin air.
 
+For weekly windows, only the **refuse-to-mint** behaviour applies,
+and it is gated more narrowly than the session version: when no real
+open weekly row exists, `findWeeklyBoundary()` returns zero (no
+snapshot in history has supplied a `weekly_window_ends`), AND the
+most recent snapshot reports `weekly_active=false`, the engine
+returns without inserting a row. (Without this guard, the calendar
+fallback `nextMondayMidnight` would mint a phantom row anchored to
+Monday 00:00 UTC — visible as "Sunday 7:00 PM" in US Eastern — even
+when no real weekly window is open.) When *any* snapshot in history
+has supplied a boundary, that boundary wins over the limbo signal —
+this differs from the session path, where `session_active=false` is
+checked before the boundary is consulted. The narrower rule reflects
+the user's reported scenario (userscript only ever saw limbo, no
+boundary ever sent) and avoids speculative early-refusal when an
+authoritative weekly reset time is on file. There is no early-closure
+path for weekly: an existing real weekly row is left alone and heals
+via re-anchor (when a snapshot supplies a real boundary) or natural
+expiry.
+
 The combined effect is that the windows table reflects what actually
-happened, not what a snapshot's `session_used` value alone would
-imply.
+happened, not what a snapshot's `session_used` / `weekly_used` value
+alone would imply.
 
 ### 4. Dashboard: hypothetical rendering and Status panel
 
 When the dashboard's `/api/dashboard/state` finds no active session
-window, the frontend synthesizes a **hypothetical** session window
-spanning `[now, now + 5h]` and renders it ghosted: lighter fill and
-stroke, italic font, with a two-line annotation reading "No active
-session / projection if started now." The chart still has a curve to
+window, the backend synthesizes a **hypothetical** session window
+spanning `[now, now + 5h]`; the frontend renders it ghosted: lighter
+fill and stroke, italic font, with a two-line annotation reading "No
+active session / projection if started now." The same treatment
+applies to the weekly chart: when no active weekly window exists, the
+backend synthesizes a hypothetical weekly window spanning
+`[now, now + 7d]` and the frontend annotates it "No active weekly
+window / projection if started now." The chart still has a curve to
 look at, but the styling makes it unmistakable that this is a
 projection rather than a measurement.
 
@@ -161,15 +205,25 @@ the queue is unblocked the moment limbo is observed.
 See `docs/configuration.md` for the threshold's semantics and
 `docs/slack-indicator.md` for the full gate structure.
 
+The weekly headroom gate has a parallel three-leg structure with the
+same deadlock-breaker. When `ensureWeeklyWindow` refuses to mint
+under `weekly_active=false`, `resp.Weekly` is nil, and the third leg
+fires so the queue is unblocked — symmetric to the session path.
+Before this change weekly-absent was unreachable in practice (the
+engine always minted a calendar-fallback row), so the slack gate's
+deadlock-breaker was session-only; the symmetric weekly leg was
+added when the refuse-to-mint guard landed.
+
 ## Invariants
 
-- The userscript never emits `session_active=true`. Absence of the
-  field is the only way "I saw a normal Resets hint" is communicated.
-- The trayapp never invents `session_active` from `session_used`. A
-  snapshot with `session_used=0` and no `session_active` field is
-  "unknown," not "limbo."
+- The userscript never emits `session_active=true` or
+  `weekly_active=true`. Absence of either field is the only way "I saw
+  a normal Resets hint" is communicated.
+- The trayapp never invents `session_active` / `weekly_active` from
+  `*_used`. A snapshot with `weekly_used=0` and no `weekly_active`
+  field is "unknown," not "limbo."
 - A hypothetical window in the dashboard is never persisted to
-  `windows`. It is a frontend rendering construct only.
+  `windows`. It is a backend-synthesized rendering construct only.
 - While the most recent snapshot has `session_active=false`, no new
   session window opens, regardless of arriving `usage_events` or
   later snapshots that still assert limbo. Recovery requires a newer
@@ -177,3 +231,8 @@ See `docs/configuration.md` for the threshold's semantics and
   userscript seeing a normal "Resets in …" hint again); from there
   either a future `session_window_ends` or a fresh `usage_event`
   past the last closed window can mint a new row.
+- The weekly equivalent is narrower: `weekly_active=false` only blocks
+  minting when no snapshot in history has supplied a
+  `weekly_window_ends`. If any snapshot has, that boundary wins over
+  the limbo signal — the engine consults the boundary first and only
+  checks `weekly_active` in the no-boundary branch.

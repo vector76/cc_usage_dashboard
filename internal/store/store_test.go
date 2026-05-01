@@ -28,8 +28,8 @@ func TestOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("expected schema version 5, got %d", version)
+	if version != 6 {
+		t.Errorf("expected schema version 6, got %d", version)
 	}
 }
 
@@ -69,8 +69,8 @@ func TestMigrateFromV3AddsSessionActive(t *testing.T) {
 	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("expected schema version 5 after migrating, got %d", version)
+	if version != 6 {
+		t.Errorf("expected schema version 6 after migrating, got %d", version)
 	}
 	if !columnExists(t, db, "quota_snapshots", "session_active") {
 		t.Fatalf("session_active column missing after migration")
@@ -129,8 +129,8 @@ func TestMigrateFromV4AddsContinuousWithPrev(t *testing.T) {
 	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 5 {
-		t.Errorf("expected schema version 5 after migrating, got %d", version)
+	if version != 6 {
+		t.Errorf("expected schema version 6 after migrating, got %d", version)
 	}
 	if !columnExists(t, db, "quota_snapshots", "continuous_with_prev") {
 		t.Fatalf("continuous_with_prev column missing after migration")
@@ -151,6 +151,63 @@ func TestMigrateFromV4AddsContinuousWithPrev(t *testing.T) {
 	}
 	if continuousWithPrev.Valid {
 		t.Errorf("expected continuous_with_prev to default to NULL, got %d", continuousWithPrev.Int64)
+	}
+}
+
+func TestMigrateFromV5AddsWeeklyActive(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open memory DB: %v", err)
+	}
+	defer db.Close()
+
+	saved := migrations
+	defer func() { migrations = saved }()
+	migrations = saved[:5]
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("failed to apply v1-v5 migrations: %v", err)
+	}
+
+	var version int
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 5 {
+		t.Fatalf("expected schema version 5, got %d", version)
+	}
+	if columnExists(t, db, "quota_snapshots", "weekly_active") {
+		t.Fatalf("weekly_active column should not exist before migration")
+	}
+
+	migrations = saved
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("failed to apply v6 migration: %v", err)
+	}
+
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != 6 {
+		t.Errorf("expected schema version 6 after migrating, got %d", version)
+	}
+	if !columnExists(t, db, "quota_snapshots", "weekly_active") {
+		t.Fatalf("weekly_active column missing after migration")
+	}
+
+	now := time.Now()
+	_, err = db.Exec(`
+		INSERT INTO quota_snapshots (observed_at, received_at, source, raw_json)
+		VALUES (?, ?, ?, ?)
+	`, FormatTime(now), FormatTime(now), "userscript", "{}")
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+	var weeklyActive sql.NullInt64
+	if err := db.QueryRow("SELECT weekly_active FROM quota_snapshots LIMIT 1").Scan(&weeklyActive); err != nil {
+		t.Fatalf("select failed: %v", err)
+	}
+	if weeklyActive.Valid {
+		t.Errorf("expected weekly_active to default to NULL, got %d", weeklyActive.Int64)
 	}
 }
 
@@ -313,6 +370,7 @@ func TestInsertQuotaSnapshot(t *testing.T) {
 		floatPtr(40.0), timePtr(time.Now().Add(7*24*time.Hour)),
 		nil,
 		nil,
+		nil,
 		`{"session_used": 25.0}`,
 	)
 
@@ -360,6 +418,7 @@ func TestInsertQuotaSnapshotSessionActive(t *testing.T) {
 				nil, nil,
 				tc.input,
 				nil,
+				nil,
 				"{}",
 			)
 			if err != nil {
@@ -374,6 +433,50 @@ func TestInsertQuotaSnapshotSessionActive(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("session_active: got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInsertQuotaSnapshotWeeklyActive(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	cases := []struct {
+		name  string
+		input *bool
+		want  sql.NullInt64
+	}{
+		{"true", boolPtr(true), sql.NullInt64{Int64: 1, Valid: true}},
+		{"false", boolPtr(false), sql.NullInt64{Int64: 0, Valid: true}},
+		{"nil", nil, sql.NullInt64{Valid: false}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			observedAt := time.Now()
+			id, err := store.InsertQuotaSnapshot(
+				observedAt, observedAt,
+				"userscript",
+				nil, nil,
+				nil, nil,
+				nil,
+				tc.input,
+				nil,
+				"{}",
+			)
+			if err != nil {
+				t.Fatalf("InsertQuotaSnapshot failed: %v", err)
+			}
+
+			var got sql.NullInt64
+			if err := store.db.QueryRow(
+				`SELECT weekly_active FROM quota_snapshots WHERE id = ?`, id,
+			).Scan(&got); err != nil {
+				t.Fatalf("select failed: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("weekly_active: got %+v, want %+v", got, tc.want)
 			}
 		})
 	}
@@ -401,6 +504,7 @@ func TestInsertQuotaSnapshotContinuousWithPrev(t *testing.T) {
 				"userscript",
 				nil, nil,
 				nil, nil,
+				nil,
 				nil,
 				tc.input,
 				"{}",
@@ -436,6 +540,7 @@ func TestInsertQuotaSnapshotSlideCollapsesPlateau(t *testing.T) {
 		floatPtr(25.0), &sessionEnds,
 		floatPtr(40.0), &weeklyEnds,
 		boolPtr(true),
+		nil,
 		boolPtr(false),
 		`{"start":1}`,
 	)
@@ -451,6 +556,7 @@ func TestInsertQuotaSnapshotSlideCollapsesPlateau(t *testing.T) {
 		floatPtr(25.0), &sessionEnds,
 		floatPtr(40.0), &weeklyEnds,
 		boolPtr(true),
+		nil,
 		boolPtr(true),
 		`{"first_continuation":1}`,
 	)
@@ -471,6 +577,7 @@ func TestInsertQuotaSnapshotSlideCollapsesPlateau(t *testing.T) {
 			floatPtr(25.0), &sessionEnds,
 			floatPtr(40.0), &weeklyEnds,
 			boolPtr(true),
+			nil,
 			boolPtr(true),
 			`{"later_continuation":`+time.Duration(i).String()+`}`,
 		)
@@ -519,7 +626,7 @@ func TestInsertQuotaSnapshotSlideSuppressedWhenValuesDiffer(t *testing.T) {
 	if _, err := store.InsertQuotaSnapshot(
 		base, base, "userscript",
 		floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-		boolPtr(true), boolPtr(false), `{}`,
+		boolPtr(true), nil, boolPtr(false), `{}`,
 	); err != nil {
 		t.Fatalf("insert start: %v", err)
 	}
@@ -528,7 +635,7 @@ func TestInsertQuotaSnapshotSlideSuppressedWhenValuesDiffer(t *testing.T) {
 		if _, err := store.InsertQuotaSnapshot(
 			observed, observed, "userscript",
 			floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-			boolPtr(true), boolPtr(true), `{}`,
+			boolPtr(true), nil, boolPtr(true), `{}`,
 		); err != nil {
 			t.Fatalf("insert continuation %d: %v", i, err)
 		}
@@ -539,7 +646,7 @@ func TestInsertQuotaSnapshotSlideSuppressedWhenValuesDiffer(t *testing.T) {
 	if _, err := store.InsertQuotaSnapshot(
 		observed, observed, "userscript",
 		floatPtr(26.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-		boolPtr(true), boolPtr(true), `{}`,
+		boolPtr(true), nil, boolPtr(true), `{}`,
 	); err != nil {
 		t.Fatalf("insert differing continuation: %v", err)
 	}
@@ -564,7 +671,7 @@ func TestInsertQuotaSnapshotSlideDoesNotCrossStart(t *testing.T) {
 	if _, err := store.InsertQuotaSnapshot(
 		base, base, "userscript",
 		floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-		boolPtr(true), boolPtr(false), `{}`,
+		boolPtr(true), nil, boolPtr(false), `{}`,
 	); err != nil {
 		t.Fatalf("insert start: %v", err)
 	}
@@ -573,7 +680,7 @@ func TestInsertQuotaSnapshotSlideDoesNotCrossStart(t *testing.T) {
 		if _, err := store.InsertQuotaSnapshot(
 			observed, observed, "userscript",
 			floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-			boolPtr(true), boolPtr(true), `{}`,
+			boolPtr(true), nil, boolPtr(true), `{}`,
 		); err != nil {
 			t.Fatalf("insert continuation %d: %v", i, err)
 		}
@@ -585,7 +692,7 @@ func TestInsertQuotaSnapshotSlideDoesNotCrossStart(t *testing.T) {
 	newStartID, err := store.InsertQuotaSnapshot(
 		newStartObserved, newStartObserved, "userscript",
 		floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-		boolPtr(true), boolPtr(false), `{"new_start":1}`,
+		boolPtr(true), nil, boolPtr(false), `{"new_start":1}`,
 	)
 	if err != nil {
 		t.Fatalf("insert new start: %v", err)
@@ -619,38 +726,44 @@ func TestInsertQuotaSnapshotSlideSuppressedPerField(t *testing.T) {
 		name string
 		// mutate produces the new arrival's match fields starting from the
 		// plateau values.
-		mutate func() (sUsed *float64, sEnds *time.Time, wUsed *float64, wEnds *time.Time, sActive *bool)
+		mutate func() (sUsed *float64, sEnds *time.Time, wUsed *float64, wEnds *time.Time, sActive, wActive *bool)
 	}{
 		{
 			name: "session_used",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
-				return floatPtr(26.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true)
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
+				return floatPtr(26.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true), boolPtr(true)
 			},
 		},
 		{
 			name: "weekly_used",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
-				return floatPtr(25.0), &sessionEnds, floatPtr(41.0), &weeklyEnds, boolPtr(true)
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
+				return floatPtr(25.0), &sessionEnds, floatPtr(41.0), &weeklyEnds, boolPtr(true), boolPtr(true)
 			},
 		},
 		{
 			name: "session_window_ends",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
 				newEnds := sessionEnds.Add(1 * time.Minute)
-				return floatPtr(25.0), &newEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true)
+				return floatPtr(25.0), &newEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true), boolPtr(true)
 			},
 		},
 		{
 			name: "weekly_window_ends",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
 				newEnds := weeklyEnds.Add(1 * time.Minute)
-				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &newEnds, boolPtr(true)
+				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &newEnds, boolPtr(true), boolPtr(true)
 			},
 		},
 		{
 			name: "session_active",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool) {
-				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(false)
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
+				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(false), boolPtr(true)
+			},
+		},
+		{
+			name: "weekly_active",
+			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
+				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true), boolPtr(false)
 			},
 		},
 	}
@@ -663,23 +776,23 @@ func TestInsertQuotaSnapshotSlideSuppressedPerField(t *testing.T) {
 			if _, err := store.InsertQuotaSnapshot(
 				base, base, "userscript",
 				floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-				boolPtr(true), boolPtr(false), `{}`,
+				boolPtr(true), boolPtr(true), boolPtr(false), `{}`,
 			); err != nil {
 				t.Fatalf("insert start: %v", err)
 			}
 			if _, err := store.InsertQuotaSnapshot(
 				base.Add(1*time.Minute), base.Add(1*time.Minute), "userscript",
 				floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-				boolPtr(true), boolPtr(true), `{}`,
+				boolPtr(true), boolPtr(true), boolPtr(true), `{}`,
 			); err != nil {
 				t.Fatalf("insert plateau seed: %v", err)
 			}
 
-			sUsed, sEnds, wUsed, wEnds, sActive := tc.mutate()
+			sUsed, sEnds, wUsed, wEnds, sActive, wActive := tc.mutate()
 			if _, err := store.InsertQuotaSnapshot(
 				base.Add(2*time.Minute), base.Add(2*time.Minute), "userscript",
 				sUsed, sEnds, wUsed, wEnds,
-				sActive, boolPtr(true), `{}`,
+				sActive, wActive, boolPtr(true), `{}`,
 			); err != nil {
 				t.Fatalf("insert differing continuation: %v", err)
 			}
@@ -704,6 +817,7 @@ func TestInsertQuotaSnapshotContinuationOnColdDB(t *testing.T) {
 		now, now, "userscript",
 		floatPtr(25.0), nil,
 		floatPtr(40.0), nil,
+		nil,
 		nil,
 		boolPtr(true),
 		`{}`,
@@ -735,14 +849,14 @@ func TestInsertQuotaSnapshotSlideScopedBySource(t *testing.T) {
 	if _, err := store.InsertQuotaSnapshot(
 		base, base, "userscript",
 		floatPtr(25.0), &sessionEnds, nil, nil,
-		nil, boolPtr(false), `{}`,
+		nil, nil, boolPtr(false), `{}`,
 	); err != nil {
 		t.Fatalf("insert A start: %v", err)
 	}
 	if _, err := store.InsertQuotaSnapshot(
 		base.Add(1*time.Minute), base.Add(1*time.Minute), "userscript",
 		floatPtr(25.0), &sessionEnds, nil, nil,
-		nil, boolPtr(true), `{}`,
+		nil, nil, boolPtr(true), `{}`,
 	); err != nil {
 		t.Fatalf("insert A continuation: %v", err)
 	}
@@ -752,7 +866,7 @@ func TestInsertQuotaSnapshotSlideScopedBySource(t *testing.T) {
 	if _, err := store.InsertQuotaSnapshot(
 		base.Add(2*time.Minute), base.Add(2*time.Minute), "headless",
 		floatPtr(25.0), &sessionEnds, nil, nil,
-		nil, boolPtr(true), `{}`,
+		nil, nil, boolPtr(true), `{}`,
 	); err != nil {
 		t.Fatalf("insert B continuation: %v", err)
 	}

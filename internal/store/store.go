@@ -120,8 +120,8 @@ func (s *Store) InsertUsageEvent(
 
 // InsertQuotaSnapshot inserts a quota snapshot and returns its ID.
 // session_used and weekly_used are 0–100 percentages.
-// sessionActive is nil when the source did not report it; persisted as NULL.
-// continuousWithPrev is nil when absent; persisted as NULL.
+// sessionActive / weeklyActive are nil when the source did not report them;
+// persisted as NULL. continuousWithPrev is nil when absent; persisted as NULL.
 //
 // Plateau compaction: when the arrival is marked continuous and every
 // "match" field is identical to the latest row from the same source, the
@@ -138,32 +138,20 @@ func (s *Store) InsertQuotaSnapshot(
 	weeklyUsed *float64,
 	weeklyWindowEnds *time.Time,
 	sessionActive *bool,
+	weeklyActive *bool,
 	continuousWithPrev *bool,
 	rawJSON string,
 ) (int64, error) {
-	var sessionActiveArg interface{}
-	if sessionActive != nil {
-		if *sessionActive {
-			sessionActiveArg = 1
-		} else {
-			sessionActiveArg = 0
-		}
-	}
-	var continuousWithPrevArg interface{}
-	if continuousWithPrev != nil {
-		if *continuousWithPrev {
-			continuousWithPrevArg = 1
-		} else {
-			continuousWithPrevArg = 0
-		}
-	}
+	sessionActiveArg := boolToNullableInt(sessionActive)
+	weeklyActiveArg := boolToNullableInt(weeklyActive)
+	continuousWithPrevArg := boolToNullableInt(continuousWithPrev)
 
 	if continuousWithPrev != nil && *continuousWithPrev {
 		slidID, slid, err := s.tryPlateauSlide(
 			observedAt, receivedAt, source,
 			sessionUsed, sessionWindowEnds,
 			weeklyUsed, weeklyWindowEnds,
-			sessionActive,
+			sessionActive, weeklyActive,
 		)
 		if err != nil {
 			return 0, err
@@ -179,13 +167,15 @@ func (s *Store) InsertQuotaSnapshot(
 			session_used, session_window_ends,
 			weekly_used, weekly_window_ends,
 			session_active,
+			weekly_active,
 			continuous_with_prev,
 			raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, FormatTime(observedAt), FormatTime(receivedAt), source,
 		sessionUsed, FormatTimePtr(sessionWindowEnds),
 		weeklyUsed, FormatTimePtr(weeklyWindowEnds),
 		sessionActiveArg,
+		weeklyActiveArg,
 		continuousWithPrevArg,
 		rawJSON)
 
@@ -212,6 +202,7 @@ func (s *Store) tryPlateauSlide(
 	weeklyUsed *float64,
 	weeklyWindowEnds *time.Time,
 	sessionActive *bool,
+	weeklyActive *bool,
 ) (int64, bool, error) {
 	var (
 		prevID                 int64
@@ -220,12 +211,13 @@ func (s *Store) tryPlateauSlide(
 		prevSessionWindowEnds  sql.NullString
 		prevWeeklyWindowEnds   sql.NullString
 		prevSessionActive      sql.NullInt64
+		prevWeeklyActive       sql.NullInt64
 		prevContinuousWithPrev sql.NullInt64
 	)
 	err := s.db.QueryRow(`
 		SELECT id, session_used, weekly_used,
 		       session_window_ends, weekly_window_ends,
-		       session_active, continuous_with_prev
+		       session_active, weekly_active, continuous_with_prev
 		FROM quota_snapshots
 		WHERE source = ?
 		ORDER BY observed_at DESC
@@ -233,7 +225,7 @@ func (s *Store) tryPlateauSlide(
 	`, source).Scan(
 		&prevID, &prevSessionUsed, &prevWeeklyUsed,
 		&prevSessionWindowEnds, &prevWeeklyWindowEnds,
-		&prevSessionActive, &prevContinuousWithPrev,
+		&prevSessionActive, &prevWeeklyActive, &prevContinuousWithPrev,
 	)
 	if err == sql.ErrNoRows {
 		return 0, false, nil
@@ -251,7 +243,8 @@ func (s *Store) tryPlateauSlide(
 		!nullableFloatEqual(prevWeeklyUsed, weeklyUsed) ||
 		!nullableTimeEqual(prevSessionWindowEnds, sessionWindowEnds) ||
 		!nullableTimeEqual(prevWeeklyWindowEnds, weeklyWindowEnds) ||
-		!nullableBoolEqual(prevSessionActive, sessionActive) {
+		!nullableBoolEqual(prevSessionActive, sessionActive) ||
+		!nullableBoolEqual(prevWeeklyActive, weeklyActive) {
 		return 0, false, nil
 	}
 
@@ -283,6 +276,18 @@ func nullableTimeEqual(a sql.NullString, b *time.Time) bool {
 		return true
 	}
 	return a.String == FormatTime(*b)
+}
+
+// boolToNullableInt converts a *bool to the interface{} that database/sql
+// stores as a nullable INTEGER (NULL when nil, 0 for false, 1 for true).
+func boolToNullableInt(b *bool) interface{} {
+	if b == nil {
+		return nil
+	}
+	if *b {
+		return 1
+	}
+	return 0
 }
 
 func nullableBoolEqual(a sql.NullInt64, b *bool) bool {

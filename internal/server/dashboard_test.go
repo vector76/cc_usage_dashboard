@@ -143,14 +143,14 @@ func TestDashboardStateNoOpenSessionSynthesizesHypothetical(t *testing.T) {
 	used := 42.5
 	if _, err := testStore.InsertQuotaSnapshot(
 		now.Add(-3*time.Hour), now.Add(-3*time.Hour), "userscript",
-		&used, nil, nil, nil, nil, nil, "{}",
+		&used, nil, nil, nil, nil, nil, nil, "{}",
 	); err != nil {
 		t.Fatalf("insert in-history snapshot: %v", err)
 	}
 	out := 10.0
 	if _, err := testStore.InsertQuotaSnapshot(
 		now.Add(-12*time.Hour), now.Add(-12*time.Hour), "userscript",
-		&out, nil, nil, nil, nil, nil, "{}",
+		&out, nil, nil, nil, nil, nil, nil, "{}",
 	); err != nil {
 		t.Fatalf("insert out-of-history snapshot: %v", err)
 	}
@@ -209,6 +209,48 @@ func TestDashboardStateNoOpenSessionSynthesizesHypothetical(t *testing.T) {
 	}
 }
 
+// TestDashboardStateNoOpenWeeklySynthesizesHypothetical: when no real
+// open weekly window exists (e.g. because the engine refused to mint one
+// under weekly limbo), the response carries a hypothetical Weekly window
+// spanning [now, now+7d] with BaselinePercentUsed=0.
+func TestDashboardStateNoOpenWeeklySynthesizesHypothetical(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	srv.dashboardHandler.SetNow(func() time.Time { return now })
+
+	// Snapshot reports weekly limbo (and session limbo, just to keep the
+	// state consistent — though only weekly is exercised here).
+	inactive := false
+	if _, err := testStore.InsertQuotaSnapshot(
+		now, now, "userscript",
+		nil, nil, nil, nil,
+		&inactive, &inactive, nil, "{}",
+	); err != nil {
+		t.Fatalf("insert limbo snapshot: %v", err)
+	}
+
+	state := fetchDashboardState(t, srv)
+
+	if state.Weekly == nil {
+		t.Fatal("expected synthesized hypothetical Weekly, got nil")
+	}
+	if !state.Weekly.Hypothetical {
+		t.Errorf("expected Weekly.Hypothetical=true, got false")
+	}
+	if !state.Weekly.StartedAt.Equal(now) {
+		t.Errorf("Weekly.StartedAt = %v, want %v", state.Weekly.StartedAt, now)
+	}
+	wantEnds := now.Add(7 * 24 * time.Hour)
+	if !state.Weekly.EndsAt.Equal(wantEnds) {
+		t.Errorf("Weekly.EndsAt = %v, want %v", state.Weekly.EndsAt, wantEnds)
+	}
+	if state.Weekly.BaselinePercentUsed == nil || *state.Weekly.BaselinePercentUsed != 0 {
+		t.Errorf("expected Weekly.BaselinePercentUsed=0, got %v", state.Weekly.BaselinePercentUsed)
+	}
+}
+
 // TestDashboardStateOpenSessionUnchanged covers property (e): when a real
 // open session window exists, session_active=true, the WindowState is not
 // hypothetical, and ID/StartedAt/EndsAt mirror the row in the windows
@@ -230,6 +272,17 @@ func TestDashboardStateOpenSessionUnchanged(t *testing.T) {
 		t.Fatalf("insert open session window: %v", err)
 	}
 	wantID, _ := res.LastInsertId()
+
+	// Also seed an open weekly window so the response carries no synthesized
+	// hypothetical at all — the omitempty assertion below scans the full body.
+	weeklyStart := now.Add(-2 * 24 * time.Hour)
+	weeklyEnd := weeklyStart.Add(7 * 24 * time.Hour)
+	if _, err := testStore.DB().Exec(`
+		INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, closed)
+		VALUES (?, ?, ?, ?, 0)
+	`, "weekly", store.FormatTime(weeklyStart), store.FormatTime(weeklyEnd), 5.0); err != nil {
+		t.Fatalf("insert open weekly window: %v", err)
+	}
 
 	state := fetchDashboardState(t, srv)
 

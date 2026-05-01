@@ -197,12 +197,12 @@ function renderBurnDown(svgID, win, opts) {
     return;
   }
   // Hypothetical windows are placeholders synthesized by the backend
-  // when no real session is open. The right-third still gets the chart
-  // frame so the user can read the 5h slope, but every right-third
+  // when no real session/weekly window is open. The full chart frame is
+  // still drawn so the user can read the slope, but every projected
   // element (slack-zone fill, pace diagonal, ends_at tick) is ghosted
   // via lighter fill/stroke + italic so it reads as projection rather
   // than live data. The "No data yet" and baseline-flat-segment fallbacks
-  // are gated off (an in-chart annotation makes the no-session state
+  // are gated off (an in-chart annotation makes the no-window state
   // explicit instead), and the latest-dot pace-delta label is structurally
   // inert because the backend leaves in-window Series empty for the
   // hypothetical case.
@@ -376,10 +376,13 @@ function renderBurnDown(svgID, win, opts) {
   // session-chart width without truncation.
   if (hypothetical) {
     const annoX = (sx(start) + sx(end)) / 2;
+    const annoTop = win.kind === "weekly"
+      ? "No active weekly window"
+      : "No active session";
     svg.appendChild(el("text", {
       x: annoX, y: 22, "font-size": "11", fill: "#666",
       "text-anchor": "middle", "font-style": "italic"
-    }, "No active session"));
+    }, annoTop));
     svg.appendChild(el("text", {
       x: annoX, y: 36, "font-size": "11", fill: "#666",
       "text-anchor": "middle", "font-style": "italic"

@@ -42,7 +42,7 @@ func TestLoadUsedSeriesContinuousWithPrev(t *testing.T) {
 			"test",
 			&used, &ends,
 			nil, nil,
-			nil,
+			nil, nil,
 			r.cwp,
 			"{}",
 		); err != nil {

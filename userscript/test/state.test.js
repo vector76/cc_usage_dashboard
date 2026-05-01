@@ -133,6 +133,22 @@ test('round-trip persists sessionActive=false', () => {
     assert.strictEqual(loaded.lastSessionActive, false);
 });
 
+test('round-trip persists weeklyActive=false', () => {
+    const stub = makeMemoryStorage();
+    _setStorageForTests(stub);
+
+    recordSentState({
+        sentAtMs: 1714200000000,
+        percent: 0,
+        resetText: null,
+        windowEndsMs: null,
+        weeklyActive: false,
+    });
+
+    const loaded = loadState();
+    assert.strictEqual(loaded.lastWeeklyActive, false);
+});
+
 test('omitted optional fields are absent from the loaded record (not undefined keys)', () => {
     const stub = makeMemoryStorage();
     _setStorageForTests(stub);

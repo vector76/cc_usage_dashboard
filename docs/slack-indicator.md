@@ -73,10 +73,15 @@ the queue is expected to apply one client-side gate of its own.
      window early — without it the gate would stay closed forever in limbo,
      since pace and percent_used are undefined when there's no window to
      measure against.
-2. **Weekly headroom gate.** Release work if EITHER:
+2. **Weekly headroom gate.** Release work if ANY of:
    - `weekly.slack_fraction >= weekly_surplus_threshold` (default `0.10`), or
    - `weekly.percent_used <= 100 * (1 - weekly_absolute_threshold)` (default
-     `0.80` → percent_used ≤ 20).
+     `0.80` → percent_used ≤ 20), or
+   - the weekly window is absent entirely (no active 7-day weekly row).
+     Symmetric to the session deadlock-breaker: the windows engine refuses
+     to mint a phantom weekly under limbo (see `docs/no-active-session.md`),
+     so without this branch the gate would deadlock at "no weekly window to
+     gate against" — exactly when the user has the most quota free.
 
    Two independent thresholds (instead of a `min(session, weekly)` combined
    fraction) because the two windows have very different time horizons: a

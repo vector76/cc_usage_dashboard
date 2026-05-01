@@ -288,6 +288,20 @@ func (e *Engine) ensureWeeklyWindow() error {
 	// Try to get window boundary from the most recent snapshot
 	endsAt, err := e.findWeeklyBoundary()
 	if err != nil || endsAt.IsZero() {
+		// No snapshot-supplied boundary. If the most recent snapshot
+		// reports the weekly window as inactive (limbo), refuse to mint
+		// a phantom — Anthropic considers there to be no active weekly
+		// window, and zero open weekly rows is a permitted state. The
+		// dashboard renders a hypothetical [now, now+7d] in this case.
+		// (See docs/no-active-session.md for the symmetric session
+		// treatment and rationale.)
+		weeklyActive, err := e.findMostRecentWeeklyActive()
+		if err != nil {
+			return err
+		}
+		if weeklyActive != nil && !*weeklyActive {
+			return nil
+		}
 		// Default: midnight UTC at the start of the upcoming Monday
 		// (i.e. end-of-Sunday boundary). Must be in the future relative
 		// to `now` or the window is born already-expired.
@@ -483,6 +497,33 @@ func (e *Engine) findMostRecentSessionActive() (*bool, *float64, time.Time, erro
 		usedPtr = &used.Float64
 	}
 	return activePtr, usedPtr, observedAt, nil
+}
+
+// findMostRecentWeeklyActive returns the weekly_active value from the most
+// recent quota_snapshots row. Nil pointer when the column is NULL or when no
+// snapshots exist. The userscript only sets weekly_active=false when it
+// positively observes the "Starts when a message is sent" limbo label on the
+// weekly row; absence does not assert active.
+func (e *Engine) findMostRecentWeeklyActive() (*bool, error) {
+	var active sql.NullInt64
+	err := e.db.QueryRow(`
+		SELECT weekly_active
+		FROM quota_snapshots
+		ORDER BY observed_at DESC
+		LIMIT 1
+	`).Scan(&active)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to query weekly snapshot: %w", err)
+	}
+
+	if !active.Valid {
+		return nil, nil
+	}
+	v := active.Int64 != 0
+	return &v, nil
 }
 
 // findWeeklyBoundary extracts the weekly window boundary from the most recent snapshot.

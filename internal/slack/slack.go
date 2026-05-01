@@ -145,13 +145,19 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 	// Weekly passes if EITHER the pace-relative surplus is met OR the
 	// absolute remaining-quota floor is met. The latter lets slack
 	// activate early in the week before pace-relative surplus accrues.
-	weeklyHeadroomOk := false
-	if resp.Weekly != nil && resp.Weekly.SlackFraction != nil {
-		paceOk := *resp.Weekly.SlackFraction >= c.config.WeeklySurplusThreshold
-		usedCeiling := (1 - c.config.WeeklyAbsoluteThreshold) * 100
-		absoluteOk := resp.Weekly.PercentUsed != nil && *resp.Weekly.PercentUsed <= usedCeiling
-		weeklyHeadroomOk = paceOk || absoluteOk
-	}
+	// A nil weekly window is the symmetric deadlock-breaker (mirrors the
+	// session path): when the windows engine refuses to mint a phantom
+	// weekly row under limbo (see docs/no-active-session.md), there is
+	// no row to gate against and the queue would otherwise deadlock with
+	// the most quota free. Letting the absolute branch pass on nil
+	// unblocks it.
+	weeklyPaceOk := resp.Weekly != nil &&
+		resp.Weekly.SlackFraction != nil &&
+		*resp.Weekly.SlackFraction >= c.config.WeeklySurplusThreshold
+	weeklyAbsoluteOk := resp.Weekly == nil ||
+		(resp.Weekly.PercentUsed != nil &&
+			*resp.Weekly.PercentUsed <= (1-c.config.WeeklyAbsoluteThreshold)*100)
+	weeklyHeadroomOk := weeklyPaceOk || weeklyAbsoluteOk
 
 	freshOk, err := c.baselineFreshnessOk(now)
 	if err != nil {

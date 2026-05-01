@@ -33,6 +33,10 @@ function shouldSend(observation, prevState, lastObservedAgeMs) {
     const nowLimbo = observation.sessionActive === false;
     if (wasLimbo !== nowLimbo) return 'send';
 
+    const wasWeeklyLimbo = prevState.lastWeeklyActive === false;
+    const nowWeeklyLimbo = observation.weeklyActive === false;
+    if (wasWeeklyLimbo !== nowWeeklyLimbo) return 'send';
+
     if (nowLimbo) {
         // While in limbo the visible numbers don't move, so a strict
         // *decrease* in "Last updated" age is our only signal that a

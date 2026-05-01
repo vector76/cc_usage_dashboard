@@ -12,6 +12,7 @@ function makeState(overrides) {
         lastResetText: 'Resets in 3 hr 33 min',
         lastWindowEndsMs: 1714212600000,
         lastSessionActive: undefined,
+        lastWeeklyActive: undefined,
     }, overrides || {});
 }
 
@@ -23,6 +24,7 @@ function makeObservation(overrides) {
         sessionWindowEnds: null,
         weeklyWindowEnds: null,
         sessionActive: undefined,
+        weeklyActive: undefined,
         observedAtMs: 1714200060000,
         lastUpdatedAgeMs: null,
     }, overrides || {});
@@ -121,6 +123,24 @@ test('limbo with rolling age null (no prior observation yet) → skip', () => {
         sessionActive: false,
         lastUpdatedAgeMs: 2 * 60 * 1000,
     });
+    assert.strictEqual(shouldSend(obs, state, null), 'skip');
+});
+
+test('weekly limbo entry: weeklyActive flips undefined → false → send', () => {
+    const state = makeState({ lastWeeklyActive: undefined });
+    const obs = makeObservation({ weeklyActive: false });
+    assert.strictEqual(shouldSend(obs, state, null), 'send');
+});
+
+test('weekly limbo exit: weeklyActive flips false → undefined → send', () => {
+    const state = makeState({ lastWeeklyActive: false });
+    const obs = makeObservation({ weeklyActive: undefined });
+    assert.strictEqual(shouldSend(obs, state, null), 'send');
+});
+
+test('weekly limbo steady state: both sides false → skip', () => {
+    const state = makeState({ lastWeeklyActive: false });
+    const obs = makeObservation({ weeklyActive: false });
     assert.strictEqual(shouldSend(obs, state, null), 'skip');
 });
 

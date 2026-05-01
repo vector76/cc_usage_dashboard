@@ -223,6 +223,9 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 		if kind == "session" {
 			return h.synthesizeHypotheticalSession(db)
 		}
+		if kind == "weekly" {
+			return h.synthesizeHypotheticalWeekly(), nil
+		}
 		return nil, nil
 	}
 	if err != nil {
@@ -295,6 +298,29 @@ func (h *Handler) synthesizeHypotheticalSession(db *sql.DB) (*WindowState, error
 		BucketSecs:          bucketSecsForKind("session"),
 		Hypothetical:        true,
 	}, nil
+}
+
+// synthesizeHypotheticalWeekly builds a placeholder WindowState for the
+// weekly view when no real open weekly row exists in the windows table —
+// either because the engine refused to mint a phantom under weekly limbo
+// (see internal/windows/windows.go:ensureWeeklyWindow) or simply because no
+// weekly data has been ingested yet. The synthesized window spans
+// [now, now+7d] so the UI has a stable domain to render; Series/Volume are
+// empty (no observations exist inside a window that has not begun in real
+// life). See docs/no-active-session.md for the symmetric session treatment.
+func (h *Handler) synthesizeHypotheticalWeekly() *WindowState {
+	now := h.now()
+	zero := 0.0
+	return &WindowState{
+		Kind:                "weekly",
+		StartedAt:           now,
+		EndsAt:              now.Add(7 * 24 * time.Hour),
+		BaselinePercentUsed: &zero,
+		Series:              []UsedSeriesPoint{},
+		Volume:              []SeriesBucket{},
+		BucketSecs:          bucketSecsForKind("weekly"),
+		Hypothetical:        true,
+	}
 }
 
 // bucketSecsForKind picks a bucket width that yields a readable number of

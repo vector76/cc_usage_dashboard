@@ -333,7 +333,7 @@ func seedFreshSnapshot(t *testing.T, s *store.Store, receivedAt time.Time, sessi
 		receivedAt, receivedAt, "userscript",
 		&sessionUsed, nil,
 		&sessionUsed, nil,
-		nil,
+		nil, nil,
 		nil,
 		"{}",
 	); err != nil {
@@ -557,6 +557,44 @@ func TestSessionHeadroom_AbsoluteFloorBranch(t *testing.T) {
 				t.Errorf("session_headroom: got %v want %v", got, tt.wantSession)
 			}
 		})
+	}
+}
+
+// (g4) Symmetric to (g3): the weekly absolute-floor branch passes
+// weekly_headroom whenever no open weekly row exists at all (the
+// deadlock-breaker). The windows engine refuses to mint a phantom weekly
+// under limbo (see docs/no-active-session.md), and without this branch
+// the queue would deadlock with the most quota free — exactly when slack
+// should fire.
+func TestWeeklyHeadroom_AbsoluteFloorDeadlockBreaker(t *testing.T) {
+	c, s := newCalcWithThresholds(t, 0.10, 0.50, 1.0, 1.0)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	// Session window present so the test isolates weekly_headroom.
+	insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 1.0, "snapshot:1")
+	// CLOSED prior weekly row with near-100% percent_used to prove
+	// getActiveWindow skips it and the deadlock-breaker fires regardless
+	// of stale data.
+	if _, err := s.DB().Exec(
+		`INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, baseline_source, closed)
+		 VALUES ('weekly', ?, ?, 99.0, 'snapshot:0', 1)`,
+		store.FormatTime(now.Add(-8*24*time.Hour)),
+		store.FormatTime(now.Add(-1*24*time.Hour)),
+	); err != nil {
+		t.Fatalf("insert closed weekly: %v", err)
+	}
+	seedFreshSnapshot(t, s, now, 1.0)
+
+	resp, err := c.GetSlack()
+	if err != nil {
+		t.Fatalf("GetSlack: %v", err)
+	}
+	if got := resp.Gates["weekly_headroom"]; !got {
+		t.Errorf("weekly_headroom: got %v, want true (deadlock-breaker should fire when no open weekly row)", got)
+	}
+	if !resp.ReleaseRecommended {
+		t.Errorf("ReleaseRecommended: got false, want true; resp=%+v", resp)
 	}
 }
 

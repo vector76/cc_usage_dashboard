@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.6.2
+// @version      0.7.0
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -123,13 +123,14 @@
                 lastWindowEndsMs: parsed.lastWindowEndsMs,
             };
             if (parsed.lastSessionActive !== undefined) result.lastSessionActive = parsed.lastSessionActive;
+            if (parsed.lastWeeklyActive !== undefined) result.lastWeeklyActive = parsed.lastWeeklyActive;
             return result;
         } catch (_) {
             return null;
         }
     }
 
-    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive }) {
+    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive, weeklyActive }) {
         try {
             const storage = (typeof globalThis !== 'undefined' && globalThis.localStorage) || null;
             if (!storage) return;
@@ -140,6 +141,7 @@
                 lastWindowEndsMs: windowEndsMs,
             };
             if (sessionActive !== undefined) record.lastSessionActive = sessionActive;
+            if (weeklyActive !== undefined) record.lastWeeklyActive = weeklyActive;
             storage.setItem(STATE_STORAGE_KEY, JSON.stringify(record));
         } catch (_) {
             // Persistence is best-effort.
@@ -184,6 +186,10 @@
         const wasLimbo = prevState.lastSessionActive === false;
         const nowLimbo = observation.sessionActive === false;
         if (wasLimbo !== nowLimbo) return 'send';
+
+        const wasWeeklyLimbo = prevState.lastWeeklyActive === false;
+        const nowWeeklyLimbo = observation.weeklyActive === false;
+        if (wasWeeklyLimbo !== nowWeeklyLimbo) return 'send';
 
         if (nowLimbo) {
             // While in limbo the visible numbers don't move, so a strict
@@ -277,12 +283,13 @@
         return null;
     }
 
-    // Detect the "no active session" limbo label on the session row. When no
-    // session window is open, Anthropic replaces the "Resets in …" hint with
-    // copy like "Starts when a message is sent". Same leaf-element walk as
-    // findRowResetText: scope to the session row's ancestors so similar
-    // marketing/help text elsewhere on the page can't trigger a false match.
-    function isSessionLimbo(bar) {
+    // Detect the "no active window" limbo label on a row. Anthropic uses the
+    // same copy ("Starts when a message is sent") on both the session row and
+    // the weekly row when the corresponding window is not open. Same leaf-
+    // element walk as findRowResetText: scope to the row's ancestors so
+    // similar marketing/help text elsewhere on the page can't trigger a
+    // false match.
+    function isLimboLabel(bar) {
         const needle = 'starts when a message is sent';
         let node = bar.parentElement;
         for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
@@ -365,15 +372,17 @@
     }
 
     // Returns { sessionUsed, weeklyUsed, sessionWindowEnds, weeklyWindowEnds,
-    //           sessionActive, observedAtMs, resetText, lastUpdatedAgeMs }
+    //           sessionActive, weeklyActive, observedAtMs, resetText,
+    //           lastUpdatedAgeMs }
     // or null when neither section yields a usable bar. observedAtMs is the
     // wall-clock time the page's numbers were accurate (Date.now() minus the
     // "Last updated" staleness, or Date.now() when the indicator is missing).
-    // sessionActive is false only when the limbo label is positively detected;
-    // it is left undefined otherwise (we never assert it is true). resetText
-    // is the verbatim "Resets in …" text on the session row (null in limbo or
-    // when missing), used by the dedup layer to spot string ticks. lastUpdatedAgeMs
-    // is the raw "Last updated" staleness in ms (null when unparsable).
+    // sessionActive / weeklyActive are false only when the limbo label is
+    // positively detected on the corresponding row; left undefined otherwise
+    // (we never assert true). resetText is the verbatim "Resets in …" text on
+    // the session row (null in limbo or when missing), used by the dedup layer
+    // to spot string ticks. lastUpdatedAgeMs is the raw "Last updated"
+    // staleness in ms (null when unparsable).
     function extractQuota() {
         // Anthropic moved the section headings from <h2> to <h3> as of late
         // April 2026 and started appending plan-tier badges to the heading
@@ -390,6 +399,7 @@
         let sessionUsed = null, weeklyUsed = null;
         let sessionEnds = null, weeklyEnds = null;
         let sessionActive;
+        let weeklyActive;
         let sessionResetText = null;
 
         for (const bar of bars) {
@@ -403,12 +413,13 @@
                 sessionUsed = value;
                 sessionResetText = findRowResetText(bar);
                 sessionEnds = parseSessionEnds(sessionResetText, observedAtMs);
-                if (isSessionLimbo(bar)) sessionActive = false;
+                if (isLimboLabel(bar)) sessionActive = false;
             } else if (heading.startsWith(WEEKLY_HEADING) && weeklyUsed === null) {
                 weeklyUsed = value;
                 // Weekly hint is an absolute clock time ("Resets Thu 11:00 PM"),
                 // so page staleness doesn't shift it.
                 weeklyEnds = parseWeeklyEnds(findRowResetText(bar));
+                if (isLimboLabel(bar)) weeklyActive = false;
             }
         }
 
@@ -419,6 +430,7 @@
             sessionWindowEnds: sessionEnds,
             weeklyWindowEnds: weeklyEnds,
             sessionActive,
+            weeklyActive,
             observedAtMs,
             resetText: sessionResetText,
             lastUpdatedAgeMs,
@@ -468,8 +480,9 @@
         if (extracted.sessionWindowEnds) body.session_window_ends = extracted.sessionWindowEnds;
         if (extracted.weeklyWindowEnds) body.weekly_window_ends = extracted.weeklyWindowEnds;
         // Limbo signal: only emit when positively detected. We never assert
-        // session_active=true — absence of the field means "unknown".
+        // session_active=true / weekly_active=true — absence means "unknown".
         if (extracted.sessionActive === false) body.session_active = false;
+        if (extracted.weeklyActive === false) body.weekly_active = false;
         return body;
     }
 
@@ -534,6 +547,7 @@
                 resetText: extracted.resetText,
                 windowEndsMs,
                 sessionActive: extracted.sessionActive,
+                weeklyActive: extracted.weeklyActive,
             });
         });
     }

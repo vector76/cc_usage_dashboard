@@ -108,10 +108,11 @@ below for the version-key rationale and cold-start fallback.
 The record is written only after a successful POST, so an aborted send does
 not advance the anchor. The record carries the timestamp of the send, the
 percent, the verbatim reset text, the parsed `windowEndsMs`, and the
-observed `session_active`. The "Last updated" age is *not* persisted — it
-lives only in a rolling in-memory counter for the limbo decrease trigger,
-because anchoring it to the last-sent state self-traps once the trigger
-ages-down to zero.
+observed `session_active` and `weekly_active` (each persisted only when the
+script positively detected limbo on that row). The "Last updated" age is
+*not* persisted — it lives only in a rolling in-memory counter for the
+limbo decrease trigger, because anchoring it to the last-sent state
+self-traps once the trigger ages-down to zero.
 
 ### `continuous_with_prev` flag on every POST
 
@@ -216,11 +217,15 @@ they're omitted when the hint is in a format the parser doesn't recognize (e.g.
 "Resets May 1" when the boundary is far enough out that Anthropic switches to a
 date), in which case the server falls back to its calendar default.
 
-`session_active` is an optional boolean the script emits **only** when it
-positively detects "no active session" limbo (the row's "Resets …" hint
-is replaced by "Starts when a message is sent"). In that case the body
-includes `"session_active": false`. The script never emits
-`"session_active": true`; absence of the key means "unknown." See
+`session_active` and `weekly_active` are optional booleans the script
+emits **only** when it positively detects "no active window" limbo on
+the corresponding row (the row's "Resets …" hint is replaced by
+"Starts when a message is sent"). In that case the body includes
+`"session_active": false` and/or `"weekly_active": false`. The script
+never emits the `true` form; absence of the key means "unknown." Both
+fields are independent — the page commonly shows one row in limbo
+while the other is normal — and they share a single `isLimboLabel`
+helper that scans each row's ancestors for the literal phrase. See
 `docs/data-sources.md` and `docs/no-active-session.md` for how the
 server uses the tri-state signal.
 
