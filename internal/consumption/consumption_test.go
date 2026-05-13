@@ -276,6 +276,147 @@ func TestPercent_WeeklyAndSessionAreIndependent(t *testing.T) {
 	}
 }
 
+// TestPercent_SessionIdleGapDoesNotResetWalk: the userscript stamps
+// `continuous_with_prev=false` whenever > 15 min passes between
+// adjacent sends, even if nothing in the session window actually
+// reset (the user just stepped away). The walker must not treat such
+// snapshots as a fresh session — that would add `curr.session_used`
+// as phantom consumption for every idle gap. Positive evidence of a
+// reset (a strict decrease in session_used) is required when the
+// flag is explicitly false.
+func TestPercent_SessionIdleGapDoesNotResetWalk(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	c, s := newCalc(t, now)
+	defer s.Close()
+
+	// Anchor at session_used=20.
+	insertSnapshot(t, s, now.Add(-25*time.Hour), ptrF(20), nil, nil, nil, nil)
+	// Session continues: 35.
+	insertSnapshot(t, s, now.Add(-20*time.Hour), ptrF(35), nil, nil, nil, ptrB(true))
+	// Idle gap > 15 min — userscript marks flag=false. But
+	// session_used did not drop (no actual reset).
+	insertSnapshot(t, s, now.Add(-19*time.Hour), ptrF(35), nil, nil, nil, ptrB(false))
+	// Session keeps accumulating: 50.
+	insertSnapshot(t, s, now.Add(-15*time.Hour), ptrF(50), nil, nil, nil, ptrB(true))
+	// Another idle gap with a small numeric grow across it.
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(55), nil, nil, nil, ptrB(false))
+	// Final continuation: 70.
+	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(70), nil, nil, nil, ptrB(true))
+
+	res, err := c.Calculate("24h")
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	if res.ConsumedSessionPct == nil {
+		t.Fatal("expected non-nil session pct")
+	}
+	// No real reset. Total should be the monotonic delta 70 - 20 = 50.
+	// Pre-fix walker would add 35 + 55 = 90 of phantom consumption on
+	// the two flag=false rows, producing 135.
+	if !near(*res.ConsumedSessionPct, 50, 1e-9) {
+		t.Errorf("session pct: got %v want 50 (idle gaps must not start a fresh session walk)", *res.ConsumedSessionPct)
+	}
+}
+
+// TestPercent_SessionExplicitResetStillCounts: a flag=false snapshot
+// whose session_used did drop is still a true session reset; the
+// idle-gap defense above must not swallow genuine resets.
+func TestPercent_SessionExplicitResetStillCounts(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	c, s := newCalc(t, now)
+	defer s.Close()
+
+	// Anchor near end of prior session.
+	insertSnapshot(t, s, now.Add(-25*time.Hour), ptrF(85), nil, nil, nil, nil)
+	// Reset to fresh session: flag=false AND numeric drop → start.
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(15), nil, nil, nil, ptrB(false))
+	// Continue: 60.
+	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(60), nil, nil, nil, ptrB(true))
+
+	res, err := c.Calculate("24h")
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	if res.ConsumedSessionPct == nil {
+		t.Fatal("expected non-nil session pct")
+	}
+	// 85 → 15 detected as reset → +15. 15 → 60 → +45. Total 60.
+	if !near(*res.ConsumedSessionPct, 60, 1e-9) {
+		t.Errorf("session pct: got %v want 60", *res.ConsumedSessionPct)
+	}
+}
+
+// TestPercent_WeeklyIgnoresSessionResetFlag: the persisted
+// `continuous_with_prev` column is decided by the userscript using
+// session-only signals (15-min wall-clock gap, session-percent
+// decrease, session_window_ends jump). Applying that flag verbatim to
+// the weekly walk causes every session reset inside the period to be
+// misread as a fresh weekly window, inflating weekly_pct by
+// ~weekly_used each time. The weekly walker must instead infer weekly
+// resets from a strict decrease in `weekly_used`.
+func TestPercent_WeeklyIgnoresSessionResetFlag(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	c, s := newCalc(t, now)
+	defer s.Close()
+
+	// Anchor: weekly_used=5, session_used=80 (about to reset).
+	insertSnapshot(t, s, now.Add(-25*time.Hour), ptrF(80), ptrF(5.0), nil, nil, nil)
+	// Session reset #1: weekly continues (5.0 → 5.2).
+	insertSnapshot(t, s, now.Add(-19*time.Hour), ptrF(5), ptrF(5.2), nil, nil, ptrB(false))
+	// Session reset #2: weekly continues (5.2 → 5.5).
+	insertSnapshot(t, s, now.Add(-14*time.Hour), ptrF(10), ptrF(5.5), nil, nil, ptrB(false))
+	// Mid-session continuation: weekly 5.5 → 5.8.
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(40), ptrF(5.8), nil, nil, ptrB(true))
+	// Session reset #3: weekly continues (5.8 → 6.0).
+	insertSnapshot(t, s, now.Add(-5*time.Hour), ptrF(15), ptrF(6.0), nil, nil, ptrB(false))
+	// Mid-session continuation: weekly 6.0 → 6.5.
+	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(50), ptrF(6.5), nil, nil, ptrB(true))
+
+	res, err := c.Calculate("24h")
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	if res.ConsumedWeeklyPct == nil {
+		t.Fatal("expected non-nil weekly pct")
+	}
+	// weekly_used grew monotonically 5.0 → 6.5; no weekly reset.
+	// Expected weekly_pct = 1.5. Buggy result is ~17.5 (each session
+	// reset re-charges curr.weekly_used into the running total).
+	if !near(*res.ConsumedWeeklyPct, 1.5, 1e-9) {
+		t.Errorf("weekly pct: got %v want 1.5 (session resets must not start a fresh weekly walk)", *res.ConsumedWeeklyPct)
+	}
+}
+
+// TestPercent_WeeklyResetDetectedByDecrease: when weekly_used strictly
+// decreases between adjacent snapshots, that *is* a weekly reset and
+// the new snapshot contributes its raw weekly_used (a fresh week's
+// worth), independent of the persisted continuity flag.
+func TestPercent_WeeklyResetDetectedByDecrease(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	c, s := newCalc(t, now)
+	defer s.Close()
+
+	// Anchor near end of prior week: weekly=95.
+	insertSnapshot(t, s, now.Add(-25*time.Hour), ptrF(50), ptrF(95.0), nil, nil, nil)
+	// Weekly reset (paired with a session reset, but the flag is
+	// irrelevant to the weekly walker): weekly 95 → 0.5.
+	insertSnapshot(t, s, now.Add(-10*time.Hour), ptrF(5), ptrF(0.5), nil, nil, ptrB(true))
+	// Continuation in the new week: 0.5 → 2.0.
+	insertSnapshot(t, s, now.Add(-1*time.Hour), ptrF(30), ptrF(2.0), nil, nil, ptrB(true))
+
+	res, err := c.Calculate("24h")
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	// 95 → 0.5 detected as reset → +0.5. 0.5 → 2.0 continuation → +1.5.
+	if res.ConsumedWeeklyPct == nil {
+		t.Fatal("expected non-nil weekly pct")
+	}
+	if !near(*res.ConsumedWeeklyPct, 2.0, 1e-9) {
+		t.Errorf("weekly pct: got %v want 2.0", *res.ConsumedWeeklyPct)
+	}
+}
+
 // TestPercent_NoSnapshotsAtAll: fields are nil, signalling "couldn't
 // measure", not 0.
 func TestPercent_NoSnapshotsAtAll(t *testing.T) {

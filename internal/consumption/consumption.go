@@ -107,22 +107,58 @@ func (c *Calculator) aggregateEvents(res *Result, startTime, endTime time.Time) 
 	return nil
 }
 
-// snapshot is one observation of a window's percent-used value, paired with
-// the persisted continuity flag (true = continuation of the prior snapshot,
-// false/NULL = start / unsafe to delta against the previous row).
+// snapshot is one observation of a window's percent-used value, paired
+// with the persisted continuity flag. The flag is tri-state: an explicit
+// true / false from the userscript, or NULL on rows written before
+// migration v5 added the column. NULL is retained as a separate state
+// because the session walker treats it as "unknown — fall back to the
+// migration-conservative behavior", while an explicit false carries
+// stronger signal that the walker can interrogate further.
 type snapshot struct {
 	observedAt         time.Time
 	used               float64 // 0-100
-	continuousWithPrev bool    // false when the source row's flag was NULL or 0
+	continuousWithPrev *bool   // nil = NULL in DB
+}
+
+// nullBoolFromInt collapses the SQLite NullInt64 representation of the
+// `continuous_with_prev` column into the tri-state `*bool` carried on a
+// snapshot: nil for NULL, &true for any non-zero int, &false for zero.
+func nullBoolFromInt(n sql.NullInt64) *bool {
+	if !n.Valid {
+		return nil
+	}
+	b := n.Int64 != 0
+	return &b
 }
 
 // percentConsumed walks the snapshots for the requested window kind and
 // sums the per-snapshot increases in `*_used`. Between two adjacent
 // snapshots, a continuation contributes the non-negative delta; a start
-// (continuous_with_prev = false / NULL) contributes its raw `*_used` as a
-// fresh window's worth. The unobserved tail of the prior window — between
-// its last snapshot and the reset — is treated as zero; snapshots typically
-// arrive right up to window end, so any missed tail is small.
+// contributes its raw `*_used` as a fresh window's worth. The unobserved
+// tail of the prior window — between its last snapshot and the reset — is
+// treated as zero; snapshots typically arrive right up to window end, so
+// any missed tail is small.
+//
+// "Start" detection is per-kind, because the persisted
+// `continuous_with_prev` flag is decided by the userscript from
+// session-oriented signals (15-min wall-clock gap, session-percent
+// decrease, session_window_ends jump). Applying that flag to the weekly
+// walk would turn every session reset into a phantom weekly reset.
+//
+//   - session: a NULL flag (pre-migration row) is conservatively treated
+//     as a start. An explicit `true` is a continuation. An explicit
+//     `false` is only treated as a start when there is positive numeric
+//     evidence of a reset (`curr.used < prev.used`); a `false` flag with
+//     no numeric drop is a benign idle gap (the userscript marks any
+//     >15-min wall-clock gap as `false`) and is treated as a
+//     continuation. This catches the common case of "user stepped away
+//     mid-session" without ignoring genuine resets.
+//   - weekly: a start is signalled by a strict decrease in weekly_used.
+//     Weekly resets always drop weekly_used from ~high to ~0; the flag is
+//     ignored because none of its signals carry information about weekly
+//     window boundaries. This assumes weekly_used doesn't jitter downward
+//     between adjacent snapshots — the same stability the userscript's own
+//     continuity check assumes about session_used.
 //
 // Anchor: the most recent snapshot at or before periodStart, if any.
 // Without an anchor, the first in-period snapshot establishes the baseline
@@ -133,8 +169,20 @@ type snapshot struct {
 // periodEnd, signalling "couldn't measure" rather than 0.
 func (c *Calculator) percentConsumed(kind string, startTime, endTime time.Time) (*float64, error) {
 	usedCol := "session_used"
+	isStart := func(prev, curr snapshot) bool {
+		if curr.continuousWithPrev == nil {
+			return true // pre-migration NULL → conservative start
+		}
+		if *curr.continuousWithPrev {
+			return false // explicit continuation
+		}
+		// Explicit false: distinguish a real reset from a benign idle
+		// gap by requiring a numeric drop in session_used.
+		return curr.used < prev.used
+	}
 	if kind == "weekly" {
 		usedCol = "weekly_used"
+		isStart = func(prev, curr snapshot) bool { return curr.used < prev.used }
 	}
 
 	anchor, err := c.snapshotAtOrBefore(usedCol, startTime)
@@ -159,14 +207,14 @@ func (c *Calculator) percentConsumed(kind string, startTime, endTime time.Time) 
 	total := 0.0
 	for i := 1; i < len(walk); i++ {
 		prev, curr := walk[i-1], walk[i]
-		if curr.continuousWithPrev {
+		if isStart(prev, curr) {
+			total += curr.used
+		} else {
 			delta := curr.used - prev.used
 			if delta < 0 {
 				delta = 0
 			}
 			total += delta
-		} else {
-			total += curr.used
 		}
 	}
 	return &total, nil
@@ -189,7 +237,7 @@ func (c *Calculator) snapshotAtOrBefore(usedCol string, t time.Time) (*snapshot,
 	if err != nil {
 		return nil, fmt.Errorf("snapshot anchor query: %w", err)
 	}
-	s.continuousWithPrev = cont.Valid && cont.Int64 != 0
+	s.continuousWithPrev = nullBoolFromInt(cont)
 	return &s, nil
 }
 
@@ -212,7 +260,7 @@ func (c *Calculator) snapshotsInRange(usedCol string, startTime, endTime time.Ti
 		if err := rows.Scan(&s.observedAt, &s.used, &cont); err != nil {
 			return nil, err
 		}
-		s.continuousWithPrev = cont.Valid && cont.Int64 != 0
+		s.continuousWithPrev = nullBoolFromInt(cont)
 		out = append(out, s)
 	}
 	return out, rows.Err()
