@@ -25,6 +25,18 @@ import (
 // returns. dashboardURL is the http://host:port the "Open dashboard" item
 // should launch in the user's default browser.
 func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle() }, dashboardURL string) {
+	// Pin this goroutine to a single OS thread for the lifetime of the
+	// systray. fyne.io/systray creates its hidden window with CreateWindowEx
+	// inside Run; Win32 delivers WM_NOTIFY (tray clicks) and TaskbarCreated
+	// only to the queue of the thread that created the window. The library's
+	// own LockOSThread runs in package init on the main goroutine, which
+	// doesn't help us because StartTray is invoked from a goroutine spawned
+	// in main.main. Without this lock, Go's scheduler eventually migrates
+	// the pump goroutine off the window-owning thread and GetMessage starts
+	// draining a queue that never receives any tray messages — the icon
+	// goes silent while the rest of trayapp keeps running.
+	runtime.LockOSThread()
+
 	onReady := func() {
 		ico, err := buildTrayIcon(icon.PNG)
 		if err != nil {
