@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.7.1
+// @version      0.7.2
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -68,6 +68,9 @@
     const ENDPOINT_SNAPSHOT = 'http://localhost:27812/snapshot';
     const ENDPOINT_PARSE_ERROR = 'http://localhost:27812/parse_error';
 
+    // Legacy full-page route. As of the June 2026 redesign, settings is a
+    // hash-routed modal ("/new#settings/usage"); see isUsageRoute (mirror of
+    // userscript/lib/route.js) for the predicate that accepts both forms.
     const USAGE_PATH = '/settings/usage';
     // Backstop polling — primary signal is a MutationObserver on aria-valuenow,
     // so the interval only catches edge cases (observer torn down by SPA
@@ -249,8 +252,17 @@
         }
     }
 
+    // Mirror of userscript/lib/route.js — edit both together. Accepts the
+    // legacy "/settings/usage" path and the hash-routed modal form
+    // ("/new#settings/usage") introduced in the June 2026 redesign.
+    function isUsageRoute(pathname, hash) {
+        if (pathname === USAGE_PATH) return true;
+        const route = String(hash || '').replace(/^#/, '');
+        return /^\/?settings\/usage(?:[/?]|$)/.test(route);
+    }
+
     function onUsagePage() {
-        return location.pathname === USAGE_PATH;
+        return isUsageRoute(location.pathname, location.hash);
     }
 
     // ---------- DOM extraction ----------
