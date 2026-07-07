@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -196,6 +197,11 @@ func TestExpandPlaceholdersNoTokenLeavesIntact(t *testing.T) {
 }
 
 func TestExpandPlaceholdersFallsBackToHomeOnLinux(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.UserHomeDir reads USERPROFILE (not HOME) on Windows, so the
+		// HOME-based fallback under test is unreachable there.
+		t.Skip("HOME fallback of expandPlaceholders is Linux-specific")
+	}
 	// Empty Windows-style env vars on Linux should fall back to UserHomeDir.
 	t.Setenv("APPDATA", "")
 	t.Setenv("LOCALAPPDATA", "")
