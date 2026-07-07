@@ -93,7 +93,7 @@ func (c *Calculator) aggregateEvents(res *Result, startTime, endTime time.Time) 
 			COALESCE(SUM(CASE WHEN cost_usd_equivalent IS NULL THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(cost_usd_equivalent), 0)
 		FROM usage_events
-		WHERE occurred_at >= ? AND occurred_at < ?
+		WHERE occurred_at >= ? AND occurred_at <= ?
 	`, store.FormatTime(startTime), store.FormatTime(endTime)).Scan(
 		&res.EventsTotal,
 		&res.EventsWithReportedCost,

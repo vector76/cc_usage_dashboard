@@ -33,6 +33,46 @@ func TestOpen(t *testing.T) {
 	}
 }
 
+// TestFormatTimeTextOrderMatchesTimeOrder guards the invariant every range
+// query in the codebase depends on: stored timestamps are compared as TEXT,
+// so FormatTime must be lexicographically monotonic. RFC3339Nano violates
+// this by trimming trailing zeros — ".53Z" sorts after ".531Z" because
+// 'Z' > '1'. Trailing-zero fractions are routine on Windows, where the
+// system clock ticks in ~0.5ms steps, so events silently fell out of
+// /consumption periods there.
+func TestFormatTimeTextOrderMatchesTimeOrder(t *testing.T) {
+	base := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	nanos := []int{
+		0,           // whole second
+		500_000,     // trailing zeros at microsecond granularity
+		530_000_000, // ".53" under RFC3339Nano
+		531_000_000, // ".531" — sorted before ".53" by the old format
+		531_200_000,
+		999_999_999, // full width
+	}
+	times := make([]time.Time, len(nanos))
+	for i, n := range nanos {
+		times[i] = base.Add(time.Duration(n))
+	}
+	for i := 1; i < len(times); i++ {
+		prev, curr := FormatTime(times[i-1]), FormatTime(times[i])
+		if !(prev < curr) {
+			t.Errorf("FormatTime not monotonic: %q (t=%v) should sort before %q (t=%v)",
+				prev, times[i-1], curr, times[i])
+		}
+	}
+}
+
+// TestFormatTimeRoundTrips verifies the stored representation is still
+// readable by the lenient reader used for rows coming back out of the DB.
+func TestFormatTimeRoundTrips(t *testing.T) {
+	in := time.Date(2026, 7, 7, 12, 0, 0, 530_000_000, time.UTC)
+	got := parseStoredTime(FormatTime(in))
+	if !got.Equal(in) {
+		t.Errorf("round trip: got %v, want %v (formatted %q)", got, in, FormatTime(in))
+	}
+}
+
 func TestMigrateFromV3AddsSessionActive(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -604,10 +644,13 @@ func TestInsertQuotaSnapshotSlideCollapsesPlateau(t *testing.T) {
 	`, firstContID).Scan(&observedStr, &receivedStr, &rawJSON); err != nil {
 		t.Fatalf("select slid row: %v", err)
 	}
-	if observedStr != FormatTime(lastObserved) {
+	// Compare as instants: the TIMESTAMP decltype means the driver returns
+	// time.Time, which database/sql renders into the string via RFC3339Nano —
+	// not necessarily the exact bytes FormatTime stored.
+	if !parseStoredTime(observedStr).Equal(lastObserved) {
 		t.Errorf("observed_at: got %s, want %s", observedStr, FormatTime(lastObserved))
 	}
-	if receivedStr != FormatTime(lastReceived) {
+	if !parseStoredTime(receivedStr).Equal(lastReceived) {
 		t.Errorf("received_at: got %s, want %s", receivedStr, FormatTime(lastReceived))
 	}
 	if rawJSON != `{"first_continuation":1}` {

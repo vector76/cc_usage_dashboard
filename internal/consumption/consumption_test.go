@@ -94,6 +94,30 @@ func TestCalculate_USDAndEventBuckets(t *testing.T) {
 	}
 }
 
+// TestCalculate_EventAtPeriodEndIncluded: an event timestamped exactly at
+// period_end (i.e. "now") must be counted. This is routine on Windows, where
+// the ~0.5ms clock tick makes an insert and the immediately following
+// /consumption query observe the identical time.Now() value; a strict
+// occurred_at < period_end bound silently dropped such events.
+func TestCalculate_EventAtPeriodEndIncluded(t *testing.T) {
+	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
+	c, s := newCalc(t, now)
+	defer s.Close()
+
+	insertEvent(t, s, now, ptrF(5.00), "reported")
+
+	res, err := c.Calculate("24h")
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+	if res.EventsTotal != 1 {
+		t.Errorf("EventsTotal: got %d want 1 (event at period_end dropped)", res.EventsTotal)
+	}
+	if !near(res.ConsumedUSDEquivalent, 5.00, 1e-9) {
+		t.Errorf("ConsumedUSDEquivalent: got %v want 5.00", res.ConsumedUSDEquivalent)
+	}
+}
+
 // TestPercent_AnchorAndDeltaSameWindow: anchor at period start sets the
 // baseline; subsequent continuous snapshots accumulate deltas.
 func TestPercent_AnchorAndDeltaSameWindow(t *testing.T) {

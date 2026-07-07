@@ -9,14 +9,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// FormatTime renders a time as an RFC3339Nano string in UTC. modernc.org/sqlite
-// serializes time.Time via Go's default String() method
-// ("2006-01-02 15:04:05.x +0000 UTC"), which SQLite's date functions
-// (strftime, julianday, datetime) cannot parse. All call sites that pass a
-// time.Time as a query parameter must funnel through this helper instead so
-// that values land in the table as parseable RFC3339 strings.
+// FormatTime renders a time as an RFC3339 string in UTC with a fixed-width
+// 9-digit fractional second. modernc.org/sqlite serializes time.Time via Go's
+// default String() method ("2006-01-02 15:04:05.x +0000 UTC"), which SQLite's
+// date functions (strftime, julianday, datetime) cannot parse. All call sites
+// that pass a time.Time as a query parameter must funnel through this helper
+// instead so that values land in the table as parseable RFC3339 strings.
+//
+// The fraction must be fixed-width because timestamps are compared as TEXT in
+// SQL: RFC3339Nano trims trailing zeros, and ".53Z" sorts lexicographically
+// after ".531Z" ('Z' > '1'), breaking range queries. That was invisible on
+// Linux (nanosecond clock jitter makes trailing zeros vanishingly rare) but
+// routine on Windows, whose clock ticks in ~0.5ms steps.
 func FormatTime(t time.Time) string {
-	return t.UTC().Format(time.RFC3339Nano)
+	return t.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
 }
 
 // FormatTimePtr is the *time.Time variant: nil maps to a typed nil so the
@@ -268,6 +274,11 @@ func nullableFloatEqual(a sql.NullFloat64, b *float64) bool {
 	return a.Float64 == *b
 }
 
+// nullableTimeEqual compares a timestamp read back from the DB with an
+// in-memory time. The comparison must be on parsed instants, not raw strings:
+// the TIMESTAMP decltype makes the driver hand the column back as a time.Time,
+// which database/sql re-renders into a string via RFC3339Nano — a trailing-
+// zero-trimmed format that need not byte-match what FormatTime stored.
 func nullableTimeEqual(a sql.NullString, b *time.Time) bool {
 	if a.Valid != (b != nil) {
 		return false
@@ -275,7 +286,7 @@ func nullableTimeEqual(a sql.NullString, b *time.Time) bool {
 	if !a.Valid {
 		return true
 	}
-	return a.String == FormatTime(*b)
+	return parseStoredTime(a.String).Equal(*b)
 }
 
 // boolToNullableInt converts a *bool to the interface{} that database/sql
