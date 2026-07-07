@@ -21,6 +21,22 @@
   .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
   .muted { color: #888; }
   svg { width: 100%; height: auto; display: block; }
+  details.feedback { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem 1rem; }
+  details.feedback > summary { cursor: pointer; color: #666; font-size: 0.9rem; list-style: none; }
+  details.feedback > summary::-webkit-details-marker { display: none; }
+  details.feedback > summary::before { content: "▸ "; color: #999; }
+  details.feedback[open] > summary::before { content: "▾ "; }
+  details.feedback .fb-badge { color: #888; }
+  details.feedback[open] { padding-bottom: 1rem; }
+  .fb-group { margin-top: 0.9rem; }
+  .fb-group > h3 { margin: 0 0 0.35rem 0; font-size: 0.85rem; color: #666; }
+  .fb-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  .fb-table th, .fb-table td { text-align: left; padding: 0.2rem 0.5rem 0.2rem 0; vertical-align: top; }
+  .fb-table th { color: #999; font-weight: normal; border-bottom: 1px solid #eee; }
+  .fb-table td { color: #444; font-variant-numeric: tabular-nums; }
+  .fb-empty { color: #aaa; font-size: 0.8rem; margin: 0.2rem 0 0 0; }
+  .fb-msg { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .fb-attrs { color: #999; }
 </style>
 </head>
 <body>
@@ -49,6 +65,13 @@
   </div>
   <div class="chart-block" id="burn-legend"></div>
 </section>
+
+<details class="feedback" id="feedback">
+  <summary>Feedback <span class="fb-badge" id="fb-badge">(none)</span></summary>
+  <div id="fb-body">
+    <p class="fb-empty">Expand to load recent warnings.</p>
+  </div>
+</details>
 
 <script src="/grouping.js"></script>
 <script>
@@ -546,6 +569,146 @@ function renderConsumption(d) {
     d.events_total + " / " + d.events_with_reported_cost + " / " + d.events_with_computed_cost + " / " + d.events_without_cost);
 }
 
+// fmtFbTime renders a feedback timestamp in local time, tolerating both the
+// RFC3339 strings the API emits and any value Date can't parse (shown as-is).
+function fmtFbTime(s) {
+  if (!s) return "—";
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return String(s);
+  return d.toLocaleString();
+}
+
+// renderFeedbackBadge writes the compact summary shown in the collapsed
+// panel's summary line, e.g. "(3 warnings · 1 unknown model)". Zero counts are
+// omitted; an all-zero state reads "(none)" so nothing looks alarming.
+function renderFeedbackBadge(sum) {
+  const badge = document.getElementById("fb-badge");
+  const plural = (n, one) => n + " " + (n === 1 ? one : one + "s");
+  const parts = [];
+  if (sum.warnings > 0) parts.push(plural(sum.warnings, "warning"));
+  if (sum.unknown_models > 0) parts.push(plural(sum.unknown_models, "unknown model"));
+  if (sum.parse_errors > 0) parts.push(plural(sum.parse_errors, "parse error"));
+  badge.textContent = parts.length ? "(" + parts.join(" · ") + ")" : "(none)";
+}
+
+// fbTable builds a <table> from headers and rows. Cell values are set via
+// textContent (or appended when already an Element) so server-controlled
+// strings — model names, warning messages, parse reasons — can never reach the
+// HTML parser.
+function fbTable(headers, rows) {
+  const table = document.createElement("table");
+  table.className = "fb-table";
+  const thead = document.createElement("thead");
+  const htr = document.createElement("tr");
+  for (const h of headers) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (const cells of rows) {
+    const tr = document.createElement("tr");
+    for (const c of cells) {
+      const td = document.createElement("td");
+      if (c instanceof Element) td.appendChild(c);
+      else td.textContent = String(c);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  return table;
+}
+
+function fbGroup(title, count, node) {
+  const div = document.createElement("div");
+  div.className = "fb-group";
+  const h = document.createElement("h3");
+  h.textContent = title + " (" + count + ")";
+  div.appendChild(h);
+  div.appendChild(node);
+  return div;
+}
+
+function fbEmpty(text) {
+  const p = document.createElement("p");
+  p.className = "fb-empty";
+  p.textContent = text;
+  return p;
+}
+
+// renderFeedbackBody fills the expanded panel: unknown models first (the
+// actionable "add it to prices.yaml" signal), then recent warnings, then
+// recent parse errors.
+function renderFeedbackBody(d) {
+  const body = document.getElementById("fb-body");
+  while (body.firstChild) body.removeChild(body.firstChild);
+
+  const um = d.unknown_models || [];
+  if (um.length === 0) {
+    body.appendChild(fbGroup("Unknown models", 0, fbEmpty("None — every model was priced.")));
+  } else {
+    const rows = um.map(m => [m.model, m.count, fmtFbTime(m.first_seen), fmtFbTime(m.last_seen)]);
+    body.appendChild(fbGroup("Unknown models", um.length,
+      fbTable(["Model", "Events", "First seen", "Last seen"], rows)));
+  }
+
+  const warns = d.warnings || [];
+  if (warns.length === 0) {
+    body.appendChild(fbGroup("Recent warnings", 0, fbEmpty("None.")));
+  } else {
+    const rows = warns.map(wn => {
+      const msg = document.createElement("span");
+      msg.className = "fb-msg";
+      msg.textContent = wn.message;
+      if (wn.attrs && Object.keys(wn.attrs).length) {
+        const a = document.createElement("span");
+        a.className = "fb-attrs";
+        a.textContent = " " + Object.entries(wn.attrs).map(([k, v]) => k + "=" + v).join(" ");
+        msg.appendChild(a);
+      }
+      return [fmtFbTime(wn.time), wn.level, msg];
+    });
+    body.appendChild(fbGroup("Recent warnings", warns.length,
+      fbTable(["Time", "Level", "Message"], rows)));
+  }
+
+  const pes = d.parse_errors || [];
+  if (pes.length === 0) {
+    body.appendChild(fbGroup("Recent parse errors", 0, fbEmpty("None.")));
+  } else {
+    const rows = pes.map(pe => [fmtFbTime(pe.occurred_at), pe.source, pe.reason]);
+    body.appendChild(fbGroup("Recent parse errors", pes.length,
+      fbTable(["Time", "Source", "Reason"], rows)));
+  }
+}
+
+// lastFeedback caches the latest payload so expanding the panel renders
+// instantly from cache while a fresh fetch is in flight.
+let lastFeedback = null;
+
+// refreshFeedback fetches /api/feedback, updates the always-visible badge, and
+// (re)renders the body only while the panel is open. Called on each state
+// refresh tick so the badge stays live even when collapsed.
+async function refreshFeedback() {
+  try {
+    const resp = await fetch("/api/feedback");
+    const d = await resp.json();
+    lastFeedback = d;
+    renderFeedbackBadge(d.summary || {});
+    if (document.getElementById("feedback").open) renderFeedbackBody(d);
+  } catch (e) { console.error("feedback error", e); }
+}
+
+document.getElementById("feedback").addEventListener("toggle", (e) => {
+  if (e.target.open) {
+    if (lastFeedback) renderFeedbackBody(lastFeedback);
+    refreshFeedback();
+  }
+});
+
 async function refresh() {
   try {
     const sResp = await fetch("/api/dashboard/state");
@@ -571,6 +734,9 @@ async function refresh() {
     const d = await dResp.json();
     renderConsumption(d);
   } catch (e) { console.error("consumption error", e); }
+  // Keep the feedback badge live so the user can tell at a glance whether
+  // the collapsed panel is worth expanding.
+  refreshFeedback();
 }
 
 renderVolumeLegend();

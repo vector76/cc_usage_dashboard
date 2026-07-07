@@ -326,6 +326,70 @@ func (s *Store) InsertParseError(
 	return id, nil
 }
 
+// ParseError is one row from the parse_errors table, surfaced to the
+// dashboard's feedback panel via GET /api/feedback.
+type ParseError struct {
+	ID         int64     `json:"id"`
+	OccurredAt time.Time `json:"occurred_at"`
+	Source     string    `json:"source"`
+	Reason     string    `json:"reason"`
+	Payload    string    `json:"payload"`
+}
+
+// RecentParseErrors returns the most recent parse errors, newest first, up to
+// limit rows. A limit <= 0 is coerced to 50. The returned slice is never nil.
+//
+// occurred_at is scanned via parseStoredTime because the column has been
+// written in two formats historically (RFC3339 via FormatTime and Go's native
+// time.Time string from raw driver serialization); parsing leniently keeps the
+// endpoint robust across both.
+func (s *Store) RecentParseErrors(limit int) ([]ParseError, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`
+		SELECT id, occurred_at, source, reason, payload
+		FROM parse_errors
+		ORDER BY occurred_at DESC, id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query parse errors: %w", err)
+	}
+	defer rows.Close()
+
+	out := []ParseError{}
+	for rows.Next() {
+		var pe ParseError
+		var occ string
+		if err := rows.Scan(&pe.ID, &occ, &pe.Source, &pe.Reason, &pe.Payload); err != nil {
+			return nil, fmt.Errorf("failed to scan parse error: %w", err)
+		}
+		pe.OccurredAt = parseStoredTime(occ)
+		out = append(out, pe)
+	}
+	return out, rows.Err()
+}
+
+// parseStoredTime leniently parses a timestamp string as stored in the DB.
+// Returns the zero time when no known layout matches rather than erroring, so a
+// single malformed row can't fail an entire read.
+func parseStoredTime(s string) time.Time {
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05",
+	}
+	for _, l := range layouts {
+		if t, err := time.Parse(l, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
 // PruneParseErrors removes parse errors older than the given duration,
 // keeping only a summary of how many were deleted.
 func (s *Store) PruneParseErrors(olderThan time.Duration) error {

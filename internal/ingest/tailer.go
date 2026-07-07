@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/vector76/cc_usage_dashboard/internal/feedback"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 	"github.com/fsnotify/fsnotify"
 )
@@ -18,11 +19,17 @@ type Tailer struct {
 	projectsDir string
 	store       *store.Store
 	priceTable  PriceTable
-	offsets     map[string]int64 // filepath -> byte offset
-	offsetMu    sync.Mutex
-	stopChan    chan struct{}
-	doneChan    chan struct{}
-	caughtUp    atomic.Bool
+	// unknown aggregates usage events whose model is missing from the price
+	// table. Aggregated (not per-event logged) because one usage event per
+	// message would otherwise flood the feedback buffer with the exact model
+	// that's missing. Defaults to the process-wide aggregate so it lines up
+	// with what GET /api/feedback reads.
+	unknown  *feedback.UnknownModels
+	offsets  map[string]int64 // filepath -> byte offset
+	offsetMu sync.Mutex
+	stopChan chan struct{}
+	doneChan chan struct{}
+	caughtUp atomic.Bool
 }
 
 // NewTailer creates a new tailer for the given projects directory.
@@ -31,6 +38,7 @@ func NewTailer(projectsDir string, s *store.Store, pt PriceTable) *Tailer {
 		projectsDir: projectsDir,
 		store:       s,
 		priceTable:  pt,
+		unknown:     feedback.DefaultUnknownModels(),
 		offsets:     make(map[string]int64),
 		stopChan:    make(chan struct{}),
 		doneChan:    make(chan struct{}),
@@ -289,6 +297,13 @@ func (t *Tailer) processFile(filePath string) {
 			event.CacheReadTokens,
 			t.priceTable,
 		)
+		// A non-empty model that yields no cost is missing from the price
+		// table — aggregate it so the dashboard can prompt the user to add
+		// it to prices.yaml. (An empty model is a different, already-handled
+		// case and is ignored by UnknownModels.Record.)
+		if cost == nil && event.Model != "" {
+			t.unknown.Record(event.Model, time.Now())
+		}
 		if _, err := tx.Exec(`
 			INSERT INTO usage_events (
 				occurred_at, source, session_id, message_id, project_path,
@@ -301,7 +316,7 @@ func (t *Tailer) processFile(filePath string) {
 			slog.Error("failed to insert event", "path", filePath, "err", err)
 			if _, perr := tx.Exec(
 				`INSERT INTO parse_errors (occurred_at, source, reason, payload) VALUES (?, ?, ?, ?)`,
-				time.Now(), "tailer", fmt.Sprintf("database insert failed: %v", err), event.RawJSON,
+				store.FormatTime(time.Now()), "tailer", fmt.Sprintf("database insert failed: %v", err), event.RawJSON,
 			); perr != nil {
 				slog.Error("failed to record insert-error", "path", filePath, "err", perr)
 			}
@@ -311,7 +326,7 @@ func (t *Tailer) processFile(filePath string) {
 	for _, parseErr := range parseErrors {
 		if _, err := tx.Exec(
 			`INSERT INTO parse_errors (occurred_at, source, reason, payload) VALUES (?, ?, ?, ?)`,
-			time.Now(), "tailer", parseErr.Reason, parseErr.Line,
+			store.FormatTime(time.Now()), "tailer", parseErr.Reason, parseErr.Line,
 		); err != nil {
 			slog.Error("failed to record parse error", "path", filePath, "err", err)
 		}

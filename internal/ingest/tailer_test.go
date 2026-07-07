@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vector76/cc_usage_dashboard/internal/feedback"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
@@ -92,6 +93,56 @@ func TestTailerProcessFile(t *testing.T) {
 
 	if offset != int64(len(content)) {
 		t.Errorf("expected offset %d, got %d", int64(len(content)), offset)
+	}
+}
+
+// TestTailerAggregatesUnknownModel verifies the ingest path records events
+// whose model is missing from the price table into the unknown-model aggregate
+// (one entry per model, event count summed), while events with a priced model
+// or an empty model are not aggregated as unknown.
+func TestTailerAggregatesUnknownModel(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	pt := make(PriceTable)
+	pt["known-model"] = &ModelPrices{InputRate: 1, OutputRate: 1}
+
+	tmpDir := t.TempDir()
+	tailer := NewTailer(tmpDir, s, pt)
+	// Inject a fresh aggregate so the test is isolated from the process-wide
+	// default (and from other tests).
+	agg := feedback.NewUnknownModels()
+	tailer.unknown = agg
+
+	transcriptPath := filepath.Join(tmpDir, "session-unk.jsonl")
+	lines := []string{
+		`{"type":"assistant","session_id":"s","message_id":"m1","model":"unpriced-model","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","session_id":"s","message_id":"m2","model":"unpriced-model","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","session_id":"s","message_id":"m3","model":"known-model","timestamp":"2026-04-26T10:02:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","session_id":"s","message_id":"m4","timestamp":"2026-04-26T10:03:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	tailer.processFile(transcriptPath)
+
+	snap := agg.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("expected exactly 1 unknown model, got %d: %+v", len(snap), snap)
+	}
+	if snap[0].Model != "unpriced-model" {
+		t.Errorf("expected 'unpriced-model', got %q", snap[0].Model)
+	}
+	if snap[0].Count != 2 {
+		t.Errorf("expected count 2, got %d", snap[0].Count)
+	}
+	if agg.TotalEvents() != 2 {
+		t.Errorf("expected 2 total unknown-model events, got %d", agg.TotalEvents())
 	}
 }
 

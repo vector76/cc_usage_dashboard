@@ -16,6 +16,7 @@ import (
 
 	"github.com/vector76/cc_usage_dashboard/internal/config"
 	"github.com/vector76/cc_usage_dashboard/internal/dashboard"
+	"github.com/vector76/cc_usage_dashboard/internal/feedback"
 	"github.com/vector76/cc_usage_dashboard/internal/ingest"
 	"github.com/vector76/cc_usage_dashboard/internal/slack"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
@@ -51,6 +52,14 @@ type Server struct {
 	windowsEngine *windows.Engine
 	dashboardHandler *dashboard.Handler
 	tailerStatus TailerStatus
+
+	// feedbackBuffer holds recent warn+ log records and unknownModels
+	// aggregates usage events whose model was missing from the price table.
+	// Both default to the process-wide feedback singletons so the /api/feedback
+	// handler reads exactly what the slog tee and the ingest paths write.
+	// Tests inject fresh instances via SetFeedback for isolation.
+	feedbackBuffer *feedback.Buffer
+	unknownModels  *feedback.UnknownModels
 
 	// httpServers tracks every *http.Server this Server is currently
 	// running so Shutdown can drain them all. The trayapp binds to
@@ -95,6 +104,8 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		}),
 		windowsEngine: windows.NewEngine(s.DB()),
 		now:           time.Now,
+		feedbackBuffer: feedback.DefaultBuffer(),
+		unknownModels:  feedback.DefaultUnknownModels(),
 	}
 
 	dh, err := dashboard.NewHandler(s, srv.slackCalc)
@@ -116,6 +127,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("POST /slack/release", srv.handleSlackRelease)
 	srv.mux.HandleFunc("GET /consumption", srv.handleConsumption)
 	srv.mux.HandleFunc("GET /metrics", srv.handleMetrics)
+	srv.mux.HandleFunc("GET /api/feedback", srv.handleFeedback)
 	if srv.dashboardHandler != nil {
 		srv.dashboardHandler.Register(srv.mux)
 	}
@@ -246,6 +258,15 @@ func (s *Server) SetNow(fn func() time.Time) {
 	s.now = fn
 }
 
+// SetFeedback overrides the feedback buffer and unknown-model aggregate used
+// by the /api/feedback handler and the /log unknown-model recording. Tests use
+// it to inject fresh, isolated instances; production keeps the process-wide
+// defaults installed by New so the slog tee and both ingest paths line up.
+func (s *Server) SetFeedback(buf *feedback.Buffer, um *feedback.UnknownModels) {
+	s.feedbackBuffer = buf
+	s.unknownModels = um
+}
+
 // WindowsEngine returns the server's internal windows engine so callers (the
 // trayapp main, integration tests) can drive periodic UpdateWindows ticks
 // against the same instance the server uses.
@@ -341,6 +362,14 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		req.CacheReadTokens,
 		s.priceTable,
 	)
+
+	// A non-empty model that yields no cost is missing from the price table.
+	// Aggregate it (never log per event — one usage event per message would
+	// flood the buffer with the same missing model) so the dashboard can
+	// prompt the user to add it to prices.yaml.
+	if cost == nil && req.Model != "" {
+		s.unknownModels.Record(req.Model, time.Now())
+	}
 
 	// Default source if not provided
 	if req.Source == "" {

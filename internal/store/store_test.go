@@ -913,6 +913,64 @@ func TestInsertParseError(t *testing.T) {
 	}
 }
 
+func TestRecentParseErrors(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	now := time.Now()
+	// Insert three errors at increasing times so ordering is deterministic.
+	for i, r := range []string{"oldest", "middle", "newest"} {
+		if _, err := store.InsertParseError(
+			now.Add(time.Duration(i)*time.Minute), "tailer", r, "payload-"+r,
+		); err != nil {
+			t.Fatalf("InsertParseError(%s) failed: %v", r, err)
+		}
+	}
+
+	got, err := store.RecentParseErrors(50)
+	if err != nil {
+		t.Fatalf("RecentParseErrors failed: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(got))
+	}
+	// Newest first.
+	if got[0].Reason != "newest" || got[2].Reason != "oldest" {
+		t.Errorf("expected newest-first ordering, got %q..%q", got[0].Reason, got[2].Reason)
+	}
+	if got[0].Source != "tailer" {
+		t.Errorf("expected source 'tailer', got %q", got[0].Source)
+	}
+	if got[0].OccurredAt.IsZero() {
+		t.Error("expected occurred_at to parse to a non-zero time")
+	}
+
+	// Limit is honored.
+	limited, err := store.RecentParseErrors(2)
+	if err != nil {
+		t.Fatalf("RecentParseErrors(2) failed: %v", err)
+	}
+	if len(limited) != 2 {
+		t.Errorf("expected 2 rows with limit, got %d", len(limited))
+	}
+}
+
+func TestRecentParseErrorsEmpty(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	got, err := store.RecentParseErrors(50)
+	if err != nil {
+		t.Fatalf("RecentParseErrors failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected non-nil slice")
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty, got %d", len(got))
+	}
+}
+
 func TestPruneParseErrors(t *testing.T) {
 	store := createTestStore(t)
 	defer store.Close()

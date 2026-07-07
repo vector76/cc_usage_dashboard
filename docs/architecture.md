@@ -26,6 +26,8 @@ and no cross-machine state.
 |  |    GET  /                     <- dashboard HTML (alias of /dashboard)  ||
 |  |    GET  /dashboard            <- dashboard HTML                        ||
 |  |    GET  /api/dashboard/state  <- JSON state powering the dashboard     ||
+|  |    GET  /api/feedback         <- recent warnings, unknown models,      ||
+|  |                                  parse errors (dashboard feedback panel)||
 |  |    GET  /favicon.{png,ico}    <- favicon                               ||
 |  |                                                                        ||
 |  |  SQLite DB (single file, WAL mode)                                     ||

@@ -16,6 +16,7 @@ import (
 
 	ccusage "github.com/vector76/cc_usage_dashboard"
 	"github.com/vector76/cc_usage_dashboard/internal/config"
+	"github.com/vector76/cc_usage_dashboard/internal/feedback"
 	"github.com/vector76/cc_usage_dashboard/internal/ingest"
 	"github.com/vector76/cc_usage_dashboard/internal/netbind"
 	"github.com/vector76/cc_usage_dashboard/internal/server"
@@ -272,20 +273,35 @@ func runWindowsLoop(wg *sync.WaitGroup, stop <-chan struct{}, srv *server.Server
 	}
 }
 
-// setupLogging swaps slog's default handler to write to a rotating file when
-// cfg.Logging.File is non-empty. Returns the file's Close function (nil when
-// stdout is the destination).
+// setupLogging installs slog's default handler. The base destination is a
+// rotating JSON file when cfg.Logging.File is non-empty, otherwise a text
+// handler on stderr. In both cases the base handler is wrapped by
+// feedback.Handler so warn-and-above records are teed into the in-memory
+// feedback buffer that GET /api/feedback surfaces on the dashboard — the tray
+// app runs with no console, so this is the only way a user sees warnings like
+// "price table file not found". Returns the rotating file's Close function
+// (nil when stderr is the destination).
 func setupLogging(file, level string) *rotatingWriter {
-	if file == "" {
-		return nil
+	lvl := parseLogLevel(level)
+	var w *rotatingWriter
+	var base slog.Handler
+	if file != "" {
+		rw, err := newRotatingWriter(file, logRotateMaxSize, logRotateMaxBackups)
+		if err != nil {
+			// The default handler is still active here, so this warning is
+			// visible on stderr but predates the tee — acceptable for a
+			// one-off startup failure.
+			slog.Warn("failed to set up rotating log file, falling back to stderr", "path", file, "err", err)
+		} else {
+			w = rw
+			base = slog.NewJSONHandler(w, &slog.HandlerOptions{Level: lvl})
+		}
 	}
-	w, err := newRotatingWriter(file, logRotateMaxSize, logRotateMaxBackups)
-	if err != nil {
-		slog.Warn("failed to set up rotating log file, falling back to stdout", "path", file, "err", err)
-		return nil
+	if base == nil {
+		base = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})
 	}
-	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: parseLogLevel(level)})
-	slog.SetDefault(slog.New(handler))
+	tee := feedback.NewHandler(base, feedback.DefaultBuffer())
+	slog.SetDefault(slog.New(tee))
 	return w
 }
 
