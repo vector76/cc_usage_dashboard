@@ -117,8 +117,9 @@ kill $SERVER_PID
 Go test: `TestE2E_CostResolution`
 
 ```bash
-# Start server with price table configured
-PRICING_TABLE_PATH=config/prices.example.yaml ./trayapp &
+# Start server (the embedded default price table is used with no config;
+# set pricing.table_path in config.yaml only to override it).
+./trayapp &
 SERVER_PID=$!
 sleep 1
 

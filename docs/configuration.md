@@ -23,9 +23,11 @@ claude:
   projects_dir: "~/.claude/projects"   # %USERPROFILE%\.claude\projects on Windows
 
 # Price table used to compute cost_usd_equivalent when the source did not
-# report it. See docs/data-model.md "Cost source".
+# report it. See docs/data-model.md "Cost source" and "Price table
+# resolution" below. Default is empty: the embedded built-in table is used
+# unless a local prices.yaml override or this explicit path is present.
 pricing:
-  table_path: "config/prices.example.yaml"
+  table_path: ""
 
 tailer:
   poll_interval_ms: 1000
@@ -49,6 +51,33 @@ logging:
   level: info
   file: ""                          # empty -> stdout; otherwise rotated file path
 ```
+
+## Price table resolution
+
+The model price table that computes `cost_usd_equivalent` (see
+`docs/data-model.md` "Cost source") is resolved at startup by
+`ingest.ResolvePriceTable`, which walks a precedence chain so a usable table
+is **always** available with zero configuration:
+
+1. **Explicit `pricing.table_path`.** If set and the file **exists**, it is
+   loaded and wins. A malformed file here is fatal (the error is surfaced and
+   cost computation is disabled) so a broken override is never silently
+   masked. If the path is set but the file is **missing**, that is *not*
+   fatal: a warning is logged and resolution falls through to steps 2–3. This
+   is a deliberate choice — a stale or mistyped config path degrades to the
+   built-in default rather than leaving cost uncomputed.
+2. **Local `prices.yaml` override.** With no explicit path (the default),
+   the first `prices.yaml` found in these directories is loaded — in order:
+   the directory containing `trayapp.exe`, the current working directory,
+   `%APPDATA%\usage_dashboard\`, then `~/.config/usage-dashboard/`. This is
+   the no-rebuild override hook: drop a `prices.yaml` next to the exe to
+   change rates.
+3. **Embedded default.** If nothing above matches, the canonical `prices.yaml`
+   embedded in the binary at build time (repo-root `prices.yaml`, wired in via
+   `prices_embed.go`) is parsed. This always succeeds.
+
+The search order is defined by `config.PriceTableSearchDirs`. To update the
+built-in rates, edit the repo-root `prices.yaml` and rebuild.
 
 ## Slack absolute thresholds
 

@@ -7,13 +7,16 @@
 #
 # The script:
 #   1. Locates trayapp.exe (next to the script unless -ExePath overrides).
-#   2. Bootstraps a default prices.yaml in %APPDATA%\usage_dashboard if
-#      one isn't already present, copied from config\prices.example.yaml.
-#   3. Registers a per-user Task Scheduler "at logon" task so the tray
+#   2. Registers a per-user Task Scheduler "at logon" task so the tray
 #      starts automatically (preferred over shell:startup; survives RDP).
 #
-# Re-running is safe: existing config is left untouched, and the
-# scheduled task is replaced in-place.
+# The price table no longer needs bootstrapping: the canonical prices.yaml
+# is embedded in the binary (see prices_embed.go), so cost computation works
+# with zero configuration. To override rates without a rebuild, drop a
+# prices.yaml next to trayapp.exe or in %APPDATA%\usage_dashboard\ — see
+# docs/configuration.md "Price table resolution".
+#
+# Re-running is safe: the scheduled task is replaced in-place.
 #
 # This script is documented in docs/tray-app.md ("Autostart") but not
 # executed in CI — it's a Windows-only post-build step.
@@ -30,30 +33,7 @@ if (-not (Test-Path $ExePath)) {
     throw "trayapp.exe not found at '$ExePath'. Build it first with: go build -ldflags=`"-H=windowsgui`" -o trayapp.exe ./cmd/trayapp"
 }
 
-# --- 1. Bootstrap default config ---------------------------------------------
-
-$AppDir       = Join-Path $env:APPDATA       'usage_dashboard'
-$LocalAppDir  = Join-Path $env:LOCALAPPDATA  'usage_dashboard'
-$ConfigPath   = Join-Path $AppDir 'prices.yaml'
-$ExampleSrc   = Join-Path $PSScriptRoot 'config\prices.example.yaml'
-
-foreach ($d in @($AppDir, $LocalAppDir)) {
-    if (-not (Test-Path $d)) {
-        New-Item -ItemType Directory -Path $d -Force | Out-Null
-        Write-Host "Created $d"
-    }
-}
-
-if (Test-Path $ConfigPath) {
-    Write-Host "prices.yaml already present at $ConfigPath; leaving untouched."
-} elseif (Test-Path $ExampleSrc) {
-    Copy-Item -Path $ExampleSrc -Destination $ConfigPath
-    Write-Host "Bootstrapped default prices.yaml -> $ConfigPath"
-} else {
-    Write-Warning "config\prices.example.yaml not found at $ExampleSrc; skipping config bootstrap."
-}
-
-# --- 2. Register Task Scheduler "at logon" task ------------------------------
+# --- Register Task Scheduler "at logon" task ---------------------------------
 
 $fullUser = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
 

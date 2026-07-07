@@ -123,6 +123,16 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	return srv
 }
 
+// SetPriceTable overrides the price table used to compute cost for events
+// posted to the server. cmd/trayapp calls this with the table produced by
+// ingest.ResolvePriceTable so the server and the tailer share a single
+// resolved table (including the embedded default) instead of each re-loading
+// only from cfg.Pricing.TablePath. Must be called before the server starts
+// accepting traffic.
+func (s *Server) SetPriceTable(pt ingest.PriceTable) {
+	s.priceTable = pt
+}
+
 // ServeHTTP implements http.Handler. Every request first passes the Host
 // header allow-list (DNS rebinding defence) before reaching the mux.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

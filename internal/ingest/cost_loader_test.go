@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// TestLoadPriceTableExampleFile loads the checked-in example config and
+// TestLoadPriceTableExampleFile loads the canonical checked-in price table and
 // verifies the documented rates round-trip from YAML to PriceTable.
 func TestLoadPriceTableExampleFile(t *testing.T) {
-	// internal/ingest -> repo root -> config/prices.example.yaml
-	examplePath := filepath.Join("..", "..", "config", "prices.example.yaml")
+	// internal/ingest -> repo root -> prices.yaml
+	examplePath := filepath.Join("..", "..", "prices.yaml")
 
 	pt, err := LoadPriceTable(examplePath)
 	if err != nil {
@@ -117,7 +117,7 @@ func TestLoadPriceTableMalformedYAML(t *testing.T) {
 // ResolveCost and asserts the documented cost_source='computed' value with
 // known token counts.
 func TestResolveCostFromLoadedTable(t *testing.T) {
-	pt, err := LoadPriceTable(filepath.Join("..", "..", "config", "prices.example.yaml"))
+	pt, err := LoadPriceTable(filepath.Join("..", "..", "prices.yaml"))
 	if err != nil {
 		t.Fatalf("LoadPriceTable: %v", err)
 	}

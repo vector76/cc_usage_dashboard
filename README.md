@@ -86,8 +86,7 @@ filesystem paths out of the binary.
 ### Autostart on logon
 
 Once you have a `trayapp.exe` built, the included PowerShell script registers a per-user
-Task Scheduler entry that launches it at logon and bootstraps a default `prices.yaml` in
-`%APPDATA%\usage_dashboard\`:
+Task Scheduler entry that launches it at logon:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -99,6 +98,15 @@ If `trayapp.exe` is not next to `install.ps1` (e.g. you used `go install` and it
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -ExePath "$env:USERPROFILE\go\bin\trayapp.exe"
 ```
+
+### Pricing (zero-config)
+
+Per-event cost is computed from a model price table that is **embedded in the binary**
+([`prices.yaml`](prices.yaml)), so cost works out of the box with no setup. To override
+rates without rebuilding, drop your own `prices.yaml` next to `trayapp.exe` or in
+`%APPDATA%\usage_dashboard\`; to point at an arbitrary file, set `pricing.table_path` in
+`config.yaml`. See `docs/configuration.md` "Price table resolution" for the full
+precedence order.
 
 ### Confirming it works
 

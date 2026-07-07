@@ -98,7 +98,7 @@ release decisions in synthetic and real tests.
 ## Phase 6 — Polish and quality of life
 
 - Tray icon color states.
-- `install.ps1` for autostart and config bootstrap.
+- `install.ps1` for autostart (price table is embedded, no config bootstrap needed).
 - Userscript auto-update headers.
 - README updated with screenshots.
 

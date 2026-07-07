@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	ccusage "github.com/vector76/cc_usage_dashboard"
 	"github.com/vector76/cc_usage_dashboard/internal/config"
 	"github.com/vector76/cc_usage_dashboard/internal/ingest"
 	"github.com/vector76/cc_usage_dashboard/internal/netbind"
@@ -85,10 +86,17 @@ func main() {
 
 	srv := server.New(db, cfg)
 
-	priceTable, err := ingest.LoadPriceTable(cfg.Pricing.TablePath)
+	// Resolve the price table once (explicit config path -> local prices.yaml
+	// override -> embedded default) and share it between the server's cost
+	// handlers and the tailer, so a single table drives all cost computation.
+	priceTable, priceSource, err := ingest.ResolvePriceTable(
+		cfg.Pricing.TablePath, config.PriceTableSearchDirs(), ccusage.DefaultPriceTableYAML)
 	if err != nil {
-		slog.Warn("price table load failed; cost computation disabled", "err", err)
+		slog.Warn("price table load failed; cost computation disabled", "err", err, "source", priceSource)
+	} else {
+		slog.Info("price table resolved", "source", priceSource, "models", len(priceTable))
 	}
+	srv.SetPriceTable(priceTable)
 
 	tailer := ingest.NewTailer(cfg.Claude.ProjectsDir, db, priceTable)
 	tailer.Start()

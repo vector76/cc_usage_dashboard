@@ -229,8 +229,14 @@ trayapp therefore needs a small **price table** keyed by model name (input / out
 cache-read / cache-creation per million tokens), and computes cost on ingest if the raw
 field is absent. Both the raw and computed values are stored; the dashboard prefers the
 raw value when present and labels computed values explicitly so the user knows when
-they're seeing our estimate vs. Anthropic's. The price table is config, refreshed by
-hand when Anthropic updates rates.
+they're seeing our estimate vs. Anthropic's.
+
+The canonical price table is the repo-root `prices.yaml`, **embedded into the binary**
+at build time (via `prices_embed.go`) so cost computation works with zero configuration.
+It is refreshed by hand when Anthropic updates rates: edit `prices.yaml` and rebuild. At
+runtime the table is selected by `ingest.ResolvePriceTable` following a precedence chain
+(explicit `pricing.table_path` → local `prices.yaml` override → embedded default); see
+`docs/configuration.md` "Price table resolution" for the full order and the rationale.
 
 ## Retention
 

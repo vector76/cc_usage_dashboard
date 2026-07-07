@@ -127,10 +127,14 @@ once per release candidate.
       `install.ps1`'s comment) produces `trayapp.exe`.
 - [ ] `powershell -ExecutionPolicy Bypass -File .\install.ps1` runs to
       completion with no errors and reports "Registered scheduled task".
-- [ ] `%APPDATA%\usage_dashboard\prices.yaml` exists after install
-      (copied from `config\prices.example.yaml`).
-- [ ] Re-running `install.ps1` is idempotent: existing `prices.yaml` is
-      left untouched and the scheduled task is replaced cleanly.
+- [ ] Cost computation works with no `prices.yaml` on disk (the embedded
+      default table is used — verify a `computed` cost appears for a known
+      model).
+- [ ] Dropping a `prices.yaml` next to `trayapp.exe` (or in
+      `%APPDATA%\usage_dashboard\`) overrides the embedded rates after a
+      restart.
+- [ ] Re-running `install.ps1` is idempotent: the scheduled task is replaced
+      cleanly.
 
 ### Tray UX — currently wired
 

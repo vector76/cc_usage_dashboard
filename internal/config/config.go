@@ -71,7 +71,10 @@ func Load(path string) (*Config, error) {
 	cfg.HTTP.Port = 27812
 	cfg.HTTP.Bind = []string{"127.0.0.1"}
 	cfg.Claude.ProjectsDir = expandHome("~/.claude/projects")
-	cfg.Pricing.TablePath = "config/prices.example.yaml"
+	// Empty means "use the resolution chain" (executable dir / app config
+	// dir override, else the embedded built-in table). A non-empty value is
+	// an explicit override. See ingest.ResolvePriceTable.
+	cfg.Pricing.TablePath = ""
 	cfg.Tailer.PollIntervalMs = 1000
 	cfg.Logging.Level = "info"
 	cfg.Logging.File = ""

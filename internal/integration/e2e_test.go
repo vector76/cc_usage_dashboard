@@ -35,9 +35,9 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// pricesExampleYAML is the path to the example price table relative to this
-// package directory. The file lives at the repo root under config/.
-const pricesExampleYAML = "../../config/prices.example.yaml"
+// pricesExampleYAML is the path to the canonical price table relative to this
+// package directory. The file lives at the repo root.
+const pricesExampleYAML = "../../prices.yaml"
 
 // testEnv bundles the server under test with the underlying store so test
 // bodies can both drive the HTTP API and inspect persisted state.

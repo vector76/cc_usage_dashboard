@@ -14,11 +14,30 @@
 # schema migration and is deferred until it bites.
 
 models:
+  # ---- Fable 5 / Mythos 5: most capable widely released model, priced above Opus ----
+  claude-fable-5:
+    input_rate_usd_per_m: 10.00
+    output_rate_usd_per_m: 50.00
+    cache_creation_rate_usd_per_m: 12.50
+    cache_read_rate_usd_per_m: 1.00
+
+  claude-mythos-5:
+    input_rate_usd_per_m: 10.00
+    output_rate_usd_per_m: 50.00
+    cache_creation_rate_usd_per_m: 12.50
+    cache_read_rate_usd_per_m: 1.00
+
   # ---- Opus 4.5+ family: repriced down to Sonnet-class rates ----
   # Earlier Opus 4 / 4.1 stayed at the original $15/$75 tier; only 4.5+
   # moved. Opus 4.7 also uses a new tokenizer that may use up to 35%
   # more tokens for the same text — that affects token counts in the
   # transcript but not these per-token rates.
+  claude-opus-4-8:
+    input_rate_usd_per_m: 5.00
+    output_rate_usd_per_m: 25.00
+    cache_creation_rate_usd_per_m: 6.25
+    cache_read_rate_usd_per_m: 0.50
+
   claude-opus-4-7:
     input_rate_usd_per_m: 5.00
     output_rate_usd_per_m: 25.00
@@ -49,6 +68,16 @@ models:
     output_rate_usd_per_m: 75.00
     cache_creation_rate_usd_per_m: 18.75
     cache_read_rate_usd_per_m: 1.50
+
+  # ---- Sonnet 5 ----
+  # Introductory rate ($2/$10 per MTok) runs through 2026-08-31; standard
+  # rate ($3/$15) applies after. Update this entry once the intro window
+  # closes.
+  claude-sonnet-5:
+    input_rate_usd_per_m: 2.00
+    output_rate_usd_per_m: 10.00
+    cache_creation_rate_usd_per_m: 2.50
+    cache_read_rate_usd_per_m: 0.20
 
   # ---- Sonnet 4.x ----
   claude-sonnet-4-6:
