@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,14 +16,21 @@ type PriceTable map[string]*ModelPrices
 
 // ModelPrices holds pricing for a single model.
 type ModelPrices struct {
-	InputRate            float64
-	OutputRate           float64
-	CacheCreationRate    float64
-	CacheReadRate        float64
+	InputRate         float64
+	OutputRate        float64
+	CacheCreationRate float64
+	CacheReadRate     float64
 }
 
 // ResolveCost computes the cost of a usage event based on token counts and pricing.
 // Returns the cost in USD and the source of the cost (reported, computed, or empty if unknown).
+//
+// Model lookup tries an exact price-table match first; failing that, a dated
+// snapshot id like "claude-haiku-4-5-20251001" falls back to its undated
+// family entry ("claude-haiku-4-5"). Transcripts report dated ids while the
+// price table lists family names, and an exact-only lookup left such events
+// permanently unpriced. An explicit dated entry always wins, so a snapshot
+// can still be priced differently from its family if that ever happens.
 func ResolveCost(
 	reportedCost *float64,
 	model string,
@@ -37,6 +45,11 @@ func ResolveCost(
 	// Try to compute from price table
 	if model != "" && priceTable != nil {
 		prices, ok := priceTable[model]
+		if !ok || prices == nil {
+			if base := undatedModelName(model); base != "" {
+				prices, ok = priceTable[base]
+			}
+		}
 		if ok && prices != nil {
 			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, prices)
 			return &cost, "computed"
@@ -45,6 +58,20 @@ func ResolveCost(
 
 	// Unknown model or no price table
 	return nil, ""
+}
+
+// datedModelID matches a model id ending in an 8-digit date suffix
+// (e.g. "claude-haiku-4-5-20251001") and captures the undated base name.
+var datedModelID = regexp.MustCompile(`^(.+)-\d{8}$`)
+
+// undatedModelName strips a trailing -YYYYMMDD snapshot suffix from a model
+// id, returning "" when the id has no such suffix.
+func undatedModelName(model string) string {
+	m := datedModelID.FindStringSubmatch(model)
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }
 
 // computeCost computes the cost from tokens and pricing.

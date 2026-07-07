@@ -31,6 +31,8 @@ No sqlite3 CLI on this machine. Build a one-off Go query tool: copy the repo `go
 
 ## Gotchas
 
-- 3 pre-existing Windows test failures are expected in `go test ./...`: TestExpandPlaceholdersFallsBackToHomeOnLinux, TestLoadPriceTableMalformedYAML, TestE2E_CLIModeA_ConsumptionAndSlack. Zero NEW failures is the bar.
+- `go test ./...` passes clean on Windows since 2026-07-07 — zero failures is the bar.
 - The feedback panel (`/api/feedback`) only shows warn+ log records; Info-level lines never appear there.
-- Live DB models use dated ids (e.g. `claude-haiku-4-5-20251001`); `prices.yaml` keys must match exactly.
+- Live DB models use dated ids (e.g. `claude-haiku-4-5-20251001`). `ingest.ResolveCost` falls back from a dated id to its undated family entry (`claude-haiku-4-5`); an exact dated key in `prices.yaml` wins over the fallback.
+- The production app is often running while you verify — check port 27812 and copy the `-wal`/`-shm` sidecars along with `usage.db`.
+- `POST /log` events without session_id/message_id all map to `("","")` on the unique index, so the second such event is silently deduplicated — give probe events distinct ids.

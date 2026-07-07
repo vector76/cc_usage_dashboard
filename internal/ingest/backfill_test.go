@@ -98,6 +98,37 @@ func TestBackfillNullCostsComputesOnlyKnownModelNullRows(t *testing.T) {
 	}
 }
 
+// TestBackfillNullCostsResolvesDatedModelIDs covers the live-DB shape that
+// motivated the dated-id fallback: events store a dated snapshot id while the
+// price table lists only the undated family name.
+func TestBackfillNullCostsResolvesDatedModelIDs(t *testing.T) {
+	s := openBackfillStore(t)
+	id, err := s.InsertUsageEvent(time.Now(), "tailer", "s", "m1", "/p",
+		"claude-haiku-4-5-20251001", 1000, 1000, 0, 0, nil, "", "{}")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	table := PriceTable{
+		"claude-haiku-4-5": &ModelPrices{InputRate: 1.0, OutputRate: 5.0},
+	}
+	n, err := BackfillNullCosts(s, table)
+	if err != nil {
+		t.Fatalf("BackfillNullCosts: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("backfilled %d events, want 1", n)
+	}
+
+	cost, source := eventCost(t, s, id)
+	if !cost.Valid || cost.Float64 < 0.005999 || cost.Float64 > 0.006001 {
+		t.Errorf("dated-id row cost = %+v, want ~0.006", cost)
+	}
+	if source.String != "computed" {
+		t.Errorf("cost_source = %q, want computed", source.String)
+	}
+}
+
 func TestBackfillNullCostsIsIdempotent(t *testing.T) {
 	s := openBackfillStore(t)
 	if _, err := s.InsertUsageEvent(time.Now(), "tailer", "s", "m1", "/p",
