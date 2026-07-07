@@ -3,6 +3,7 @@ package ingest
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -101,8 +102,10 @@ func TestLoadPriceTableMalformedYAML(t *testing.T) {
 		t.Fatal("expected error for malformed YAML, got nil")
 	}
 	// "Clear error" means the operator can locate the offending file from
-	// the message — verify the path is preserved in the wrapped error.
-	if !strings.Contains(err.Error(), configPath) {
+	// the message — verify the path is preserved in the wrapped error. The
+	// error embeds the path with %q, so match its quoted form (on Windows
+	// the backslashes are escaped; the raw path would never match).
+	if !strings.Contains(err.Error(), strconv.Quote(configPath)) {
 		t.Errorf("error %q does not reference path %q", err.Error(), configPath)
 	}
 	if pt == nil {
