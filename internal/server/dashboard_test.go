@@ -261,6 +261,61 @@ func TestDashboardStateHypotheticalSessionLoadsPreWindowVolume(t *testing.T) {
 	}
 }
 
+// TestDashboardStateVolumeByFamily drives the full state JSON and asserts
+// each volume bucket carries a per-family cost breakdown (by_family) that
+// sums to the bucket total. Two events land in the same 15-min bucket under
+// different model families; the hypothetical-session path loads the
+// pre-window volume so the bucket appears without an open windows row.
+func TestDashboardStateVolumeByFamily(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	srv.dashboardHandler.SetNow(func() time.Time { return now })
+
+	// Two events 3h ago (inside the 10h lookback) in the same 15-min bucket
+	// but different families.
+	opusCost := 10.0
+	if _, err := testStore.InsertUsageEvent(
+		now.Add(-3*time.Hour), "api", "s", "m1", "/p", "claude-opus-4-8",
+		1, 1, 0, 0, &opusCost, "reported", "{}",
+	); err != nil {
+		t.Fatalf("insert opus event: %v", err)
+	}
+	sonnetCost := 6.0
+	if _, err := testStore.InsertUsageEvent(
+		now.Add(-3*time.Hour).Add(time.Minute), "api", "s", "m2", "/p", "claude-sonnet-4",
+		1, 1, 0, 0, &sonnetCost, "reported", "{}",
+	); err != nil {
+		t.Fatalf("insert sonnet event: %v", err)
+	}
+
+	state := fetchDashboardState(t, srv)
+	if state.Session == nil {
+		t.Fatal("expected Session, got nil")
+	}
+	if len(state.Session.Volume) != 1 {
+		t.Fatalf("Volume len = %d, want 1; got %+v", len(state.Session.Volume), state.Session.Volume)
+	}
+	b := state.Session.Volume[0]
+	if b.CostUSD != 16.0 {
+		t.Errorf("bucket total = %v, want 16", b.CostUSD)
+	}
+	if b.ByFamily["opus"] != 10.0 {
+		t.Errorf("bucket opus = %v, want 10", b.ByFamily["opus"])
+	}
+	if b.ByFamily["sonnet"] != 6.0 {
+		t.Errorf("bucket sonnet = %v, want 6", b.ByFamily["sonnet"])
+	}
+	var sum float64
+	for _, v := range b.ByFamily {
+		sum += v
+	}
+	if sum != b.CostUSD {
+		t.Errorf("family sum %v != total %v", sum, b.CostUSD)
+	}
+}
+
 // TestDashboardStateNoOpenWeeklySynthesizesHypothetical: when no real
 // open weekly window exists (e.g. because the engine refused to mint one
 // under weekly limbo), the response carries a hypothetical Weekly window

@@ -47,6 +47,7 @@
     <h3>Weekly window</h3>
     <svg id="chart-weekly" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
   </div>
+  <div class="chart-block" id="burn-legend"></div>
 </section>
 
 <script src="/grouping.js"></script>
@@ -79,6 +80,40 @@ function el(tag, attrs, text) {
   for (const k in attrs) e.setAttribute(k, attrs[k]);
   if (text != null) e.textContent = text;
   return e;
+}
+// Model-family colors for the stacked volume bars. Families come from the
+// backend's modelFamily() classifier (see dashboard.go). VOLUME_FAMILY_ORDER
+// fixes both the bottom-up stack order within a bar and the legend order.
+// Shades are picked to stay distinct from each other and readable against
+// the light chart background: blue / green / red / yellow / gray.
+const VOLUME_FAMILY_ORDER = ["opus", "sonnet", "fable", "haiku", "other"];
+const VOLUME_FAMILY_COLORS = {
+  opus: "#2563eb",   // blue
+  sonnet: "#16a34a", // green
+  fable: "#dc2626",  // red
+  haiku: "#eab308",  // yellow
+  other: "#9ca3af",  // gray
+};
+// renderVolumeLegend paints the static color key for the stacked volume
+// bars once. Shows all five families so the legend is stable regardless of
+// which families happen to be present in the current data.
+function renderVolumeLegend() {
+  const c = document.getElementById("burn-legend");
+  if (!c) return;
+  while (c.firstChild) c.removeChild(c.firstChild);
+  const label = document.createElement("span");
+  label.style.cssText = "font-size:12px;color:#444;margin-right:8px;";
+  label.textContent = "Model family:";
+  c.appendChild(label);
+  for (const fam of VOLUME_FAMILY_ORDER) {
+    const item = document.createElement("span");
+    item.style.cssText = "display:inline-flex;align-items:center;margin-right:14px;font-size:12px;color:#444;";
+    const sw = document.createElement("span");
+    sw.style.cssText = "display:inline-block;width:11px;height:11px;margin-right:4px;border-radius:2px;background:" + VOLUME_FAMILY_COLORS[fam] + ";";
+    item.appendChild(sw);
+    item.appendChild(document.createTextNode(fam));
+    c.appendChild(item);
+  }
 }
 // fmtTooltipTime renders a "Mon Day h:mm AM/PM" stamp in local time —
 // always carries the date so weekly tooltips spanning midnight stay
@@ -427,18 +462,40 @@ function renderBurnDown(svgID, win, opts) {
         const inset = Math.max(0.5, span * 0.1);
         const x = x0 + inset / 2;
         const w = Math.max(1, span - inset);
-        const h = (b.cost_usd / maxVol) * volH;
-        const rect = el("rect", {
-          x: x, y: VOL_BOTTOM - h, width: w, height: h,
-          fill: "#06c", opacity: "0.7"
-        });
-        // Native browser tooltip on hover. Multi-line via newline; the
-        // first line carries the date so weekly buckets crossing midnight
-        // remain unambiguous.
+
+        // Per-family breakdown; fall back to a single "other" segment if an
+        // older/degraded payload carries a total but no by_family map, so a
+        // bar never silently vanishes.
+        const byFam = b.by_family || {};
+        let famTotal = 0;
+        for (const fam of VOLUME_FAMILY_ORDER) famTotal += byFam[fam] || 0;
+        const segs = famTotal > 0
+          ? VOLUME_FAMILY_ORDER.map(fam => [fam, byFam[fam] || 0]).filter(p => p[1] > 0)
+          : [["other", b.cost_usd || 0]];
+
+        // Native browser tooltip: total plus each present family's dollars.
+        // Multi-line via newline; the first line carries the date so weekly
+        // buckets crossing midnight remain unambiguous. The same title is
+        // attached to every segment so hovering anywhere on the bar shows it.
         const startLabel = fmtTooltipTime(t);
         const endLabel = fmtTooltipTime(t + bucketMs);
-        rect.appendChild(el("title", {}, startLabel + " – " + endLabel + "\n$" + fmt(b.cost_usd)));
-        svg.appendChild(rect);
+        const famText = segs.map(p => p[0] + " $" + fmt(p[1])).join(", ");
+        const titleText = startLabel + " – " + endLabel +
+          "\n$" + fmt(b.cost_usd) + " total" + (famText ? " — " + famText : "");
+
+        // Stack segments bottom-up in fixed family order for stable colors.
+        let yBottom = VOL_BOTTOM;
+        for (const [fam, cost] of segs) {
+          const segH = (cost / maxVol) * volH;
+          const rect = el("rect", {
+            x: x, y: yBottom - segH, width: w, height: segH,
+            fill: VOLUME_FAMILY_COLORS[fam] || VOLUME_FAMILY_COLORS.other,
+            opacity: "0.85"
+          });
+          rect.appendChild(el("title", {}, titleText));
+          svg.appendChild(rect);
+          yBottom -= segH;
+        }
       }
       // Max-volume label on the volume panel
       svg.appendChild(el("text", {
@@ -516,6 +573,7 @@ async function refresh() {
   } catch (e) { console.error("consumption error", e); }
 }
 
+renderVolumeLegend();
 refresh();
 setInterval(refresh, 10000);
 </script>

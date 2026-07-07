@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/vector76/cc_usage_dashboard/internal/icon"
@@ -62,9 +63,38 @@ type UsedSeriesPoint struct {
 // WindowState.BucketSecs. BucketStart is UTC-aligned to multiples of the
 // bucket width; the leftmost bucket can therefore start slightly before
 // the chart's domain when the window doesn't begin on a bucket boundary.
+//
+// CostUSD is the bucket total. ByFamily breaks that total down by model
+// family (see modelFamily): keys are opus/sonnet/fable/haiku/other and the
+// values sum to CostUSD. Only families with a nonzero cost in the bucket
+// are present, so the client can render each bar as stacked segments.
 type SeriesBucket struct {
-	BucketStart time.Time `json:"bucket_start"`
-	CostUSD     float64   `json:"cost_usd"`
+	BucketStart time.Time          `json:"bucket_start"`
+	CostUSD     float64            `json:"cost_usd"`
+	ByFamily    map[string]float64 `json:"by_family"`
+}
+
+// modelFamily classifies a usage_events.model value into a coarse family
+// for the stacked volume bars. Matching is case-insensitive by substring
+// and deliberately version-insensitive: claude-opus-4-8 and claude-opus-4-1
+// both map to "opus". An empty/NULL model or any unrecognized name maps to
+// "other". This is the single source of truth for the classification —
+// loadVolumeSeries groups by the raw model column in SQL and folds each
+// group into its family here.
+func modelFamily(model string) string {
+	m := strings.ToLower(model)
+	switch {
+	case strings.Contains(m, "opus"):
+		return "opus"
+	case strings.Contains(m, "sonnet"):
+		return "sonnet"
+	case strings.Contains(m, "fable"):
+		return "fable"
+	case strings.Contains(m, "haiku"):
+		return "haiku"
+	default:
+		return "other"
+	}
 }
 
 // State is the JSON response for GET /api/dashboard/state.
@@ -346,9 +376,13 @@ func bucketSecsForKind(kind string) int {
 }
 
 // loadVolumeSeries buckets dollar consumption inside a window for the
-// volume bar chart that sits below the % remaining curve. Each row is the
-// sum of cost_usd_equivalent for usage_events whose occurred_at falls in
-// [bucket_start, bucket_start + bucketSecs).
+// volume bar chart that sits below the % remaining curve. Each bucket is
+// the sum of cost_usd_equivalent for usage_events whose occurred_at falls
+// in [bucket_start, bucket_start + bucketSecs), broken down by model family
+// (see modelFamily) so the client can render stacked bars. The SQL groups
+// by (bucket, raw model); Go folds each raw model into its family so the
+// classification lives in exactly one place. Events with a NULL cost are
+// excluded and contribute nothing, same as the total-only query it replaced.
 func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, bucketSecs int) ([]SeriesBucket, error) {
 	if bucketSecs <= 0 {
 		return []SeriesBucket{}, nil
@@ -356,10 +390,11 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 	query := fmt.Sprintf(`
 		SELECT
 			(CAST(strftime('%%s', occurred_at) AS INTEGER) / %d) * %d AS bucket_unix,
+			model,
 			COALESCE(SUM(cost_usd_equivalent), 0) AS total
 		FROM usage_events
 		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
-		GROUP BY bucket_unix
+		GROUP BY bucket_unix, model
 		ORDER BY bucket_unix
 	`, bucketSecs, bucketSecs)
 	rows, err := db.Query(query, store.FormatTime(startedAt), store.FormatTime(endsAt))
@@ -368,19 +403,42 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 	}
 	defer rows.Close()
 
-	out := []SeriesBucket{}
+	// GROUP BY bucket_unix, model interleaves multiple models within a
+	// bucket but keeps buckets in ascending order. Accumulate per-family
+	// sums keyed by bucket, tracking first-seen order for a stable result.
+	order := []int64{}
+	byUnix := map[int64]*SeriesBucket{}
 	for rows.Next() {
 		var bucketUnix int64
+		var model sql.NullString
 		var total float64
-		if err := rows.Scan(&bucketUnix, &total); err != nil {
+		if err := rows.Scan(&bucketUnix, &model, &total); err != nil {
 			return nil, err
 		}
-		out = append(out, SeriesBucket{
-			BucketStart: time.Unix(bucketUnix, 0).UTC(),
-			CostUSD:     total,
-		})
+		b := byUnix[bucketUnix]
+		if b == nil {
+			b = &SeriesBucket{
+				BucketStart: time.Unix(bucketUnix, 0).UTC(),
+				ByFamily:    map[string]float64{},
+			}
+			byUnix[bucketUnix] = b
+			order = append(order, bucketUnix)
+		}
+		// NullString.String is "" when the model column is NULL, which
+		// modelFamily maps to "other".
+		fam := modelFamily(model.String)
+		b.ByFamily[fam] += total
+		b.CostUSD += total
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]SeriesBucket, 0, len(order))
+	for _, u := range order {
+		out = append(out, *byUnix[u])
+	}
+	return out, nil
 }
 
 // loadUsedSeries returns the per-snapshot %used time series for a window.
