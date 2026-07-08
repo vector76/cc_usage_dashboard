@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"os"
 	"testing"
@@ -30,6 +31,59 @@ func TestOpen(t *testing.T) {
 	}
 	if version != 6 {
 		t.Errorf("expected schema version 6, got %d", version)
+	}
+}
+
+// TestBusyTimeoutOnAllConnections guards against the pooling gotcha where the
+// connection-configuring PRAGMAs are applied via a single db.Exec at open time,
+// which only touches ONE pooled connection. database/sql opens additional
+// connections lazily under concurrent load; if those lack busy_timeout they
+// default to 0 and return SQLITE_BUSY immediately instead of waiting, producing
+// intermittent "database is locked" errors under two concurrent writers (the
+// windows ticker and the snapshot POST handler). We force several simultaneous
+// physical connections and assert every one carries busy_timeout=5000.
+func TestBusyTimeoutOnAllConnections(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "test-busy-*.db")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	store, err := Open(tmpFile.Name())
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Check out several connections at once so the pool is forced to open
+	// distinct physical connections rather than handing back the single one
+	// the open-time Exec configured.
+	const n = 5
+	conns := make([]*sql.Conn, 0, n)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	for i := 0; i < n; i++ {
+		c, err := store.db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("failed to check out connection %d: %v", i, err)
+		}
+		conns = append(conns, c)
+	}
+
+	for i, c := range conns {
+		var timeout int
+		if err := c.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&timeout); err != nil {
+			t.Fatalf("conn %d: PRAGMA busy_timeout failed: %v", i, err)
+		}
+		if timeout != 5000 {
+			t.Errorf("conn %d busy_timeout = %d, want 5000", i, timeout)
+		}
 	}
 }
 

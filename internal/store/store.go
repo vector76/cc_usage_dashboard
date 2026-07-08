@@ -41,20 +41,25 @@ type Store struct {
 
 // Open opens or creates a SQLite database at the given path and applies migrations.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// Configure the connection via DSN _pragma params rather than a one-time
+	// db.Exec. database/sql maintains a POOL of connections and opens new ones
+	// lazily under concurrent load; a PRAGMA issued through db.Exec lands on
+	// only ONE pooled connection. Connection-scoped pragmas — crucially
+	// busy_timeout — would then be missing on every other connection, so a
+	// second concurrent writer (e.g. the windows ticker racing the snapshot
+	// POST handler) hits busy_timeout=0 and fails immediately with SQLITE_BUSY
+	// instead of waiting. modernc.org/sqlite runs each _pragma on every new
+	// connection (busy_timeout first), so this applies pool-wide.
+	//
+	// The path is a bare filesystem path (no "file:" scheme), so modernc splits
+	// on the first '?' and uses the left side verbatim as the filename — Windows
+	// backslashes and drive letters are not URL-decoded. journal_mode is a
+	// persistent header setting; repeating it per connection is a harmless no-op.
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)" +
+		"&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
-	}
-
-	// Configure database for reliability and performance
-	if _, err := db.Exec(`
-		PRAGMA foreign_keys = ON;
-		PRAGMA journal_mode = WAL;
-		PRAGMA busy_timeout = 5000;
-		PRAGMA synchronous = NORMAL;
-	`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to configure database: %w", err)
 	}
 
 	// Test that the database is writable
