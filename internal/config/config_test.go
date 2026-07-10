@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -232,6 +233,7 @@ database:
   path: "%LOCALAPPDATA%/usage.db"
 claude:
   projects_dir: "%USERPROFILE%/.claude/projects"
+  cowork_sessions_dir: "%APPDATA%/Claude/local-agent-mode-sessions"
 pricing:
   table_path: "%APPDATA%/prices.yaml"
 `
@@ -250,8 +252,32 @@ pricing:
 	if cfg.Claude.ProjectsDir != "/fake/userprofile/.claude/projects" {
 		t.Errorf("expected expanded projects_dir, got %q", cfg.Claude.ProjectsDir)
 	}
+	if cfg.Claude.CoworkSessionsDir != "/fake/appdata/Claude/local-agent-mode-sessions" {
+		t.Errorf("expected expanded cowork_sessions_dir, got %q", cfg.Claude.CoworkSessionsDir)
+	}
 	if cfg.Pricing.TablePath != "/fake/appdata/prices.yaml" {
 		t.Errorf("expected expanded table_path, got %q", cfg.Pricing.TablePath)
+	}
+}
+
+func TestDefaultCoworkSessionsDir(t *testing.T) {
+	t.Setenv("APPDATA", `C:\fake\appdata`)
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	want := filepath.Join(`C:\fake\appdata`, "Claude", "local-agent-mode-sessions")
+	if cfg.Claude.CoworkSessionsDir != want {
+		t.Errorf("expected default cowork_sessions_dir %q, got %q", want, cfg.Claude.CoworkSessionsDir)
+	}
+
+	t.Setenv("APPDATA", "")
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Claude.CoworkSessionsDir != "" {
+		t.Errorf("expected empty cowork_sessions_dir when APPDATA is unset, got %q", cfg.Claude.CoworkSessionsDir)
 	}
 }
 

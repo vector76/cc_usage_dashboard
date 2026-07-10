@@ -4,10 +4,25 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+// IsUniqueConstraintViolation matches the modernc.org/sqlite error message
+// for SQLITE_CONSTRAINT_UNIQUE (extended code 2067). The driver doesn't
+// expose a sentinel error, so we string-match — narrow enough to catch
+// only this case and not other constraint failures. Shared by every
+// ingest path (HTTP /log, the tailer) that inserts into usage_events and
+// treats a (session_id, message_id) collision as idempotent re-delivery
+// rather than a real error.
+func IsUniqueConstraintViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
 
 // FormatTime renders a time as an RFC3339 string in UTC with a fixed-width
 // 9-digit fractional second. modernc.org/sqlite serializes time.Time via Go's
@@ -480,4 +495,24 @@ func (s *Store) SetTailerOffset(filePath string, offset int64) error {
 		return fmt.Errorf("failed to set tailer offset: %w", err)
 	}
 	return nil
+}
+
+// DeleteAllTailerOffsets wipes every persisted (file_path -> byte_offset)
+// row, forcing the next poll of every tracked transcript to re-read from
+// byte 0 (GetTailerOffset returns 0 for a path with no row). This is the
+// recovery-only bulk reimport path: a byte offset only records how far a
+// file was *read*, not whether the lines in that range actually produced a
+// usage_event — a parser bug (or any other silent extraction failure) can
+// leave an offset sitting at EOF for content that was never successfully
+// recorded, and there is no per-line "was this ingested" marker to repair
+// selectively. Wiping every offset and relying on the
+// UNIQUE(session_id, message_id) constraint to skip whatever was already
+// correctly recorded is the only way to guarantee recovery without knowing
+// in advance which files/sessions are actually missing data.
+func (s *Store) DeleteAllTailerOffsets() (int64, error) {
+	result, err := s.db.Exec(`DELETE FROM tailer_offsets`)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete tailer offsets: %w", err)
+	}
+	return result.RowsAffected()
 }

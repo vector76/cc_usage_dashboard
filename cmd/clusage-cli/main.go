@@ -37,6 +37,8 @@ func main() {
 		cmdConsumption()
 	case "release":
 		cmdRelease()
+	case "reimport":
+		cmdReimport()
 	case "--version":
 		fmt.Printf("clusage-cli v%s\n", Version)
 	case "--help":
@@ -56,6 +58,7 @@ Usage:
   clusage-cli slack [--format json|release-bool|fraction]
   clusage-cli consumption [--period 24h] [--format json|summary]
   clusage-cli release --released-at TS --job-tag TAG --estimated-cost N --slack-at-release N [--window-kind session|weekly]
+  clusage-cli reimport [--wait] [--wait-timeout 5m]
 
 `, Version)
 }
@@ -331,6 +334,76 @@ func cmdRelease() {
 		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
 		os.Exit(5)
 	}
+}
+
+// cmdReimport triggers a full recovery re-walk of every transcript file the
+// trayapp's tailer(s) track, bypassing persisted byte offsets entirely.
+//
+// This is a rare-recovery tool, not routine maintenance: it exists for
+// cases like suspected data loss, a parser bug that silently under-counted
+// past events, or a restored/corrupted database, where it's unknown which
+// specific sessions are affected. It deliberately re-reads every tracked
+// transcript byte-for-byte and leans entirely on the server's
+// UNIQUE(session_id, message_id) dedup to skip anything already correctly
+// recorded — slow and wasteful by design, in exchange for not requiring
+// anyone to name the affected files in advance.
+func cmdReimport() {
+	fs := flag.NewFlagSet("reimport", flag.ExitOnError)
+	wait := fs.Bool("wait", false, "block until the tailer reports caught up (or --wait-timeout elapses)")
+	waitTimeout := fs.Duration("wait-timeout", 10*time.Minute, "max time to wait with --wait")
+	fs.Parse(os.Args[2:])
+
+	client := &http.Client{Timeout: parseTimeout()}
+	resp, err := client.Post(fmt.Sprintf("%s/admin/reimport", hostURL()), "application/json", bytes.NewReader(nil))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		os.Exit(3)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusAccepted:
+		fmt.Println(string(body))
+	case http.StatusConflict:
+		fmt.Fprintf(os.Stderr, "error: %s\n", string(body))
+		os.Exit(4)
+	case http.StatusServiceUnavailable:
+		fmt.Fprintf(os.Stderr, "error: %s\n", string(body))
+		os.Exit(5)
+	default:
+		fmt.Fprintf(os.Stderr, "error: %d %s\n", resp.StatusCode, string(body))
+		os.Exit(5)
+	}
+
+	if !*wait {
+		os.Exit(0)
+	}
+
+	fmt.Println("waiting for tailer to catch up...")
+	deadline := time.Now().Add(*waitTimeout)
+	pollClient := &http.Client{Timeout: 5 * time.Second}
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		hresp, err := pollClient.Get(fmt.Sprintf("%s/healthz", hostURL()))
+		if err != nil {
+			continue // transient; keep polling until the deadline
+		}
+		var health struct {
+			TailerCaughtUp bool `json:"tailer_caught_up"`
+		}
+		decodeErr := json.NewDecoder(hresp.Body).Decode(&health)
+		hresp.Body.Close()
+		if decodeErr != nil {
+			continue
+		}
+		if health.TailerCaughtUp {
+			fmt.Println("caught up")
+			os.Exit(0)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "error: still not caught up after %s\n", *waitTimeout)
+	os.Exit(5)
 }
 
 func parseTimeout() time.Duration {

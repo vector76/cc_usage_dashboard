@@ -1151,6 +1151,41 @@ func TestPruneSlackSamples(t *testing.T) {
 	}
 }
 
+// TestDeleteAllTailerOffsets verifies the bulk-reimport recovery path wipes
+// every persisted offset (not just one), and that a file with no offset row
+// afterward reads back as 0 (GetTailerOffset's documented "new file"
+// behavior) — the exact condition that makes the next poll re-read from
+// byte 0 instead of resuming.
+func TestDeleteAllTailerOffsets(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	if err := store.SetTailerOffset("/path/a.jsonl", 100); err != nil {
+		t.Fatalf("SetTailerOffset a: %v", err)
+	}
+	if err := store.SetTailerOffset("/path/b.jsonl", 200); err != nil {
+		t.Fatalf("SetTailerOffset b: %v", err)
+	}
+
+	n, err := store.DeleteAllTailerOffsets()
+	if err != nil {
+		t.Fatalf("DeleteAllTailerOffsets: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("expected 2 rows deleted, got %d", n)
+	}
+
+	for _, path := range []string{"/path/a.jsonl", "/path/b.jsonl"} {
+		offset, err := store.GetTailerOffset(path)
+		if err != nil {
+			t.Fatalf("GetTailerOffset(%q): %v", path, err)
+		}
+		if offset != 0 {
+			t.Errorf("GetTailerOffset(%q) = %d, want 0 after wipe", path, offset)
+		}
+	}
+}
+
 // Helper functions
 func createTestStore(t *testing.T) *Store {
 	db, err := sql.Open("sqlite", ":memory:")

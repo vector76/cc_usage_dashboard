@@ -23,6 +23,14 @@ type Config struct {
 
 	Claude struct {
 		ProjectsDir string `yaml:"projects_dir"`
+		// CoworkSessionsDir is the root of the desktop app's Cowork
+		// ("local agent mode") session tree. Each Cowork session nests its
+		// own private .claude home several levels under this root
+		// (<workspace>/<id>/local_<uuid>/.claude/projects/<encoded-cwd>/
+		// <session>.jsonl), so the tailer walks it recursively rather than
+		// treating it as a projects dir directly. Empty disables it (e.g.
+		// non-Windows, where APPDATA isn't set).
+		CoworkSessionsDir string `yaml:"cowork_sessions_dir"`
 	} `yaml:"claude"`
 
 	Pricing struct {
@@ -71,6 +79,7 @@ func Load(path string) (*Config, error) {
 	cfg.HTTP.Port = 27812
 	cfg.HTTP.Bind = []string{"127.0.0.1"}
 	cfg.Claude.ProjectsDir = expandHome("~/.claude/projects")
+	cfg.Claude.CoworkSessionsDir = defaultCoworkSessionsDir()
 	// Empty means "use the resolution chain" (executable dir / app config
 	// dir override, else the embedded built-in table). A non-empty value is
 	// an explicit override. See ingest.ResolvePriceTable.
@@ -107,6 +116,7 @@ func Load(path string) (*Config, error) {
 	// Resolve env-style placeholders in path/dir fields.
 	cfg.Database.Path = expandPlaceholders(cfg.Database.Path)
 	cfg.Claude.ProjectsDir = expandPlaceholders(cfg.Claude.ProjectsDir)
+	cfg.Claude.CoworkSessionsDir = expandPlaceholders(cfg.Claude.CoworkSessionsDir)
 	cfg.Pricing.TablePath = expandPlaceholders(cfg.Pricing.TablePath)
 
 	return &cfg, nil
@@ -144,6 +154,21 @@ func expandPlaceholders(s string) string {
 		s = strings.ReplaceAll(s, token, val)
 	}
 	return s
+}
+
+// defaultCoworkSessionsDir returns the root of the Claude desktop app's
+// Cowork ("local agent mode") session tree on Windows. Each Cowork session
+// runs against its own private, sandboxed .claude home nested several
+// levels under this root rather than the user's real ~/.claude — the
+// tailer walks it recursively to reach those nested projects/ dirs (see
+// docs/data-sources.md, Tier 1a). Returns "" when APPDATA isn't set (e.g.
+// non-Windows), which disables this second root without erroring.
+func defaultCoworkSessionsDir() string {
+	appData := os.Getenv("APPDATA")
+	if appData == "" {
+		return ""
+	}
+	return filepath.Join(appData, "Claude", "local-agent-mode-sessions")
 }
 
 // expandHome expands a leading ~/ to the user's home directory.

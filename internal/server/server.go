@@ -10,8 +10,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vector76/cc_usage_dashboard/internal/config"
@@ -41,6 +41,14 @@ type TailerStatus interface {
 	CaughtUp() bool
 }
 
+// Reimporter triggers a full recovery re-walk of every tracked transcript
+// file, ignoring persisted offsets. See ingest.Tailer.Reimport for why a
+// selective/partial repair isn't possible and why this is recovery-only,
+// not routine use.
+type Reimporter interface {
+	Reimport()
+}
+
 // Server handles HTTP requests.
 type Server struct {
 	mux   *http.ServeMux
@@ -52,6 +60,13 @@ type Server struct {
 	windowsEngine *windows.Engine
 	dashboardHandler *dashboard.Handler
 	tailerStatus TailerStatus
+	reimporter   Reimporter
+
+	// reimportInFlight guards against a second /admin/reimport request
+	// piling on while one is already running — the operation is already
+	// deliberately slow (full re-walk of every tracked file); overlapping
+	// runs would just double that cost for no benefit.
+	reimportInFlight atomic.Bool
 
 	// feedbackBuffer holds recent warn+ log records and unknownModels
 	// aggregates usage events whose model was missing from the price table.
@@ -128,6 +143,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("GET /consumption", srv.handleConsumption)
 	srv.mux.HandleFunc("GET /metrics", srv.handleMetrics)
 	srv.mux.HandleFunc("GET /api/feedback", srv.handleFeedback)
+	srv.mux.HandleFunc("POST /admin/reimport", srv.handleAdminReimport)
 	if srv.dashboardHandler != nil {
 		srv.dashboardHandler.Register(srv.mux)
 	}
@@ -252,6 +268,12 @@ func (s *Server) SetTailer(t TailerStatus) {
 	s.tailerStatus = t
 }
 
+// SetReimporter attaches the trigger for POST /admin/reimport. Safe to call
+// once before serving traffic; concurrent calls are not supported.
+func (s *Server) SetReimporter(r Reimporter) {
+	s.reimporter = r
+}
+
 // SetNow injects a clock for tests whose fixtures use a fixed timestamp.
 // Production never calls this — handlers default to time.Now.
 func (s *Server) SetNow(fn func() time.Time) {
@@ -309,6 +331,38 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":           "healthy",
 		"tailer_caught_up": caughtUp,
+	})
+}
+
+// handleAdminReimport triggers a full recovery re-walk of every tracked
+// transcript file (see ingest.Tailer.Reimport). Recovery-only — for
+// suspected data loss/corruption where it's unknown which specific
+// files/sessions are affected, not something to call routinely. Runs in a
+// background goroutine so the deliberately slow, full-file re-walk doesn't
+// hold the HTTP request open; poll GET /healthz's tailer_caught_up field
+// (or GET /api/feedback for parse error activity) to observe progress.
+func (s *Server) handleAdminReimport(w http.ResponseWriter, r *http.Request) {
+	if s.reimporter == nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "reimport not available")
+		return
+	}
+	if !s.reimportInFlight.CompareAndSwap(false, true) {
+		writeJSONError(w, http.StatusConflict, "reimport already in progress")
+		return
+	}
+
+	go func() {
+		defer s.reimportInFlight.Store(false)
+		slog.Info("admin reimport: starting full re-walk of every tracked transcript")
+		s.reimporter.Reimport()
+		slog.Info("admin reimport: complete")
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "started",
+		"message": "reimport running in background; poll GET /healthz tailer_caught_up for progress",
 	})
 }
 
@@ -406,7 +460,7 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		// already in the DB will collide on (session_id, message_id).
 		// This is the idempotency mechanism — log it at debug, return
 		// 200 with a duplicate flag, and don't bump the ingested metric.
-		if isUniqueConstraintViolation(err) {
+		if store.IsUniqueConstraintViolation(err) {
 			slog.Debug("usage event already present (idempotent re-post)",
 				"session_id", req.SessionID, "message_id", req.MessageID)
 			w.Header().Set("Content-Type", "application/json")
@@ -431,17 +485,6 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"id": id,
 	})
-}
-
-// isUniqueConstraintViolation matches the modernc.org/sqlite error message
-// for SQLITE_CONSTRAINT_UNIQUE (extended code 2067). The driver doesn't
-// expose a sentinel error, so we string-match — narrow enough to catch
-// only this case and not other constraint failures.
-func isUniqueConstraintViolation(err error) bool {
-	if err == nil {
-		return false
-	}
-	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
 
 // ParseErrorRequest represents the POST /parse_error request payload.

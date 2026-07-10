@@ -21,6 +21,12 @@ http:
 
 claude:
   projects_dir: "~/.claude/projects"   # %USERPROFILE%\.claude\projects on Windows
+  # Root of the desktop app's Cowork ("local agent mode") session tree.
+  # Each Cowork session nests its own private .claude home several levels
+  # under this root, so a second tailer walks it recursively. Default
+  # resolves to %APPDATA%\Claude\local-agent-mode-sessions on Windows;
+  # empty (e.g. APPDATA unset) disables this second tailer.
+  cowork_sessions_dir: "%APPDATA%\\Claude\\local-agent-mode-sessions"
 
 # Price table used to compute cost_usd_equivalent when the source did not
 # report it. See docs/data-model.md "Cost source" and "Price table
@@ -112,10 +118,11 @@ suppress it. See `docs/no-active-session.md` for the wiring.
 ## Path placeholders
 
 `%APPDATA%`, `%LOCALAPPDATA%`, `%USERPROFILE%`, and `%HOME%` placeholders
-are expanded inside `database.path`, `claude.projects_dir`, and
-`pricing.table_path` at load time. When the underlying environment
-variable is unset (typical on Linux), the loader falls back to the user's
-home directory so cross-platform configs stay testable.
+are expanded inside `database.path`, `claude.projects_dir`,
+`claude.cowork_sessions_dir`, and `pricing.table_path` at load time. When
+the underlying environment variable is unset (typical on Linux), the
+loader falls back to the user's home directory so cross-platform configs
+stay testable.
 
 `claude.projects_dir` additionally expands a leading `~/` to the user's
 home directory.

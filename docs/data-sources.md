@@ -74,6 +74,49 @@ workflow is whichever requires less change to existing images.
 - **Container path coverage.** See above; the unshared-container case is common enough
   that it shapes the install flow, not just an edge case.
 
+### Second root: Cowork ("local agent mode") sessions
+
+The desktop app's Cowork feature runs Claude Code sessions in a sandboxed
+VM/background mode. Each Cowork session gets its own **private, nested
+`.claude` home** several directories under
+`%APPDATA%\Claude\local-agent-mode-sessions\<workspace>\<id>\local_<uuid>\`
+— its own `.claude/projects/<encoded-cwd>/<session>.jsonl`, distinct from
+the user's real `~/.claude/projects`. The schema is identical (same
+`usage` block), but the primary tailer above never reaches these files
+because they aren't under its root at all.
+
+A second `ingest.Tailer` instance is started against
+`claude.cowork_sessions_dir` (default
+`%APPDATA%\Claude\local-agent-mode-sessions`) alongside the primary one.
+Because the tailer's poll pass does a full recursive `filepath.Walk`, this
+second root picks up newly-created Cowork sessions automatically — no
+per-session registration needed. Both tailers share the same DB and
+dedup key, so there's no risk of double-counting. This is still Tier 1a:
+no hook, no perturbation, just a second recursion root.
+
+Regular desktop-app Claude Code (the embedded pane, as opposed to Cowork)
+writes straight into the normal `~/.claude/projects`, indistinguishable
+from a terminal session — it needs no special handling.
+
+### Recovering from a silent extraction failure
+
+The tailer's per-file byte offset only records how far a file was *read*,
+not whether the lines in that range actually produced a `usage_event`. A
+parser bug — silently returning "no usage block" for a schema it
+misreads — can leave an offset sitting at EOF for content that was never
+successfully recorded, and a normal poll has nothing new to read past that
+offset, so it can't self-heal. There's also no per-line "was this
+ingested" marker, so a *selective* repair isn't possible without already
+knowing which files/sessions are affected.
+
+`clusage-cli reimport` (see `docs/container-cli.md`) is the recovery tool
+for this: it wipes every persisted tailer offset and re-walks every root
+from byte 0, leaning entirely on the `UNIQUE(session_id, message_id)`
+dedup to discard whatever's already correctly recorded. Slow and wasteful
+by design — it re-reads everything — but that's the acceptable cost of
+guaranteed recovery without naming files in advance. Not routine
+maintenance; use it once after fixing a bug like this, not on a schedule.
+
 ### Schema fragility mitigation
 
 The parser should:

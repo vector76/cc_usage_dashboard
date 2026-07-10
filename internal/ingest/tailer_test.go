@@ -1,10 +1,12 @@
 package ingest
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vector76/cc_usage_dashboard/internal/feedback"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
@@ -55,8 +57,8 @@ func TestTailerProcessFile(t *testing.T) {
 	// Create a transcript JSONL file with two events
 	transcriptPath := filepath.Join(tmpDir, "session-123.jsonl")
 	lines := []string{
-		`{"type":"assistant","session_id":"session-123","message_id":"msg-1","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
-		`{"type":"assistant","session_id":"session-123","message_id":"msg-2","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":200,"output_tokens":100}}`,
+		`{"type":"assistant","sessionId":"session-123","timestamp":"2026-04-26T10:00:00Z","message":{"id":"msg-1","usage":{"input_tokens":100,"output_tokens":50}}}`,
+		`{"type":"assistant","sessionId":"session-123","timestamp":"2026-04-26T10:01:00Z","message":{"id":"msg-2","usage":{"input_tokens":200,"output_tokens":100}}}`,
 	}
 	content := strings.Join(lines, "\n") + "\n"
 
@@ -119,10 +121,10 @@ func TestTailerAggregatesUnknownModel(t *testing.T) {
 
 	transcriptPath := filepath.Join(tmpDir, "session-unk.jsonl")
 	lines := []string{
-		`{"type":"assistant","session_id":"s","message_id":"m1","model":"unpriced-model","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
-		`{"type":"assistant","session_id":"s","message_id":"m2","model":"unpriced-model","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
-		`{"type":"assistant","session_id":"s","message_id":"m3","model":"known-model","timestamp":"2026-04-26T10:02:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
-		`{"type":"assistant","session_id":"s","message_id":"m4","timestamp":"2026-04-26T10:03:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:00:00Z","message":{"id":"m1","model":"unpriced-model","usage":{"input_tokens":100,"output_tokens":50}}}`,
+		`{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:01:00Z","message":{"id":"m2","model":"unpriced-model","usage":{"input_tokens":100,"output_tokens":50}}}`,
+		`{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:02:00Z","message":{"id":"m3","model":"known-model","usage":{"input_tokens":100,"output_tokens":50}}}`,
+		`{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:03:00Z","message":{"id":"m4","usage":{"input_tokens":100,"output_tokens":50}}}`,
 	}
 	content := strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(transcriptPath, []byte(content), 0644); err != nil {
@@ -162,7 +164,7 @@ func TestTailerIncremental(t *testing.T) {
 
 	// Write initial events
 	lines1 := []string{
-		`{"type":"assistant","session_id":"session-456","message_id":"msg-1","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","sessionId":"session-456","timestamp":"2026-04-26T10:00:00Z","message":{"id":"msg-1","usage":{"input_tokens":100,"output_tokens":50}}}`,
 	}
 	content1 := strings.Join(lines1, "\n") + "\n"
 
@@ -185,7 +187,7 @@ func TestTailerIncremental(t *testing.T) {
 
 	// Append more events
 	lines2 := []string{
-		`{"type":"assistant","session_id":"session-456","message_id":"msg-2","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":200,"output_tokens":100}}`,
+		`{"type":"assistant","sessionId":"session-456","timestamp":"2026-04-26T10:01:00Z","message":{"id":"msg-2","usage":{"input_tokens":200,"output_tokens":100}}}`,
 	}
 	content2 := content1 + strings.Join(lines2, "\n") + "\n"
 
@@ -219,7 +221,7 @@ func TestTailerIncremental(t *testing.T) {
 
 	// Append another event
 	lines3 := []string{
-		`{"type":"assistant","session_id":"session-456","message_id":"msg-3","timestamp":"2026-04-26T10:02:00Z","usage":{"input_tokens":300,"output_tokens":150}}`,
+		`{"type":"assistant","sessionId":"session-456","timestamp":"2026-04-26T10:02:00Z","message":{"id":"msg-3","usage":{"input_tokens":300,"output_tokens":150}}}`,
 	}
 	content3 := content2 + strings.Join(lines3, "\n") + "\n"
 
@@ -277,9 +279,9 @@ func TestTailerMalformedLine(t *testing.T) {
 
 	// Write a mix of valid and invalid events
 	lines := []string{
-		`{"type":"assistant","session_id":"session-789","message_id":"msg-1","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","sessionId":"session-789","timestamp":"2026-04-26T10:00:00Z","message":{"id":"msg-1","usage":{"input_tokens":100,"output_tokens":50}}}`,
 		`malformed json line`,
-		`{"type":"assistant","session_id":"session-789","message_id":"msg-2","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":200,"output_tokens":100}}`,
+		`{"type":"assistant","sessionId":"session-789","timestamp":"2026-04-26T10:01:00Z","message":{"id":"msg-2","usage":{"input_tokens":200,"output_tokens":100}}}`,
 	}
 	content := strings.Join(lines, "\n") + "\n"
 
@@ -332,9 +334,9 @@ func TestTailerOffsetAdvancesPastSkippedLines(t *testing.T) {
 	lines := []string{
 		`{"type":"user","content":"hello"}`,
 		`malformed json line`,
-		`{"type":"assistant","session_id":"s1","message_id":"m1","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","sessionId":"s1","timestamp":"2026-04-26T10:00:00Z","message":{"id":"m1","usage":{"input_tokens":100,"output_tokens":50}}}`,
 		`{"type":"user","content":"more"}`,
-		`{"type":"assistant","session_id":"s1","message_id":"m2","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":200,"output_tokens":100}}`,
+		`{"type":"assistant","sessionId":"s1","timestamp":"2026-04-26T10:01:00Z","message":{"id":"m2","usage":{"input_tokens":200,"output_tokens":100}}}`,
 	}
 	content := strings.Join(lines, "\n") + "\n"
 
@@ -354,7 +356,7 @@ func TestTailerOffsetAdvancesPastSkippedLines(t *testing.T) {
 	}
 
 	// Append more content; only the appended event should be ingested.
-	appended := `{"type":"assistant","session_id":"s1","message_id":"m3","timestamp":"2026-04-26T10:02:00Z","usage":{"input_tokens":300,"output_tokens":150}}` + "\n"
+	appended := `{"type":"assistant","sessionId":"s1","timestamp":"2026-04-26T10:02:00Z","message":{"id":"m3","usage":{"input_tokens":300,"output_tokens":150}}}` + "\n"
 	f, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Fatalf("failed to open for append: %v", err)
@@ -400,8 +402,8 @@ func TestTailerRestartFromPersistedOffset(t *testing.T) {
 	transcriptPath := filepath.Join(tmpDir, "session-restart.jsonl")
 
 	firstHalf := []string{
-		`{"type":"assistant","session_id":"s","message_id":"m1","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
-		`{"type":"assistant","session_id":"s","message_id":"m2","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":200,"output_tokens":100}}`,
+		`{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:00:00Z","message":{"id":"m1","usage":{"input_tokens":100,"output_tokens":50}}}`,
+		`{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:01:00Z","message":{"id":"m2","usage":{"input_tokens":200,"output_tokens":100}}}`,
 	}
 	firstContent := strings.Join(firstHalf, "\n") + "\n"
 	if err := os.WriteFile(transcriptPath, []byte(firstContent), 0644); err != nil {
@@ -422,8 +424,8 @@ func TestTailerRestartFromPersistedOffset(t *testing.T) {
 
 	// Append the remainder while the "process" is "down".
 	secondHalf := []string{
-		`{"type":"assistant","session_id":"s","message_id":"m3","timestamp":"2026-04-26T10:02:00Z","usage":{"input_tokens":300,"output_tokens":150}}`,
-		`{"type":"assistant","session_id":"s","message_id":"m4","timestamp":"2026-04-26T10:03:00Z","usage":{"input_tokens":400,"output_tokens":200}}`,
+		`{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:02:00Z","message":{"id":"m3","usage":{"input_tokens":300,"output_tokens":150}}}`,
+		`{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:03:00Z","message":{"id":"m4","usage":{"input_tokens":400,"output_tokens":200}}}`,
 	}
 	fullContent := firstContent + strings.Join(secondHalf, "\n") + "\n"
 	if err := os.WriteFile(transcriptPath, []byte(fullContent), 0644); err != nil {
@@ -499,7 +501,7 @@ func TestTailerOffsetPersistence(t *testing.T) {
 
 	// Write initial event
 	lines1 := []string{
-		`{"type":"assistant","session_id":"session-persist","message_id":"msg-1","timestamp":"2026-04-26T10:00:00Z","usage":{"input_tokens":100,"output_tokens":50}}`,
+		`{"type":"assistant","sessionId":"session-persist","timestamp":"2026-04-26T10:00:00Z","message":{"id":"msg-1","usage":{"input_tokens":100,"output_tokens":50}}}`,
 	}
 	content1 := strings.Join(lines1, "\n") + "\n"
 
@@ -524,7 +526,7 @@ func TestTailerOffsetPersistence(t *testing.T) {
 
 	// Append more events
 	lines2 := []string{
-		`{"type":"assistant","session_id":"session-persist","message_id":"msg-2","timestamp":"2026-04-26T10:01:00Z","usage":{"input_tokens":200,"output_tokens":100}}`,
+		`{"type":"assistant","sessionId":"session-persist","timestamp":"2026-04-26T10:01:00Z","message":{"id":"msg-2","usage":{"input_tokens":200,"output_tokens":100}}}`,
 	}
 	content2 := content1 + strings.Join(lines2, "\n") + "\n"
 
@@ -618,6 +620,194 @@ func TestTailerSkipsSymlinks(t *testing.T) {
 		_ = s.DB().QueryRow(`SELECT COUNT(*) FROM tailer_offsets WHERE file_path = ?`, symlinkPath).Scan(&n)
 		if n != 0 {
 			t.Errorf("expected no tailer_offsets row for symlink, got %d", n)
+		}
+	}
+}
+
+// TestTailerStoresQueryableTimestamp verifies occurred_at is written in the
+// RFC3339 shape store.FormatTime produces, not Go's default time.Time
+// String() format. modernc.org/sqlite serializes an unconverted time.Time
+// query argument via String() ("2006-01-02 15:04:05.x +0000 UTC"), which
+// SQLite's strftime/date functions silently fail to parse (returning NULL
+// rather than an error). The dashboard's weekly/session burn-down charts
+// bucket usage_events with strftime('%s', occurred_at) — a tailer-sourced
+// row written the wrong way would scan back as SQL NULL there and break the
+// query for every request touching that time range, exactly the failure
+// this test pins.
+func TestTailerStoresQueryableTimestamp(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+	tailer := NewTailer(tmpDir, s, make(PriceTable))
+
+	transcriptPath := filepath.Join(tmpDir, "session-ts.jsonl")
+	line := `{"type":"assistant","sessionId":"session-ts","timestamp":"2026-04-26T10:00:00Z","message":{"id":"msg-1","usage":{"input_tokens":100,"output_tokens":50}}}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(line), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	tailer.processFile(transcriptPath)
+
+	var bucketUnix sql.NullInt64
+	row := s.DB().QueryRow(`
+		SELECT CAST(strftime('%s', occurred_at) AS INTEGER)
+		FROM usage_events WHERE session_id = 'session-ts' AND message_id = 'msg-1'
+	`)
+	if err := row.Scan(&bucketUnix); err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+	if !bucketUnix.Valid {
+		t.Fatal("strftime on occurred_at returned NULL — occurred_at was not stored via store.FormatTime")
+	}
+	want := time.Date(2026, 4, 26, 10, 0, 0, 0, time.UTC).Unix()
+	if bucketUnix.Int64 != want {
+		t.Errorf("bucket_unix = %d, want %d", bucketUnix.Int64, want)
+	}
+}
+
+// TestTailerSkipsAlreadyRecordedEvent verifies that when the Stop hook (or
+// the other tailer root, for a session visible to both) has already
+// recorded a (session_id, message_id) pair, the tailer treats re-reading
+// that same line as idempotent: no duplicate row, no error log, and no
+// parse_errors entry — mirroring the identical dedup contract server.go's
+// handleLog already applies to hook-sourced re-posts. Before this, the
+// tailer's INSERT lacked that check, so every message the hook got to
+// first would be logged as an insert failure and leave a permanent
+// parse_errors row on every restart's catch-up poll.
+func TestTailerSkipsAlreadyRecordedEvent(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	// Simulate the hook having already recorded this message.
+	if _, err := s.InsertUsageEvent(
+		time.Now(), "hook", "session-dup", "msg-1", "", "",
+		100, 50, 0, 0, nil, "", "",
+	); err != nil {
+		t.Fatalf("failed to seed hook-sourced event: %v", err)
+	}
+
+	pt := make(PriceTable)
+	tmpDir := t.TempDir()
+	tailer := NewTailer(tmpDir, s, pt)
+
+	transcriptPath := filepath.Join(tmpDir, "session-dup.jsonl")
+	line := `{"type":"assistant","sessionId":"session-dup","message":{"id":"msg-1","usage":{"input_tokens":100,"output_tokens":50}}}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(line), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	tailer.processFile(transcriptPath)
+
+	var totalCount, parseErrCount int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM usage_events WHERE session_id = 'session-dup' AND message_id = 'msg-1'`).Scan(&totalCount); err != nil {
+		t.Fatalf("count usage_events: %v", err)
+	}
+	if totalCount != 1 {
+		t.Errorf("expected exactly 1 row for the (session_id, message_id) pair, got %d", totalCount)
+	}
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM parse_errors WHERE source = 'tailer'`).Scan(&parseErrCount); err != nil {
+		t.Fatalf("count parse_errors: %v", err)
+	}
+	if parseErrCount != 0 {
+		t.Errorf("expected no parse_errors from an idempotent re-read, got %d", parseErrCount)
+	}
+
+	// The offset must still advance past the duplicate line, or every
+	// subsequent poll would re-read (and re-skip) it forever.
+	tailer.offsetMu.Lock()
+	offset := tailer.offsets[transcriptPath]
+	tailer.offsetMu.Unlock()
+	if offset != int64(len(line)) {
+		t.Errorf("expected offset to advance past the duplicate line, got %d want %d", offset, len(line))
+	}
+}
+
+// TestTailerReimportRecoversPastOffset reproduces the exact scenario
+// Reimport exists to fix: a byte offset already sitting at EOF for a file
+// (as if an earlier bug had "read" it without successfully extracting
+// every event), with one message genuinely missing from usage_events. A
+// normal poll can't recover it — it has nothing new to read past the
+// existing offset. Reimport must wipe the offset, re-read from byte 0, and
+// rely on the unique constraint to bring back only what's actually
+// missing: recovering msg-2 without duplicating the already-recorded
+// hook-sourced msg-1.
+func TestTailerReimportRecoversPastOffset(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+	transcriptPath := filepath.Join(tmpDir, "session-recover.jsonl")
+	lines := []string{
+		`{"type":"assistant","sessionId":"session-recover","message":{"id":"msg-1","usage":{"input_tokens":100,"output_tokens":50}}}`,
+		`{"type":"assistant","sessionId":"session-recover","message":{"id":"msg-2","usage":{"input_tokens":200,"output_tokens":100}}}`,
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	// The hook already recorded msg-1. msg-2 was never recorded anywhere,
+	// but the tailer's persisted offset already sits at EOF, as if an
+	// earlier bug had consumed the bytes without producing an event.
+	if _, err := s.InsertUsageEvent(
+		time.Now(), "hook", "session-recover", "msg-1", "", "",
+		100, 50, 0, 0, nil, "", "",
+	); err != nil {
+		t.Fatalf("failed to seed hook-sourced event: %v", err)
+	}
+	if err := s.SetTailerOffset(transcriptPath, int64(len(content))); err != nil {
+		t.Fatalf("failed to seed offset: %v", err)
+	}
+
+	tailer := NewTailer(tmpDir, s, make(PriceTable))
+	tailer.loadPersistedOffsets() // mirrors what Start() does
+
+	// Sanity check: a normal poll finds nothing new, confirming msg-2 is
+	// genuinely stuck (not just untested).
+	tailer.processFile(transcriptPath)
+	var countBeforeReimport int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM usage_events WHERE session_id = 'session-recover'`).Scan(&countBeforeReimport); err != nil {
+		t.Fatalf("count before reimport: %v", err)
+	}
+	if countBeforeReimport != 1 {
+		t.Fatalf("expected only the pre-seeded hook row before Reimport, got %d", countBeforeReimport)
+	}
+
+	tailer.Reimport()
+
+	rows, err := s.DB().Query(`SELECT message_id, source FROM usage_events WHERE session_id = 'session-recover' ORDER BY message_id`)
+	if err != nil {
+		t.Fatalf("query after reimport: %v", err)
+	}
+	defer rows.Close()
+
+	type row struct{ messageID, source string }
+	var got []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.messageID, &r.source); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, r)
+	}
+
+	want := []row{{"msg-1", "hook"}, {"msg-2", "tailer"}}
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows %+v, want %d %+v", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("row %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
 }

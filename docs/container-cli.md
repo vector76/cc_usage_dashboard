@@ -85,6 +85,38 @@ fi
 
 GET `/healthz`. Exits `0` if healthy.
 
+### `clusage-cli reimport`
+
+POST `/admin/reimport`, triggering a full recovery re-walk of every
+transcript file the trayapp's tailer(s) track, ignoring persisted byte
+offsets entirely.
+
+**Recovery-only — not routine maintenance.** A byte offset records how far
+a file was *read*, not whether the lines in that range actually produced a
+`usage_event`. A parser bug (or any other silent extraction failure) can
+leave an offset sitting at EOF for content that was never successfully
+recorded, with no per-line marker to say which lines those were. There is
+no way to selectively repair "just the missing ones" without already
+knowing which files/sessions are affected — so this re-reads *everything*
+from byte 0 and relies entirely on the `UNIQUE(session_id, message_id)`
+constraint to skip whatever was already correctly recorded (the same
+idempotency contract described in `docs/data-sources.md`). Deliberately
+slow and wasteful: acceptable as a one-time cost for suspected data loss
+(a parser bug, a restored/corrupted database) but not something to run on
+a schedule.
+
+```
+clusage-cli reimport [--wait] [--wait-timeout 5m]
+```
+
+Without `--wait`, the command returns as soon as the trayapp accepts the
+request (202) — the re-walk itself runs in the background. With `--wait`,
+it polls `GET /healthz`'s `tailer_caught_up` field every 2 seconds until
+the re-walk finishes or `--wait-timeout` (default 10m) elapses.
+
+A second `reimport` call while one is already running gets `409` (exit
+code `4`) rather than piling on a redundant concurrent re-walk.
+
 ## Configuration
 
 Environment variables:

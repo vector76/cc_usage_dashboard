@@ -93,6 +93,93 @@ func TestHandleHealthzReportsTailerStatus(t *testing.T) {
 	}
 }
 
+// fakeReimporter lets tests observe whether Reimport was actually invoked
+// and, via block, hold it "in progress" long enough to exercise the
+// already-running (409) branch deterministically.
+type fakeReimporter struct {
+	called chan struct{}
+	block  chan struct{}
+}
+
+func (f *fakeReimporter) Reimport() {
+	if f.called != nil {
+		close(f.called)
+	}
+	if f.block != nil {
+		<-f.block
+	}
+}
+
+func TestHandleAdminReimportNotConfigured(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	req := httptest.NewRequest("POST", "/admin/reimport", nil)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 with no reimporter configured, got %d", w.Code)
+	}
+}
+
+func TestHandleAdminReimportTriggersReimport(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	fr := &fakeReimporter{called: make(chan struct{})}
+	srv.SetReimporter(fr)
+
+	req := httptest.NewRequest("POST", "/admin/reimport", nil)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", w.Code)
+	}
+	select {
+	case <-fr.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Reimport was not invoked")
+	}
+}
+
+func TestHandleAdminReimportRejectsConcurrentRun(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	fr := &fakeReimporter{called: make(chan struct{}), block: make(chan struct{})}
+	srv.SetReimporter(fr)
+
+	req1 := httptest.NewRequest("POST", "/admin/reimport", nil)
+	req1.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	srv.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusAccepted {
+		t.Fatalf("expected first request to return 202, got %d", w1.Code)
+	}
+
+	// Wait for the background goroutine to actually start (and block)
+	// before asserting the second request sees it as in-flight.
+	select {
+	case <-fr.called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first Reimport was not invoked")
+	}
+
+	req2 := httptest.NewRequest("POST", "/admin/reimport", nil)
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	srv.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("expected second concurrent request to return 409, got %d", w2.Code)
+	}
+
+	close(fr.block) // release the first Reimport so its goroutine exits
+}
+
 func TestHandleLogValid(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()

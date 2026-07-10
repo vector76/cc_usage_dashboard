@@ -31,6 +31,40 @@ type pauseToggle struct{ c *slack.Calculator }
 
 func (p pauseToggle) Toggle() { p.c.SetPaused(!p.c.IsPaused()) }
 
+// tailerGroup collects every running Tailer (the primary ~/.claude/projects
+// root plus, when resolved, the Cowork sessions root) so both /healthz
+// reporting and shutdown treat them uniformly instead of the shutdown path
+// only knowing about the first one.
+type tailerGroup []*ingest.Tailer
+
+// CaughtUp reports /healthz status: caught up only when every tailer is.
+func (g tailerGroup) CaughtUp() bool {
+	for _, t := range g {
+		if !t.CaughtUp() {
+			return false
+		}
+	}
+	return true
+}
+
+// Stop stops every tailer in the group, waiting for each in turn.
+func (g tailerGroup) Stop() {
+	for _, t := range g {
+		t.Stop()
+	}
+}
+
+// Reimport triggers a full recovery re-walk on every tailer in the group.
+// Runs synchronously (each Tailer.Reimport call blocks until its own
+// re-walk finishes) — the HTTP handler wrapping this is expected to call
+// it in its own goroutine so a slow, deliberately-inefficient recovery
+// pass doesn't block the request.
+func (g tailerGroup) Reimport() {
+	for _, t := range g {
+		t.Reimport()
+	}
+}
+
 const Version = "0.0.1"
 
 const (
@@ -108,12 +142,25 @@ func main() {
 
 	tailer := ingest.NewTailer(cfg.Claude.ProjectsDir, db, priceTable)
 	tailer.Start()
-	srv.SetTailer(tailer)
+	tailers := tailerGroup{tailer}
+
+	// Cowork ("local agent mode") sessions each get their own private
+	// .claude home nested under CoworkSessionsDir rather than the user's
+	// real ~/.claude, so the primary tailer above never sees them. A second
+	// tailer rooted one level up recursively finds every session's nested
+	// projects/ dir as it's created — same JSONL schema, no hook needed.
+	if cfg.Claude.CoworkSessionsDir != "" {
+		coworkTailer := ingest.NewTailer(cfg.Claude.CoworkSessionsDir, db, priceTable)
+		coworkTailer.Start()
+		tailers = append(tailers, coworkTailer)
+	}
+	srv.SetTailer(tailers)
+	srv.SetReimporter(tailers)
 
 	// stop signals every background loop (retention pruner, windows ticker)
-	// to exit; wg lets shutdown wait for them. The tailer has its own
-	// stopChan + doneChan and is stopped via tailer.Stop() so we don't
-	// double-track it on the WaitGroup.
+	// to exit; wg lets shutdown wait for them. Each tailer has its own
+	// stopChan + doneChan and is stopped via tailers.Stop() so we don't
+	// double-track them on the WaitGroup.
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 
@@ -205,7 +252,7 @@ waitLoop:
 	cancelHTTP()
 
 	// Phase 2: stop background goroutines (retention pruner, windows
-	// ticker, tailer, tray UI). tailer.Stop is invoked inside the
+	// ticker, tailer, tray UI). tailers.Stop is invoked inside the
 	// goroutine so a stuck tailer is also bounded by the 10s timeout
 	// — otherwise a hung tailer blocks process exit indefinitely.
 	close(stop)
@@ -213,7 +260,7 @@ waitLoop:
 
 	bgDone := make(chan struct{})
 	go func() {
-		tailer.Stop()
+		tailers.Stop()
 		wg.Wait()
 		close(bgDone)
 	}()

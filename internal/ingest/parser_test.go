@@ -7,8 +7,13 @@ import (
 	"time"
 )
 
+// Real Claude Code transcripts have sessionId (camelCase) at the top level
+// and nest model/id/usage under a "message" object. These fixtures use that
+// shape deliberately — an earlier flat snake_case fixture matched no real
+// transcript and masked parseLine reading the wrong keys entirely.
+
 func TestParserValidMessage(t *testing.T) {
-	jsonl := `{"type":"assistant","session_id":"sess-123","message_id":"msg-456","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1000,"output_tokens":500},"timestamp":"2026-04-26T10:00:00Z"}`
+	jsonl := `{"type":"assistant","sessionId":"sess-123","message":{"id":"msg-456","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1000,"output_tokens":500}},"timestamp":"2026-04-26T10:00:00Z"}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	event, err := parser.ParseNext()
@@ -38,7 +43,7 @@ func TestParserValidMessage(t *testing.T) {
 }
 
 func TestParserNonAssistantMessage(t *testing.T) {
-	jsonl := `{"type":"user","session_id":"sess-123","content":"hello"}`
+	jsonl := `{"type":"user","sessionId":"sess-123","message":{"content":"hello"}}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	event, err := parser.ParseNext()
@@ -51,8 +56,22 @@ func TestParserNonAssistantMessage(t *testing.T) {
 	}
 }
 
+func TestParserMissingMessageObject(t *testing.T) {
+	jsonl := `{"type":"assistant","sessionId":"sess-123"}`
+
+	parser := NewParser(strings.NewReader(jsonl))
+	event, err := parser.ParseNext()
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if event != nil {
+		t.Error("expected nil for assistant line without a message object")
+	}
+}
+
 func TestParserMissingUsage(t *testing.T) {
-	jsonl := `{"type":"assistant","session_id":"sess-123"}`
+	jsonl := `{"type":"assistant","sessionId":"sess-123","message":{"id":"msg-1"}}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	event, err := parser.ParseNext()
@@ -66,7 +85,7 @@ func TestParserMissingUsage(t *testing.T) {
 }
 
 func TestParserMissingRequiredTokens(t *testing.T) {
-	jsonl := `{"type":"assistant","session_id":"sess-123","usage":{"input_tokens":1000}}`
+	jsonl := `{"type":"assistant","sessionId":"sess-123","message":{"usage":{"input_tokens":1000}}}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	event, err := parser.ParseNext()
@@ -106,10 +125,10 @@ func TestParserMalformedJSON(t *testing.T) {
 }
 
 func TestParserMultipleMessages(t *testing.T) {
-	jsonl := `{"type":"user","content":"hello"}
-{"type":"assistant","session_id":"sess-1","message_id":"msg-1","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":100,"output_tokens":50},"timestamp":"2026-04-26T10:00:00Z"}
-{"type":"user","content":"more context"}
-{"type":"assistant","session_id":"sess-1","message_id":"msg-2","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":200,"output_tokens":150},"timestamp":"2026-04-26T10:01:00Z"}`
+	jsonl := `{"type":"user","message":{"content":"hello"}}
+{"type":"assistant","sessionId":"sess-1","message":{"id":"msg-1","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":100,"output_tokens":50}},"timestamp":"2026-04-26T10:00:00Z"}
+{"type":"user","message":{"content":"more context"}}
+{"type":"assistant","sessionId":"sess-1","message":{"id":"msg-2","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":200,"output_tokens":150}},"timestamp":"2026-04-26T10:01:00Z"}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	events := make([]*ParsedEvent, 0)
@@ -138,7 +157,7 @@ func TestParserMultipleMessages(t *testing.T) {
 }
 
 func TestParserCacheTokens(t *testing.T) {
-	jsonl := `{"type":"assistant","session_id":"sess-123","usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":100,"cache_read_input_tokens":50}}`
+	jsonl := `{"type":"assistant","sessionId":"sess-123","message":{"usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":100,"cache_read_input_tokens":50}}}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	event, err := parser.ParseNext()
@@ -159,7 +178,7 @@ func TestParserCacheTokens(t *testing.T) {
 }
 
 func TestParserReportedCost(t *testing.T) {
-	jsonl := `{"type":"assistant","usage":{"input_tokens":1000,"output_tokens":500},"cost_usd":0.05}`
+	jsonl := `{"type":"assistant","message":{"usage":{"input_tokens":1000,"output_tokens":500}},"cost_usd":0.05}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	event, err := parser.ParseNext()
@@ -178,10 +197,10 @@ func TestParserReportedCost(t *testing.T) {
 
 func TestParserEmptyLines(t *testing.T) {
 	jsonl := `
-{"type":"assistant","session_id":"sess-1","usage":{"input_tokens":100,"output_tokens":50}}
+{"type":"assistant","sessionId":"sess-1","message":{"usage":{"input_tokens":100,"output_tokens":50}}}
 
-{"type":"user","content":"hello"}
-{"type":"assistant","session_id":"sess-1","usage":{"input_tokens":200,"output_tokens":100}}`
+{"type":"user","message":{"content":"hello"}}
+{"type":"assistant","sessionId":"sess-1","message":{"usage":{"input_tokens":200,"output_tokens":100}}}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	events := make([]*ParsedEvent, 0)
@@ -203,7 +222,7 @@ func TestParserEmptyLines(t *testing.T) {
 }
 
 func TestParserTimestampParsing(t *testing.T) {
-	jsonl := `{"type":"assistant","usage":{"input_tokens":100,"output_tokens":50},"timestamp":"2026-04-26T15:30:45Z"}`
+	jsonl := `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50}},"timestamp":"2026-04-26T15:30:45Z"}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	event, err := parser.ParseNext()
@@ -222,7 +241,7 @@ func TestParserTimestampParsing(t *testing.T) {
 }
 
 func TestParserDefaultTimestamp(t *testing.T) {
-	jsonl := `{"type":"assistant","usage":{"input_tokens":100,"output_tokens":50}}`
+	jsonl := `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50}}}`
 
 	before := time.Now()
 	parser := NewParser(strings.NewReader(jsonl))
@@ -243,7 +262,7 @@ func TestParserDefaultTimestamp(t *testing.T) {
 }
 
 func TestParserRawJSON(t *testing.T) {
-	expectedJSON := `{"type":"assistant","usage":{"input_tokens":100,"output_tokens":50}}`
+	expectedJSON := `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50}}}`
 
 	parser := NewParser(strings.NewReader(expectedJSON))
 	event, err := parser.ParseNext()
@@ -262,9 +281,9 @@ func TestParserRawJSON(t *testing.T) {
 
 func TestParserErrors(t *testing.T) {
 	jsonl := `{"bad": json}
-{"type":"assistant","usage":{"input_tokens":100}}
+{"type":"assistant","message":{"usage":{"input_tokens":100}}}
 {"valid": "json but no usage"}
-{"type":"assistant","usage":{"input_tokens":200,"output_tokens":50}}`
+{"type":"assistant","message":{"usage":{"input_tokens":200,"output_tokens":50}}}`
 
 	parser := NewParser(strings.NewReader(jsonl))
 	events := make([]*ParsedEvent, 0)
@@ -301,7 +320,7 @@ func TestParserErrors(t *testing.T) {
 }
 
 func BenchmarkParser(b *testing.B) {
-	jsonl := `{"type":"assistant","session_id":"sess-123","message_id":"msg-456","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1000,"output_tokens":500}}`
+	jsonl := `{"type":"assistant","sessionId":"sess-123","message":{"id":"msg-456","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1000,"output_tokens":500}}}`
 
 	for i := 0; i < b.N; i++ {
 		parser := NewParser(strings.NewReader(jsonl))
@@ -313,7 +332,7 @@ func BenchmarkParserLarge(b *testing.B) {
 	// Create a large JSONL with many lines
 	var buf bytes.Buffer
 	for i := 0; i < 100; i++ {
-		buf.WriteString(`{"type":"assistant","session_id":"sess-123","message_id":"msg-456","usage":{"input_tokens":1000,"output_tokens":500}}`)
+		buf.WriteString(`{"type":"assistant","sessionId":"sess-123","message":{"id":"msg-456","usage":{"input_tokens":1000,"output_tokens":500}}}`)
 		buf.WriteString("\n")
 	}
 

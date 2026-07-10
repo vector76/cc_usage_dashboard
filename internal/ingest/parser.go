@@ -115,7 +115,17 @@ func (p *Parser) parseLine(line []byte) (*ParsedEvent, error) {
 		return nil, nil
 	}
 
-	usage, ok := msg["usage"].(map[string]interface{})
+	// Real Claude Code transcripts nest model/id/usage under a top-level
+	// "message" object, with "sessionId" (camelCase) as a sibling — the same
+	// shape cmd/clusage-cli/hook.go parses. A flat mock schema never matches
+	// a real transcript, so this nesting must be resolved before usage can
+	// be found at all.
+	innerMsg, ok := msg["message"].(map[string]interface{})
+	if !ok {
+		return nil, nil
+	}
+
+	usage, ok := innerMsg["usage"].(map[string]interface{})
 	if !ok {
 		return nil, nil // No usage block
 	}
@@ -134,15 +144,15 @@ func (p *Parser) parseLine(line []byte) (*ParsedEvent, error) {
 	}
 
 	// Extract optional fields
-	if sessionID, ok := msg["session_id"].(string); ok {
+	if sessionID, ok := msg["sessionId"].(string); ok {
 		event.SessionID = sessionID
 	}
 
-	if messageID, ok := msg["message_id"].(string); ok {
+	if messageID, ok := innerMsg["id"].(string); ok {
 		event.MessageID = messageID
 	}
 
-	if model, ok := msg["model"].(string); ok {
+	if model, ok := innerMsg["model"].(string); ok {
 		event.Model = model
 	}
 

@@ -172,6 +172,39 @@ func (t *Tailer) CaughtUp() bool {
 	return t.caughtUp.Load()
 }
 
+// Reimport wipes every persisted tailer offset and re-walks this tailer's
+// root from byte 0 for every file found. Recovery-only, for suspected data
+// loss or corruption — not routine use.
+//
+// A byte offset records how far a file was *read*, not whether the lines
+// in that range actually produced a usage_event. A parser bug (or any
+// other silent extraction failure) can leave an offset sitting at EOF for
+// content that was never successfully recorded, with no per-line marker
+// to say which lines those were — so there's no way to selectively repair
+// "just the missing ones" without knowing in advance which files/sessions
+// are affected. Reimport instead re-reads everything from scratch and
+// leans entirely on the UNIQUE(session_id, message_id) constraint (see the
+// idempotent-skip branch in processFile) to discard whatever was already
+// correctly recorded. Slow and wasteful by design — that redundant work is
+// the acceptable cost of guaranteeing recovery without per-file guesswork.
+//
+// Wipes ALL persisted offsets globally (not just paths this tailer already
+// knows about in memory), so calling Reimport on any one tailer in a
+// multi-tailer setup clears the shared table; every tailer's next poll
+// still only re-walks its own root.
+func (t *Tailer) Reimport() {
+	if _, err := t.store.DeleteAllTailerOffsets(); err != nil {
+		slog.Error("reimport: failed to clear persisted offsets", "err", err)
+		return
+	}
+	t.offsetMu.Lock()
+	t.offsets = make(map[string]int64)
+	t.offsetMu.Unlock()
+	slog.Info("reimport: offsets cleared, re-walking from scratch", "path", t.projectsDir)
+	t.pollOnce()
+	slog.Info("reimport: initial re-walk complete", "path", t.projectsDir)
+}
+
 // refreshCaughtUp recomputes the caught-up flag by comparing each tracked
 // file's persisted offset against its current size.
 func (t *Tailer) refreshCaughtUp() {
@@ -310,9 +343,19 @@ func (t *Tailer) processFile(filePath string) {
 				input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 				cost_usd_equivalent, cost_source, model, raw_json
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`, event.OccurredAt, "tailer", event.SessionID, event.MessageID, event.ProjectPath,
+		`, store.FormatTime(event.OccurredAt), "tailer", event.SessionID, event.MessageID, event.ProjectPath,
 			event.InputTokens, event.OutputTokens, event.CacheCreationTokens, event.CacheReadTokens,
 			cost, costSource, event.Model, event.RawJSON); err != nil {
+			// A UNIQUE-constraint violation on (session_id, message_id) is
+			// the expected steady state, not a failure: the hook (or the
+			// other tailer root) already recorded this exact message. See
+			// the matching branch in server.go's handleLog — same
+			// idempotency contract, same reason not to log at error level
+			// or leave a permanent parse_errors row behind.
+			if store.IsUniqueConstraintViolation(err) {
+				slog.Debug("usage event already present (idempotent re-read)", "path", filePath, "session_id", event.SessionID, "message_id", event.MessageID)
+				continue
+			}
 			slog.Error("failed to insert event", "path", filePath, "err", err)
 			if _, perr := tx.Exec(
 				`INSERT INTO parse_errors (occurred_at, source, reason, payload) VALUES (?, ?, ?, ?)`,
