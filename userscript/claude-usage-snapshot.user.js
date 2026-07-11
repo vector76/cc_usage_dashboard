@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.7.2
+// @version      0.8.0
 // @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -86,7 +86,7 @@
     // Design, Routines, …); section names move occasionally too. We match
     // any of the known variants as a prefix so a trailing plan-tier badge
     // ("Your usage limitsTeam", "Plan usage limitsMax (20x)") doesn't break
-    // extraction. The first progressbar following each heading is the one
+    // extraction. The first usage bar following each heading is the one
     // we keep.
     //
     // Known session-heading history:
@@ -265,9 +265,28 @@
         return isUsageRoute(location.pathname, location.hash);
     }
 
+    // ---------- usage-bar recognition (mirror of userscript/lib/bars.js) ----------
+    //
+    // Markup history (see lib/bars.js for the full rationale):
+    //   - Through early July 2026 each usage bar was
+    //     <div role="progressbar" aria-label="Usage" aria-valuenow="…">.
+    //   - As of July 2026 the page uses a design-system Meter component:
+    //     <div data-cds="Meter"><div role="meter" aria-valuenow="…"
+    //     aria-labelledby="…"> — role changed to "meter", no aria-label.
+    // The "Usage credits" meter also matches; section-heading anchoring in
+    // extractQuota discards it because its heading matches neither section.
+
+    const USAGE_BAR_SELECTOR =
+        '[role="progressbar"][aria-label="Usage"], [role="meter"][aria-valuenow]';
+
+    function isUsageBarTarget(role, ariaLabel) {
+        if (role === 'meter') return true;
+        return role === 'progressbar' && ariaLabel === 'Usage';
+    }
+
     // ---------- DOM extraction ----------
 
-    // For each progressbar, the most recent <h2> in document order tells us
+    // For each usage bar, the most recent <h2> in document order tells us
     // which section it belongs to. This is robust to row-label edits and to
     // the order of sub-rows within a section.
     function precedingHeading(bar, headings) {
@@ -282,7 +301,7 @@
         return result;
     }
 
-    // Walk up from a progressbar to locate the row's reset hint. The label
+    // Walk up from a usage bar to locate the row's reset hint. The label
     // column for each row carries text like "Resets in 19 min" or
     // "Resets Thu 11:00 PM" or "Resets May 1". Anthropic has shipped this
     // hint inside <p>, <span>, and <div> elements at various points, so
@@ -413,7 +432,7 @@
         // so a trailing badge or rename doesn't break extraction.
         const headings = Array.from(document.querySelectorAll('h2, h3'))
             .map(h => ({ node: h, text: (h.textContent || '').trim() }));
-        const bars = document.querySelectorAll('[role="progressbar"][aria-label="Usage"]');
+        const bars = document.querySelectorAll(USAGE_BAR_SELECTOR);
 
         const lastUpdatedAgeMs = findLastUpdatedAgeMs();
         const observedAtMs = Date.now() - (lastUpdatedAgeMs || 0);
@@ -482,7 +501,8 @@
                 heading_count: headings.length,
                 heading_texts: headings,
                 progressbar_count: document.querySelectorAll('[role="progressbar"]').length,
-                usage_progressbar_count: document.querySelectorAll('[role="progressbar"][aria-label="Usage"]').length,
+                meter_count: document.querySelectorAll('[role="meter"]').length,
+                usage_bar_count: document.querySelectorAll(USAGE_BAR_SELECTOR).length,
                 user_agent_short: (navigator.userAgent || '').slice(0, 120),
             };
             return JSON.stringify(fp);
@@ -595,7 +615,8 @@
             for (const m of mutations) {
                 if (m.type !== 'attributes' || m.attributeName !== 'aria-valuenow') continue;
                 const t = m.target;
-                if (t && t.getAttribute && t.getAttribute('aria-label') === 'Usage') {
+                if (t && t.getAttribute &&
+                    isUsageBarTarget(t.getAttribute('role'), t.getAttribute('aria-label'))) {
                     scheduleDispatch();
                     return;
                 }
@@ -618,7 +639,7 @@
             try { onReady(); } catch (e) { warn('onReady threw', e); }
         };
 
-        const check = () => document.querySelector('[role="progressbar"][aria-label="Usage"]') !== null;
+        const check = () => document.querySelector(USAGE_BAR_SELECTOR) !== null;
         if (check()) { fire(); return; }
 
         let observer = null;

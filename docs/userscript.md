@@ -17,9 +17,18 @@ permissions — none needed for this use case.
 The script is `@match`-injected on every `claude.ai/*` page but no-ops unless the URL
 path is exactly `/settings/usage`. On that path:
 
-1. Wait for at least one `[role="progressbar"][aria-label="Usage"]` node to render
-   (MutationObserver, with a sane timeout).
-2. **Anchor on section headings, not row labels.** For each progressbar, find
+1. Wait for at least one usage-bar node to render (MutationObserver, with a
+   sane timeout). A usage bar is matched by `USAGE_BAR_SELECTOR`
+   (`userscript/lib/bars.js`), which accepts both markup generations
+   Anthropic has shipped:
+   - `[role="progressbar"][aria-label="Usage"]` — through early July 2026.
+   - `[role="meter"][aria-valuenow]` — the design-system Meter component
+     (`data-cds="Meter"`) introduced July 2026. It carries no `aria-label`;
+     its accessible name comes from `aria-labelledby` pointing at the row
+     label. The "Usage credits" section renders its own `role="meter"` bar,
+     which matches the selector but is discarded by the section-heading
+     anchoring below.
+2. **Anchor on section headings, not row labels.** For each usage bar, find
    the most recent preceding `<h2>` or `<h3>` in document order (Anthropic
    has used both in different revisions). Section names are matched as a
    *prefix* against a list of known variants — a heading whose text starts
@@ -256,7 +265,7 @@ The userscript must:
 - Tolerate DOM changes. If the expected nodes are missing for >N seconds, post a
   `parse_error` payload to the local server (separate endpoint) so the trayapp can
   surface "userscript broke, please update" in the tray UI. The payload is a
-  structured **fingerprint** (heading texts, progressbar counts, pathname) — not
+  structured **fingerprint** (heading texts, progressbar/meter counts, pathname) — not
   raw page HTML — so conversation content and account names never leave the
   browser.
 

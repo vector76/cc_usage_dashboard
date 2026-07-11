@@ -119,10 +119,12 @@ failure means that turn is lost. See the failure-modes table below.
 ### Snapshot recalibration
 
 1. User opens `https://claude.ai/settings/usage` in the host browser.
-2. Userscript reads the two structured progressbars Anthropic exposes:
-   "Current session" and "All models". Each has an `aria-valuenow` attribute
-   (0–100) and a row label `<p>` we match against. Other rows ("Sonnet only",
-   "Claude Design", routine runs, extra usage) are intentionally ignored.
+2. Userscript reads the two structured usage bars Anthropic exposes
+   ("Current session" and "All models"; `role="progressbar"` historically,
+   `role="meter"` since July 2026 — see `docs/userscript.md`). Each has an
+   `aria-valuenow` attribute (0–100) and is attributed to its section by the
+   nearest preceding heading. Other rows (per-model sub-rows, routine runs,
+   extra usage) are intentionally ignored.
 3. Userscript POSTs `/snapshot` with `session_used` and/or `weekly_used`
    percentages — see `docs/userscript.md`.
 4. Trayapp inserts into `quota_snapshots` and uses the value to set or correct
