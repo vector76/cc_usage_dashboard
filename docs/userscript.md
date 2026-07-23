@@ -186,8 +186,18 @@ matters. The constants are named (`WALL_CLOCK_GAP_MS`, `WINDOW_ENDS_JUMP_MS`)
 so they are tunable; the values listed are the current defaults.
 
 The server uses the flag for write-time plateau compaction (see
-`docs/data-model.md`) and the dashboard uses it to decide where to break the
-burn-down polyline (see `docs/overview.md`).
+`docs/data-model.md`) and the dashboard uses it as one of two inputs when
+deciding where to break the burn-down polyline (see `docs/overview.md`).
+
+Note the scope limit: `observation.percent` here is the **session** percent, so
+the flag speaks only to session continuity. A weekly reset typically lands while
+the session bar sits at 0, making rule 3 a no-op (`0 < 0` is false) and leaving
+the flag true across the discontinuity. Rather than add a second per-quota flag —
+which would need a schema change and could never repair snapshots already on disk
+— the renderer independently breaks on a strict decrease in whichever percentage
+it is plotting. Do not "fix" this by widening `decideContinuity` to consider the
+weekly or Fable percent: one flag cannot describe continuity for three curves at
+once, and a false value here also suppresses write-time plateau compaction.
 
 ### Visibility-API spoof
 
