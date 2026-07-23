@@ -195,3 +195,44 @@ test('regression: limbo with rolling 0 and cur 0 (steady-state "just now") → s
     });
     assert.strictEqual(shouldSend(obs, state, 0), 'skip');
 });
+
+// ---------- Fable weekly sub-row ----------
+
+test('fable percent ticks while the session bar is frozen → send', () => {
+    // The case the session-percent check cannot catch: Fable's cap is
+    // tighter than the session window's, so it gains whole points while
+    // the session bar is still rounding to the same integer.
+    const state = makeState({ lastFablePercent: 77 });
+    const obs = makeObservation({ fableWeeklyUsed: 78 });
+    assert.strictEqual(shouldSend(obs, state, null), 'send');
+});
+
+test('fable percent unchanged alongside a frozen page → skip', () => {
+    const state = makeState({ lastFablePercent: 77 });
+    const obs = makeObservation({ fableWeeklyUsed: 77 });
+    assert.strictEqual(shouldSend(obs, state, null), 'skip');
+});
+
+test('page with no fable row, state from before the field existed → skip', () => {
+    // The upgrade path. A stored record predating the field has no key at
+    // all; a page without the row extracts null. These must compare equal
+    // or the 60-second backstop would POST on every fire, forever.
+    const state = makeState();
+    delete state.lastFablePercent;
+    const obs = makeObservation({ fableWeeklyUsed: null });
+    assert.strictEqual(shouldSend(obs, state, null), 'skip');
+});
+
+test('fable row appearing for the first time → send', () => {
+    const state = makeState({ lastFablePercent: null });
+    const obs = makeObservation({ fableWeeklyUsed: 12 });
+    assert.strictEqual(shouldSend(obs, state, null), 'send');
+});
+
+test('fable row disappearing (extractor break or plan change) → send', () => {
+    // Worth a datapoint: the transition is exactly when the server should
+    // stop inheriting the previous value onto a slid row.
+    const state = makeState({ lastFablePercent: 77 });
+    const obs = makeObservation({ fableWeeklyUsed: null });
+    assert.strictEqual(shouldSend(obs, state, null), 'send');
+});

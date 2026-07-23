@@ -22,10 +22,31 @@
 // into ../claude-usage-snapshot.user.js so Tampermonkey runs without
 // a build step; tests load it via require() from here.
 
+// Normalizes absent-ness so a missing key and an explicit null compare
+// equal. Without this, a page with no Fable row (observation → null) read
+// against a state record written before the field existed (undefined) would
+// differ on every single trigger and defeat the dedup entirely.
+function _absentAsNull(v) {
+    return v === undefined ? null : v;
+}
+
 function shouldSend(observation, prevState, lastObservedAgeMs) {
     if (!prevState) return 'send';
 
     if (observation.sessionUsed !== prevState.lastPercent) return 'send';
+
+    // The Fable weekly sub-row gets its own signal; the weekly aggregate
+    // deliberately does not. The aggregate's denominator is larger than the
+    // session window's, so it cannot advance a whole point without the
+    // session percent advancing first — the session check already covers
+    // it. Fable inverts that: its cap is visibly tighter (77% used against
+    // the aggregate's 44% on the same page), so it gains points faster than
+    // the session bar and can tick while the session percent is still
+    // rounding to the same integer. Without this check those observations
+    // would be dropped at the gate and never reach the chart.
+    if (_absentAsNull(observation.fableWeeklyUsed) !== _absentAsNull(prevState.lastFablePercent)) {
+        return 'send';
+    }
 
     if (observation.resetText !== prevState.lastResetText) return 'send';
 

@@ -29,8 +29,8 @@ func TestOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("expected schema version 6, got %d", version)
+	if version != len(migrations) {
+		t.Errorf("expected schema version %d, got %d", len(migrations), version)
 	}
 }
 
@@ -163,8 +163,8 @@ func TestMigrateFromV3AddsSessionActive(t *testing.T) {
 	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("expected schema version 6 after migrating, got %d", version)
+	if version != len(saved) {
+		t.Errorf("expected schema version %d after migrating, got %d", len(saved), version)
 	}
 	if !columnExists(t, db, "quota_snapshots", "session_active") {
 		t.Fatalf("session_active column missing after migration")
@@ -223,8 +223,8 @@ func TestMigrateFromV4AddsContinuousWithPrev(t *testing.T) {
 	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("expected schema version 6 after migrating, got %d", version)
+	if version != len(saved) {
+		t.Errorf("expected schema version %d after migrating, got %d", len(saved), version)
 	}
 	if !columnExists(t, db, "quota_snapshots", "continuous_with_prev") {
 		t.Fatalf("continuous_with_prev column missing after migration")
@@ -281,8 +281,8 @@ func TestMigrateFromV5AddsWeeklyActive(t *testing.T) {
 	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
 		t.Fatalf("failed to query schema version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("expected schema version 6 after migrating, got %d", version)
+	if version != len(saved) {
+		t.Errorf("expected schema version %d after migrating, got %d", len(saved), version)
 	}
 	if !columnExists(t, db, "quota_snapshots", "weekly_active") {
 		t.Fatalf("weekly_active column missing after migration")
@@ -819,49 +819,73 @@ func TestInsertQuotaSnapshotSlideSuppressedPerField(t *testing.T) {
 	sessionEnds := base.Add(5 * time.Hour)
 	weeklyEnds := base.Add(7 * 24 * time.Hour)
 
+	// plateau is the record every arrival starts from; each case perturbs
+	// exactly one match field and asserts the slide is suppressed.
+	plateau := func() QuotaSnapshotRecord {
+		sEnds, wEnds := sessionEnds, weeklyEnds
+		return QuotaSnapshotRecord{
+			Source:             "userscript",
+			SessionUsed:        floatPtr(25.0),
+			SessionWindowEnds:  &sEnds,
+			WeeklyUsed:         floatPtr(40.0),
+			WeeklyWindowEnds:   &wEnds,
+			FableWeeklyUsed:    floatPtr(77.0),
+			SessionActive:      boolPtr(true),
+			WeeklyActive:       boolPtr(true),
+			ContinuousWithPrev: boolPtr(true),
+			RawJSON:            `{}`,
+		}
+	}
+
 	cases := []struct {
 		name string
-		// mutate produces the new arrival's match fields starting from the
-		// plateau values.
-		mutate func() (sUsed *float64, sEnds *time.Time, wUsed *float64, wEnds *time.Time, sActive, wActive *bool)
+		// mutate perturbs one match field on the new arrival.
+		mutate func(r *QuotaSnapshotRecord)
 	}{
 		{
-			name: "session_used",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
-				return floatPtr(26.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true), boolPtr(true)
-			},
+			name:   "session_used",
+			mutate: func(r *QuotaSnapshotRecord) { r.SessionUsed = floatPtr(26.0) },
 		},
 		{
-			name: "weekly_used",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
-				return floatPtr(25.0), &sessionEnds, floatPtr(41.0), &weeklyEnds, boolPtr(true), boolPtr(true)
-			},
+			name:   "weekly_used",
+			mutate: func(r *QuotaSnapshotRecord) { r.WeeklyUsed = floatPtr(41.0) },
+		},
+		{
+			// The load-bearing case for the fable series: the aggregate
+			// weekly row is unmoved and only Fable ticks. Without
+			// fable_weekly_used in the match set this arrival would slide
+			// onto the previous row and the observation would be lost.
+			name:   "fable_weekly_used",
+			mutate: func(r *QuotaSnapshotRecord) { r.FableWeeklyUsed = floatPtr(78.0) },
+		},
+		{
+			// Absent-vs-present must also break the plateau, so a userscript
+			// that stops reporting the row (or a page that stops rendering
+			// it) anchors a new row rather than inheriting the old value.
+			name:   "fable_weekly_used_to_null",
+			mutate: func(r *QuotaSnapshotRecord) { r.FableWeeklyUsed = nil },
 		},
 		{
 			name: "session_window_ends",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
+			mutate: func(r *QuotaSnapshotRecord) {
 				newEnds := sessionEnds.Add(1 * time.Minute)
-				return floatPtr(25.0), &newEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true), boolPtr(true)
+				r.SessionWindowEnds = &newEnds
 			},
 		},
 		{
 			name: "weekly_window_ends",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
+			mutate: func(r *QuotaSnapshotRecord) {
 				newEnds := weeklyEnds.Add(1 * time.Minute)
-				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &newEnds, boolPtr(true), boolPtr(true)
+				r.WeeklyWindowEnds = &newEnds
 			},
 		},
 		{
-			name: "session_active",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
-				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(false), boolPtr(true)
-			},
+			name:   "session_active",
+			mutate: func(r *QuotaSnapshotRecord) { r.SessionActive = boolPtr(false) },
 		},
 		{
-			name: "weekly_active",
-			mutate: func() (*float64, *time.Time, *float64, *time.Time, *bool, *bool) {
-				return floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds, boolPtr(true), boolPtr(false)
-			},
+			name:   "weekly_active",
+			mutate: func(r *QuotaSnapshotRecord) { r.WeeklyActive = boolPtr(false) },
 		},
 	}
 
@@ -870,27 +894,25 @@ func TestInsertQuotaSnapshotSlideSuppressedPerField(t *testing.T) {
 			store := createTestStore(t)
 			defer store.Close()
 
-			if _, err := store.InsertQuotaSnapshot(
-				base, base, "userscript",
-				floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-				boolPtr(true), boolPtr(true), boolPtr(false), `{}`,
-			); err != nil {
+			start := plateau()
+			start.ObservedAt, start.ReceivedAt = base, base
+			start.ContinuousWithPrev = boolPtr(false)
+			if _, err := store.InsertQuotaSnapshotRecord(start); err != nil {
 				t.Fatalf("insert start: %v", err)
 			}
-			if _, err := store.InsertQuotaSnapshot(
-				base.Add(1*time.Minute), base.Add(1*time.Minute), "userscript",
-				floatPtr(25.0), &sessionEnds, floatPtr(40.0), &weeklyEnds,
-				boolPtr(true), boolPtr(true), boolPtr(true), `{}`,
-			); err != nil {
+
+			seed := plateau()
+			seed.ObservedAt = base.Add(1 * time.Minute)
+			seed.ReceivedAt = seed.ObservedAt
+			if _, err := store.InsertQuotaSnapshotRecord(seed); err != nil {
 				t.Fatalf("insert plateau seed: %v", err)
 			}
 
-			sUsed, sEnds, wUsed, wEnds, sActive, wActive := tc.mutate()
-			if _, err := store.InsertQuotaSnapshot(
-				base.Add(2*time.Minute), base.Add(2*time.Minute), "userscript",
-				sUsed, sEnds, wUsed, wEnds,
-				sActive, wActive, boolPtr(true), `{}`,
-			); err != nil {
+			next := plateau()
+			next.ObservedAt = base.Add(2 * time.Minute)
+			next.ReceivedAt = next.ObservedAt
+			tc.mutate(&next)
+			if _, err := store.InsertQuotaSnapshotRecord(next); err != nil {
 				t.Fatalf("insert differing continuation: %v", err)
 			}
 
@@ -902,6 +924,180 @@ func TestInsertQuotaSnapshotSlideSuppressedPerField(t *testing.T) {
 				t.Errorf("differing %s should suppress slide; expected 3 rows, got %d", tc.name, count)
 			}
 		})
+	}
+}
+
+// A plateau that is identical in every field — fable included — must still
+// compact. This is the counterweight to the per-field suppression table
+// above: adding fable_weekly_used to the match set must not break the slide
+// for genuinely unchanged arrivals.
+func TestInsertQuotaSnapshotSlidesWhenFableAlsoUnchanged(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	sessionEnds := base.Add(5 * time.Hour)
+	weeklyEnds := base.Add(3 * 24 * time.Hour)
+
+	rec := func(observed time.Time, continuous bool) QuotaSnapshotRecord {
+		sEnds, wEnds := sessionEnds, weeklyEnds
+		return QuotaSnapshotRecord{
+			ObservedAt: observed, ReceivedAt: observed,
+			Source:            "userscript",
+			SessionUsed:       floatPtr(27.0),
+			SessionWindowEnds: &sEnds,
+			WeeklyUsed:        floatPtr(44.0),
+			WeeklyWindowEnds:  &wEnds,
+			FableWeeklyUsed:   floatPtr(77.0),
+			// Keep the active flags nil: this test is about the numeric
+			// columns, and nil-vs-nil must compare equal.
+			ContinuousWithPrev: boolPtr(continuous),
+			RawJSON:            `{}`,
+		}
+	}
+
+	// Anchor (an explicit start) plus one continuation: the slide refuses to
+	// land on an explicit-start row, so the plateau needs a seed before a
+	// compaction can be observed.
+	if _, err := store.InsertQuotaSnapshotRecord(rec(base, false)); err != nil {
+		t.Fatalf("insert anchor: %v", err)
+	}
+	seedID, err := store.InsertQuotaSnapshotRecord(rec(base.Add(1*time.Minute), true))
+	if err != nil {
+		t.Fatalf("insert plateau seed: %v", err)
+	}
+
+	slidID, err := store.InsertQuotaSnapshotRecord(rec(base.Add(2*time.Minute), true))
+	if err != nil {
+		t.Fatalf("insert identical continuation: %v", err)
+	}
+	if slidID != seedID {
+		t.Fatalf("identical continuation should slide onto the seed row (id=%d), got id=%d", seedID, slidID)
+	}
+
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&count); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("identical plateau should compact onto the seed; expected 2 rows, got %d", count)
+	}
+
+	var observedAt time.Time
+	if err := store.db.QueryRow(`
+		SELECT observed_at FROM quota_snapshots WHERE id = ?
+	`, slidID).Scan(&observedAt); err != nil {
+		t.Fatalf("read slid row: %v", err)
+	}
+	if !observedAt.Equal(base.Add(2 * time.Minute)) {
+		t.Errorf("observed_at should slide to the arrival time, got %s", observedAt)
+	}
+}
+
+func TestMigrateFromV6AddsFableWeeklyUsed(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("failed to open memory DB: %v", err)
+	}
+	defer db.Close()
+
+	saved := migrations
+	defer func() { migrations = saved }()
+	migrations = saved[:6]
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("failed to apply v1-v6 migrations: %v", err)
+	}
+	if columnExists(t, db, "quota_snapshots", "fable_weekly_used") {
+		t.Fatalf("fable_weekly_used column should not exist before migration")
+	}
+
+	// A row written under the old schema — this is what every pre-existing
+	// production row looks like. It must survive the migration with a NULL
+	// fable value, not a zero, so the dashboard renders no fable line over
+	// history rather than a false flat-line at 0%.
+	now := time.Now()
+	if _, err := db.Exec(`
+		INSERT INTO quota_snapshots (observed_at, received_at, source, weekly_used, raw_json)
+		VALUES (?, ?, ?, ?, ?)
+	`, FormatTime(now), FormatTime(now), "userscript", 44.0, "{}"); err != nil {
+		t.Fatalf("insert pre-migration row: %v", err)
+	}
+
+	migrations = saved
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("failed to apply v7 migration: %v", err)
+	}
+
+	var version int
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != len(saved) {
+		t.Errorf("expected schema version %d after migrating, got %d", len(saved), version)
+	}
+	if !columnExists(t, db, "quota_snapshots", "fable_weekly_used") {
+		t.Fatalf("fable_weekly_used column missing after migration")
+	}
+
+	var fable sql.NullFloat64
+	var weekly sql.NullFloat64
+	if err := db.QueryRow(`
+		SELECT fable_weekly_used, weekly_used FROM quota_snapshots LIMIT 1
+	`).Scan(&fable, &weekly); err != nil {
+		t.Fatalf("select failed: %v", err)
+	}
+	if fable.Valid {
+		t.Errorf("pre-migration row should have NULL fable_weekly_used, got %v", fable.Float64)
+	}
+	if !weekly.Valid || weekly.Float64 != 44.0 {
+		t.Errorf("migration should preserve existing weekly_used, got %+v", weekly)
+	}
+}
+
+func TestInsertQuotaSnapshotFableRoundTrip(t *testing.T) {
+	store := createTestStore(t)
+	defer store.Close()
+
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+
+	fableID, err := store.InsertQuotaSnapshotRecord(QuotaSnapshotRecord{
+		ObservedAt: base, ReceivedAt: base,
+		Source:          "userscript",
+		WeeklyUsed:      floatPtr(44.0),
+		FableWeeklyUsed: floatPtr(77.0),
+		RawJSON:         `{}`,
+	})
+	if err != nil {
+		t.Fatalf("insert with fable: %v", err)
+	}
+
+	var got sql.NullFloat64
+	if err := store.db.QueryRow(`
+		SELECT fable_weekly_used FROM quota_snapshots WHERE id = ?
+	`, fableID).Scan(&got); err != nil {
+		t.Fatalf("read back fable: %v", err)
+	}
+	if !got.Valid || got.Float64 != 77.0 {
+		t.Errorf("fable_weekly_used = %+v, want 77", got)
+	}
+
+	// The legacy positional signature has no fable argument; it must write
+	// NULL rather than inheriting or zero-filling the column.
+	legacyID, err := store.InsertQuotaSnapshot(
+		base.Add(time.Hour), base.Add(time.Hour), "userscript",
+		floatPtr(30.0), nil, floatPtr(45.0), nil,
+		nil, nil, boolPtr(false), `{}`,
+	)
+	if err != nil {
+		t.Fatalf("legacy insert: %v", err)
+	}
+	if err := store.db.QueryRow(`
+		SELECT fable_weekly_used FROM quota_snapshots WHERE id = ?
+	`, legacyID).Scan(&got); err != nil {
+		t.Fatalf("read back legacy fable: %v", err)
+	}
+	if got.Valid {
+		t.Errorf("legacy insert should leave fable_weekly_used NULL, got %v", got.Float64)
 	}
 }
 

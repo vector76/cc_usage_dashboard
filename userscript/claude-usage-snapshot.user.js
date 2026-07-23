@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.8.0
-// @description  Reads "Current session" and "All models" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
+// @version      0.9.0
+// @description  Reads "Current session", "All models", and "Fable" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
 // @grant        GM.xmlHttpRequest
@@ -95,6 +95,18 @@
     const SESSION_HEADINGS = ['Your usage limits', 'Plan usage limits'];
     const WEEKLY_HEADING = 'Weekly limits';
 
+    // Mirror of userscript/lib/rows.js — see there for why the per-model
+    // Fable sub-row has to be matched by label while every other row we
+    // read is selected positionally. Edit both together.
+    const FABLE_ROW_LABEL_PREFIXES = ['fable'];
+
+    function isFableRowLabel(label) {
+        if (typeof label !== 'string') return false;
+        const t = label.trim().toLowerCase();
+        if (!t) return false;
+        return FABLE_ROW_LABEL_PREFIXES.some(p => t.startsWith(p));
+    }
+
     // Coalesce burst mutations (multiple bars updating in one React commit)
     // into a single dispatch.
     const DISPATCH_DEBOUNCE_MS = 250;
@@ -131,6 +143,10 @@
                 lastPercent: parsed.lastPercent,
                 lastResetText: parsed.lastResetText,
                 lastWindowEndsMs: parsed.lastWindowEndsMs,
+                // Records written before the Fable row existed have no such
+                // key. Normalize to null on read so the dedup comparison
+                // sees "absent" rather than undefined.
+                lastFablePercent: parsed.lastFablePercent === undefined ? null : parsed.lastFablePercent,
             };
             if (parsed.lastSessionActive !== undefined) result.lastSessionActive = parsed.lastSessionActive;
             if (parsed.lastWeeklyActive !== undefined) result.lastWeeklyActive = parsed.lastWeeklyActive;
@@ -140,7 +156,7 @@
         }
     }
 
-    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive, weeklyActive }) {
+    function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive, weeklyActive, fablePercent }) {
         try {
             const storage = (typeof globalThis !== 'undefined' && globalThis.localStorage) || null;
             if (!storage) return;
@@ -149,6 +165,9 @@
                 lastPercent: percent,
                 lastResetText: resetText,
                 lastWindowEndsMs: windowEndsMs,
+                // Always written (null when the row is absent) so the dedup
+                // comparison has a stable reference on both sides.
+                lastFablePercent: fablePercent === undefined ? null : fablePercent,
             };
             if (sessionActive !== undefined) record.lastSessionActive = sessionActive;
             if (weeklyActive !== undefined) record.lastWeeklyActive = weeklyActive;
@@ -186,10 +205,26 @@
     // `lastObservedAgeMs` so the body is textually identical to the
     // single source of truth in userscript/lib/dedup.js; the shadow is
     // local to this function and the module-level binding is unchanged.
+    // Absent-ness normalizer: a missing key and an explicit null must
+    // compare equal, or a page with no Fable row read against a pre-Fable
+    // state record would differ on every trigger and defeat the dedup.
+    function _absentAsNull(v) {
+        return v === undefined ? null : v;
+    }
+
     function shouldSend(observation, prevState, lastObservedAgeMs) {
         if (!prevState) return 'send';
 
         if (observation.sessionUsed !== prevState.lastPercent) return 'send';
+
+        // Fable gets its own signal because its cap is tighter than the
+        // session window's, so it can gain a whole point while the session
+        // bar is still rounding to the same integer. The weekly aggregate
+        // needs no such check: its denominator is larger than the session's,
+        // so it cannot advance without the session percent advancing first.
+        if (_absentAsNull(observation.fableWeeklyUsed) !== _absentAsNull(prevState.lastFablePercent)) {
+            return 'send';
+        }
 
         if (observation.resetText !== prevState.lastResetText) return 'send';
 
@@ -299,6 +334,26 @@
             }
         }
         return result;
+    }
+
+    // Resolve a usage bar's accessible name. The July 2026 Meter markup
+    // carries no aria-label; the name comes from aria-labelledby pointing at
+    // the row-label span (possibly several ids, space-separated, per ARIA).
+    // Falls back to aria-label for the legacy progressbar generation, and
+    // returns null when neither resolves — callers must treat that as
+    // "unknown row", never as a match.
+    function resolveBarLabel(bar) {
+        const ids = (bar.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+        if (ids.length) {
+            const parts = [];
+            for (const id of ids) {
+                const node = document.getElementById(id);
+                if (node) parts.push((node.textContent || '').trim());
+            }
+            const joined = parts.join(' ').trim();
+            if (joined) return joined;
+        }
+        return bar.getAttribute('aria-label');
     }
 
     // Walk up from a usage bar to locate the row's reset hint. The label
@@ -437,7 +492,7 @@
         const lastUpdatedAgeMs = findLastUpdatedAgeMs();
         const observedAtMs = Date.now() - (lastUpdatedAgeMs || 0);
 
-        let sessionUsed = null, weeklyUsed = null;
+        let sessionUsed = null, weeklyUsed = null, fableWeeklyUsed = null;
         let sessionEnds = null, weeklyEnds = null;
         let sessionActive;
         let weeklyActive;
@@ -455,19 +510,36 @@
                 sessionResetText = findRowResetText(bar);
                 sessionEnds = parseSessionEnds(sessionResetText, observedAtMs);
                 if (isLimboLabel(bar)) sessionActive = false;
-            } else if (heading.startsWith(WEEKLY_HEADING) && weeklyUsed === null) {
-                weeklyUsed = value;
-                // Weekly hint is an absolute clock time ("Resets Thu 11:00 PM"),
-                // so page staleness doesn't shift it.
-                weeklyEnds = parseWeeklyEnds(findRowResetText(bar));
-                if (isLimboLabel(bar)) weeklyActive = false;
+            } else if (heading.startsWith(WEEKLY_HEADING)) {
+                // The weekly section holds an aggregate row plus per-model
+                // sub-rows. Fable is claimed by label; the aggregate stays
+                // positional (first non-Fable bar in the section), so a label
+                // rename can only ever cost us the fable series, never the
+                // weekly line. Checking the label first also means we stay
+                // correct if Anthropic ever renders Fable above "All models".
+                if (isFableRowLabel(resolveBarLabel(bar))) {
+                    if (fableWeeklyUsed === null) fableWeeklyUsed = value;
+                } else if (weeklyUsed === null) {
+                    weeklyUsed = value;
+                    // Weekly hint is an absolute clock time ("Resets Thu 11:00 PM"),
+                    // so page staleness doesn't shift it.
+                    weeklyEnds = parseWeeklyEnds(findRowResetText(bar));
+                    if (isLimboLabel(bar)) weeklyActive = false;
+                }
             }
         }
 
+        // The Fable row alone is not enough to call the page parsed: it is an
+        // optional sub-row, so treating it as sufficient would suppress the
+        // parse-error report that fires when the rows we actually depend on
+        // have gone missing.
         if (sessionUsed === null && weeklyUsed === null) return null;
         return {
             sessionUsed,
             weeklyUsed,
+            // Null when the row is absent — the account's plan may not show
+            // it, and it did not exist at all before July 2026.
+            fableWeeklyUsed,
             sessionWindowEnds: sessionEnds,
             weeklyWindowEnds: weeklyEnds,
             sessionActive,
@@ -521,6 +593,12 @@
         };
         if (extracted.sessionUsed !== null) body.session_used = extracted.sessionUsed;
         if (extracted.weeklyUsed !== null) body.weekly_used = extracted.weeklyUsed;
+        // Omitted when the row is absent, so the server records NULL rather
+        // than a fabricated zero. There is no fable_window_ends: the page
+        // reports the same reset time on both weekly rows.
+        if (extracted.fableWeeklyUsed !== null && extracted.fableWeeklyUsed !== undefined) {
+            body.fable_weekly_used = extracted.fableWeeklyUsed;
+        }
         if (extracted.sessionWindowEnds) body.session_window_ends = extracted.sessionWindowEnds;
         if (extracted.weeklyWindowEnds) body.weekly_window_ends = extracted.weeklyWindowEnds;
         // Limbo signal: only emit when positively detected. We never assert
@@ -592,6 +670,7 @@
                 windowEndsMs,
                 sessionActive: extracted.sessionActive,
                 weeklyActive: extracted.weeklyActive,
+                fablePercent: extracted.fableWeeklyUsed,
             });
         });
     }

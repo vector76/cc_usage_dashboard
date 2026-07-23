@@ -55,6 +55,8 @@ test('round-trip: recordSentState then loadState returns the record', () => {
         lastPercent: record.percent,
         lastResetText: record.resetText,
         lastWindowEndsMs: record.windowEndsMs,
+        // Always present, null when the caller reported no Fable row.
+        lastFablePercent: null,
     });
 });
 
@@ -185,4 +187,51 @@ test('legacy lastUpdatedAgeMs in stored record is ignored on load', () => {
     assert.ok(!('lastUpdatedAgeMs' in loaded),
         'legacy lastUpdatedAgeMs should not appear in loaded record');
     assert.strictEqual(loaded.lastSessionActive, false);
+});
+
+test('fable percent round-trips through the persisted record', () => {
+    const stub = makeMemoryStorage();
+    _setStorageForTests(stub);
+
+    recordSentState({
+        sentAtMs: 1714200000000,
+        percent: 42,
+        resetText: 'Resets in 1 hr',
+        windowEndsMs: 1714203600000,
+        fablePercent: 77,
+    });
+
+    assert.strictEqual(loadState().lastFablePercent, 77);
+});
+
+test('absent fable percent normalizes to null on both write and read', () => {
+    // Both sides must land on null rather than undefined: the dedup gate
+    // compares them directly, and undefined-vs-null would fire a send on
+    // every trigger for any account whose page has no Fable row.
+    const stub = makeMemoryStorage();
+    _setStorageForTests(stub);
+
+    recordSentState({
+        sentAtMs: 1714200000000,
+        percent: 42,
+        resetText: 'Resets in 1 hr',
+        windowEndsMs: 1714203600000,
+        // fablePercent intentionally omitted.
+    });
+
+    assert.strictEqual(loadState().lastFablePercent, null);
+});
+
+test('record written before the fable field existed loads as null', () => {
+    const stub = makeMemoryStorage({
+        [STATE_STORAGE_KEY]: JSON.stringify({
+            lastSentAtMs: 1714200000000,
+            lastPercent: 42,
+            lastResetText: 'Resets in 1 hr',
+            lastWindowEndsMs: 1714203600000,
+        }),
+    });
+    _setStorageForTests(stub);
+
+    assert.strictEqual(loadState().lastFablePercent, null);
 });

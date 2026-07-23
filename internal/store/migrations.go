@@ -143,6 +143,24 @@ ALTER TABLE quota_snapshots ADD COLUMN continuous_with_prev INTEGER;
 ALTER TABLE quota_snapshots ADD COLUMN weekly_active INTEGER;
 `,
 	},
+	{
+		Version: 7,
+		Name:    "add_quota_snapshots_fable_weekly_used",
+		// Nullable REAL, 0–100. The claude.ai usage page grew a per-model
+		// sub-row ("Fable") under the Weekly limits heading; this column
+		// holds that row's percentage. NULL means the source did not report
+		// it — every row written before this migration, and any row from a
+		// userscript predating the extractor change. There is no backfill:
+		// the value was never observed, so the dashboard's fable series
+		// simply starts where the data does.
+		//
+		// Deliberately NOT a separate window kind. The Fable row shares the
+		// weekly reset boundary ("Resets Thu 10:59 PM" on both rows), so it
+		// rides the existing weekly window rather than minting its own.
+		SQL: `
+ALTER TABLE quota_snapshots ADD COLUMN fable_weekly_used REAL;
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.

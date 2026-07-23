@@ -28,7 +28,14 @@ type WindowState struct {
 	EndsAt              time.Time         `json:"ends_at"`
 	BaselinePercentUsed *float64          `json:"baseline_percent_used"`
 	Series              []UsedSeriesPoint `json:"series"`
-	Volume              []SeriesBucket    `json:"volume"`
+	// FableSeries is the "Fable" weekly sub-row's %used curve over the same
+	// domain as Series. Populated on the weekly window only, and omitted
+	// entirely when no snapshot in the domain reported the row — so the
+	// client renders the second line only where real data backs it, and
+	// history from before the column existed stays blank rather than
+	// flat-lining at zero.
+	FableSeries []UsedSeriesPoint `json:"fable_series,omitempty"`
+	Volume      []SeriesBucket    `json:"volume"`
 	// BucketSecs is the width of each Volume bucket in seconds. The
 	// client uses this to size bars by their actual time span instead
 	// of by the count of populated buckets, since GROUP BY only emits
@@ -290,6 +297,19 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 	}
 	ws.Series = series
 
+	// Second curve on the weekly chart: the per-model "Fable" sub-row,
+	// which shares this window's domain and reset boundary. Left nil (and
+	// omitted from the JSON) when nothing reported it in range.
+	if kind == "weekly" {
+		fable, err := h.loadUsedSeries(db, "fable_weekly", seriesStart, endsAt)
+		if err != nil {
+			return nil, err
+		}
+		if len(fable) > 0 {
+			ws.FableSeries = fable
+		}
+	}
+
 	bucketSecs := bucketSecsForKind(kind)
 	volume, err := h.loadVolumeSeries(db, seriesStart, endsAt, bucketSecs)
 	if err != nil {
@@ -447,6 +467,13 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 // returns nil. ContinuousWithPrev is the snapshot's continuity flag (NULL
 // coerces to false), which the client uses to split the polyline at
 // session resets when rendering the 15h session view.
+//
+// "fable_weekly" is not a window kind — no windows row ever carries it. It
+// selects the fable_weekly_used column against the weekly window's own
+// boundary column, because the usage page reports one reset time for both
+// weekly rows. Rows predating the column (or from a userscript that doesn't
+// report it) are NULL and filtered out by the IS NOT NULL clause, so the
+// series simply begins where the observations do.
 func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time.Time) ([]UsedSeriesPoint, error) {
 	var usedCol, endsCol string
 	switch kind {
@@ -454,6 +481,8 @@ func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time
 		usedCol, endsCol = "session_used", "session_window_ends"
 	case "weekly":
 		usedCol, endsCol = "weekly_used", "weekly_window_ends"
+	case "fable_weekly":
+		usedCol, endsCol = "fable_weekly_used", "weekly_window_ends"
 	default:
 		return []UsedSeriesPoint{}, nil
 	}

@@ -52,6 +52,7 @@ later, headless scrape).
 | session_window_ends   | TIMESTAMP    | When the current 5-hour session resets.        |
 | weekly_used           | REAL         | "All models" weekly % used (0–100). Nullable.  |
 | weekly_window_ends    | TIMESTAMP    | When the weekly window resets.                 |
+| fable_weekly_used     | REAL         | "Fable" weekly sub-row % used (0–100). Nullable.|
 | session_active        | INTEGER      | Tri-state limbo signal. Nullable. See below.   |
 | weekly_active         | INTEGER      | Tri-state limbo signal. Nullable. See below.   |
 | continuous_with_prev  | INTEGER      | Tri-state continuity flag. Nullable. See below.|
@@ -81,6 +82,27 @@ otherwise the engine would loop on close-and-mint of born-expired
 weekly windows at every weekly reset). See `docs/no-active-session.md`
 for the end-to-end flow.
 
+`fable_weekly_used` was added by migration v7
+(`add_quota_snapshots_fable_weekly_used`) as a nullable `REAL`. The
+claude.ai usage page renders the "Weekly limits" section as an aggregate
+row ("All models") plus per-model sub-rows; this column holds the "Fable"
+sub-row's percentage.
+
+- `NULL` — the source did not report the row. This covers every row
+  written before July 2026, any row from a userscript predating the
+  extractor change, and any account whose page does not render the
+  sub-row. There is **no backfill**: the value was never observed, so the
+  dashboard simply draws no fable curve over that history rather than a
+  false flat line at 0.
+
+Deliberately **not** a separate window kind, and deliberately without a
+`fable_window_ends` companion. The page reports the same reset hint on
+both weekly rows ("Resets Thu 10:59 PM"), so the series rides the
+existing weekly window and borrows `weekly_window_ends` as its boundary.
+Modelling it as its own kind would drag in minting, reset detection,
+baselines, and the consumption walker for a line that is purely
+informational.
+
 `continuous_with_prev` is a tri-state column added by migration v5
 (`add_quota_snapshots_continuous_with_prev`) as a nullable `INTEGER`,
 mirroring the `session_active` shape. It records whether the snapshot
@@ -100,8 +122,9 @@ engine will not assume continuity it cannot prove.
 
 **Write-time plateau compaction.** When a snapshot arrives with
 `continuous_with_prev = 1` and every "match" field
-(`session_used`, `weekly_used`, `session_window_ends`,
-`weekly_window_ends`, `session_active`, `weekly_active`) is identical
+(`session_used`, `weekly_used`, `fable_weekly_used`,
+`session_window_ends`, `weekly_window_ends`, `session_active`,
+`weekly_active`) is identical
 to the most recent row from the same `source`, the existing row's
 `observed_at` and `received_at` are slid forward in place instead of
 inserting a duplicate. The slide is suppressed when the prior row is itself an

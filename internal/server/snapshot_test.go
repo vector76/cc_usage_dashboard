@@ -267,6 +267,65 @@ func TestSnapshotPersistsContinuousWithPrev(t *testing.T) {
 	}
 }
 
+// TestSnapshotPersistsFableWeeklyUsed checks the new weekly sub-row makes it
+// end-to-end from the POST body to the column, and that an older userscript
+// (which never sends the field) still yields NULL rather than 0.
+func TestSnapshotPersistsFableWeeklyUsed(t *testing.T) {
+	cases := []struct {
+		name string
+		body map[string]any
+		want sql.NullFloat64
+	}{
+		{
+			name: "reported value persists",
+			body: map[string]any{"weekly_used": 44.0, "fable_weekly_used": 77.0},
+			want: sql.NullFloat64{Float64: 77.0, Valid: true},
+		},
+		{
+			name: "zero persists as zero, not NULL",
+			body: map[string]any{"weekly_used": 44.0, "fable_weekly_used": 0.0},
+			want: sql.NullFloat64{Float64: 0, Valid: true},
+		},
+		{
+			name: "omitted (older userscript) persists as NULL",
+			body: map[string]any{"weekly_used": 44.0},
+			want: sql.NullFloat64{Valid: false},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, testStore := createTestServer(t)
+			defer testStore.Close()
+
+			fixed := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+			srv.windowsEngine.SetNow(func() time.Time { return fixed })
+			srv.SetNow(func() time.Time { return fixed })
+
+			tc.body["observed_at"] = fixed
+			tc.body["source"] = "userscript"
+
+			body, _ := json.Marshal(tc.body)
+			req := jsonPOST("/snapshot", body)
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d (body=%s)", w.Code, w.Body.String())
+			}
+
+			var got sql.NullFloat64
+			if err := testStore.DB().QueryRow(
+				`SELECT fable_weekly_used FROM quota_snapshots ORDER BY id DESC LIMIT 1`,
+			).Scan(&got); err != nil {
+				t.Fatalf("failed to read fable_weekly_used: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("fable_weekly_used: got %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestSnapshotPersistsSessionActive checks the tri-state: true→1, false→0, omitted→NULL.
 func TestSnapshotPersistsSessionActive(t *testing.T) {
 	cases := []struct {

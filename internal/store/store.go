@@ -144,18 +144,40 @@ func (s *Store) InsertUsageEvent(
 	return id, nil
 }
 
+// QuotaSnapshotRecord is the full set of fields written to quota_snapshots.
+// It exists because the column list has outgrown a readable positional
+// signature: the legacy InsertQuotaSnapshot below keeps the 11-argument form
+// working for existing callers, while new fields (starting with
+// FableWeeklyUsed) are reachable only through this struct. Prefer
+// InsertQuotaSnapshotRecord in new code.
+//
+// SessionUsed, WeeklyUsed, and FableWeeklyUsed are 0–100 percentages; nil
+// means the source did not report that row and the column is written NULL.
+type QuotaSnapshotRecord struct {
+	ObservedAt        time.Time
+	ReceivedAt        time.Time
+	Source            string
+	SessionUsed       *float64
+	SessionWindowEnds *time.Time
+	WeeklyUsed        *float64
+	WeeklyWindowEnds  *time.Time
+	// FableWeeklyUsed is the "Fable" sub-row under the Weekly limits
+	// heading. It shares WeeklyWindowEnds — the page reports the same
+	// reset time for both rows — so there is no separate ends column.
+	FableWeeklyUsed    *float64
+	SessionActive      *bool
+	WeeklyActive       *bool
+	ContinuousWithPrev *bool
+	RawJSON            string
+}
+
 // InsertQuotaSnapshot inserts a quota snapshot and returns its ID.
 // session_used and weekly_used are 0–100 percentages.
 // sessionActive / weeklyActive are nil when the source did not report them;
 // persisted as NULL. continuousWithPrev is nil when absent; persisted as NULL.
 //
-// Plateau compaction: when the arrival is marked continuous and every
-// "match" field is identical to the latest row from the same source, the
-// existing row's observed_at and received_at are slid forward in place
-// instead of inserting a duplicate. raw_json is preserved on the surviving
-// row as an audit artifact. The slide is suppressed when the latest row is
-// itself an explicit start (continuous_with_prev = 0), so a fresh page
-// load always anchors a new row.
+// Retained for callers written against the positional form; fable_weekly_used
+// is written NULL. New code should use InsertQuotaSnapshotRecord.
 func (s *Store) InsertQuotaSnapshot(
 	observedAt, receivedAt time.Time,
 	source string,
@@ -168,17 +190,37 @@ func (s *Store) InsertQuotaSnapshot(
 	continuousWithPrev *bool,
 	rawJSON string,
 ) (int64, error) {
-	sessionActiveArg := boolToNullableInt(sessionActive)
-	weeklyActiveArg := boolToNullableInt(weeklyActive)
-	continuousWithPrevArg := boolToNullableInt(continuousWithPrev)
+	return s.InsertQuotaSnapshotRecord(QuotaSnapshotRecord{
+		ObservedAt:         observedAt,
+		ReceivedAt:         receivedAt,
+		Source:             source,
+		SessionUsed:        sessionUsed,
+		SessionWindowEnds:  sessionWindowEnds,
+		WeeklyUsed:         weeklyUsed,
+		WeeklyWindowEnds:   weeklyWindowEnds,
+		SessionActive:      sessionActive,
+		WeeklyActive:       weeklyActive,
+		ContinuousWithPrev: continuousWithPrev,
+		RawJSON:            rawJSON,
+	})
+}
 
-	if continuousWithPrev != nil && *continuousWithPrev {
-		slidID, slid, err := s.tryPlateauSlide(
-			observedAt, receivedAt, source,
-			sessionUsed, sessionWindowEnds,
-			weeklyUsed, weeklyWindowEnds,
-			sessionActive, weeklyActive,
-		)
+// InsertQuotaSnapshotRecord inserts a quota snapshot and returns its ID.
+//
+// Plateau compaction: when the arrival is marked continuous and every
+// "match" field is identical to the latest row from the same source, the
+// existing row's observed_at and received_at are slid forward in place
+// instead of inserting a duplicate. raw_json is preserved on the surviving
+// row as an audit artifact. The slide is suppressed when the latest row is
+// itself an explicit start (continuous_with_prev = 0), so a fresh page
+// load always anchors a new row.
+func (s *Store) InsertQuotaSnapshotRecord(rec QuotaSnapshotRecord) (int64, error) {
+	sessionActiveArg := boolToNullableInt(rec.SessionActive)
+	weeklyActiveArg := boolToNullableInt(rec.WeeklyActive)
+	continuousWithPrevArg := boolToNullableInt(rec.ContinuousWithPrev)
+
+	if rec.ContinuousWithPrev != nil && *rec.ContinuousWithPrev {
+		slidID, slid, err := s.tryPlateauSlide(rec)
 		if err != nil {
 			return 0, err
 		}
@@ -192,18 +234,20 @@ func (s *Store) InsertQuotaSnapshot(
 			observed_at, received_at, source,
 			session_used, session_window_ends,
 			weekly_used, weekly_window_ends,
+			fable_weekly_used,
 			session_active,
 			weekly_active,
 			continuous_with_prev,
 			raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, FormatTime(observedAt), FormatTime(receivedAt), source,
-		sessionUsed, FormatTimePtr(sessionWindowEnds),
-		weeklyUsed, FormatTimePtr(weeklyWindowEnds),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, FormatTime(rec.ObservedAt), FormatTime(rec.ReceivedAt), rec.Source,
+		rec.SessionUsed, FormatTimePtr(rec.SessionWindowEnds),
+		rec.WeeklyUsed, FormatTimePtr(rec.WeeklyWindowEnds),
+		rec.FableWeeklyUsed,
 		sessionActiveArg,
 		weeklyActiveArg,
 		continuousWithPrevArg,
-		rawJSON)
+		rec.RawJSON)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert quota snapshot: %w", err)
@@ -220,20 +264,12 @@ func (s *Store) InsertQuotaSnapshot(
 // tryPlateauSlide refreshes the latest row's timestamps in place when the
 // new arrival continues an identical plateau. Returns (id, true, nil) if a
 // slide happened; (0, false, nil) means the caller should insert as usual.
-func (s *Store) tryPlateauSlide(
-	observedAt, receivedAt time.Time,
-	source string,
-	sessionUsed *float64,
-	sessionWindowEnds *time.Time,
-	weeklyUsed *float64,
-	weeklyWindowEnds *time.Time,
-	sessionActive *bool,
-	weeklyActive *bool,
-) (int64, bool, error) {
+func (s *Store) tryPlateauSlide(rec QuotaSnapshotRecord) (int64, bool, error) {
 	var (
 		prevID                 int64
 		prevSessionUsed        sql.NullFloat64
 		prevWeeklyUsed         sql.NullFloat64
+		prevFableWeeklyUsed    sql.NullFloat64
 		prevSessionWindowEnds  sql.NullString
 		prevWeeklyWindowEnds   sql.NullString
 		prevSessionActive      sql.NullInt64
@@ -241,15 +277,15 @@ func (s *Store) tryPlateauSlide(
 		prevContinuousWithPrev sql.NullInt64
 	)
 	err := s.db.QueryRow(`
-		SELECT id, session_used, weekly_used,
+		SELECT id, session_used, weekly_used, fable_weekly_used,
 		       session_window_ends, weekly_window_ends,
 		       session_active, weekly_active, continuous_with_prev
 		FROM quota_snapshots
 		WHERE source = ?
 		ORDER BY observed_at DESC
 		LIMIT 1
-	`, source).Scan(
-		&prevID, &prevSessionUsed, &prevWeeklyUsed,
+	`, rec.Source).Scan(
+		&prevID, &prevSessionUsed, &prevWeeklyUsed, &prevFableWeeklyUsed,
 		&prevSessionWindowEnds, &prevWeeklyWindowEnds,
 		&prevSessionActive, &prevWeeklyActive, &prevContinuousWithPrev,
 	)
@@ -265,12 +301,20 @@ func (s *Store) tryPlateauSlide(
 		return 0, false, nil
 	}
 
-	if !nullableFloatEqual(prevSessionUsed, sessionUsed) ||
-		!nullableFloatEqual(prevWeeklyUsed, weeklyUsed) ||
-		!nullableTimeEqual(prevSessionWindowEnds, sessionWindowEnds) ||
-		!nullableTimeEqual(prevWeeklyWindowEnds, weeklyWindowEnds) ||
-		!nullableBoolEqual(prevSessionActive, sessionActive) ||
-		!nullableBoolEqual(prevWeeklyActive, weeklyActive) {
+	// Every persisted observation participates in the match. fable_weekly_used
+	// is load-bearing here: the Fable row moves independently of the weekly
+	// aggregate (a Fable-only stretch of work advances it while "All models"
+	// is still rounding to the same integer), and omitting it from this
+	// comparison would slide those observations onto the previous row and
+	// erase the fable series' resolution on exactly the plateaus where it
+	// carries the only signal.
+	if !nullableFloatEqual(prevSessionUsed, rec.SessionUsed) ||
+		!nullableFloatEqual(prevWeeklyUsed, rec.WeeklyUsed) ||
+		!nullableFloatEqual(prevFableWeeklyUsed, rec.FableWeeklyUsed) ||
+		!nullableTimeEqual(prevSessionWindowEnds, rec.SessionWindowEnds) ||
+		!nullableTimeEqual(prevWeeklyWindowEnds, rec.WeeklyWindowEnds) ||
+		!nullableBoolEqual(prevSessionActive, rec.SessionActive) ||
+		!nullableBoolEqual(prevWeeklyActive, rec.WeeklyActive) {
 		return 0, false, nil
 	}
 
@@ -278,7 +322,7 @@ func (s *Store) tryPlateauSlide(
 		UPDATE quota_snapshots
 		SET observed_at = ?, received_at = ?
 		WHERE id = ?
-	`, FormatTime(observedAt), FormatTime(receivedAt), prevID); err != nil {
+	`, FormatTime(rec.ObservedAt), FormatTime(rec.ReceivedAt), prevID); err != nil {
 		return 0, false, fmt.Errorf("failed to slide quota snapshot: %w", err)
 	}
 	return prevID, true, nil

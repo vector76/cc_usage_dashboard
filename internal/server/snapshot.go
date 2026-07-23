@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
 
 // SnapshotRequest represents the POST /snapshot payload.
@@ -18,6 +20,13 @@ type SnapshotRequest struct {
 	SessionWindowEnds *time.Time `json:"session_window_ends"`
 	WeeklyUsed        *float64   `json:"weekly_used"`
 	WeeklyWindowEnds  *time.Time `json:"weekly_window_ends"`
+	// FableWeeklyUsed is the "Fable" sub-row under the Weekly limits
+	// heading, 0–100. Nil when absent, which covers both an older
+	// userscript and a page that doesn't render the row (the sub-row is
+	// plan-dependent). There is no fable_window_ends: the page reports the
+	// same reset time for the Fable row as for the weekly aggregate, so
+	// the series is anchored on the existing weekly window.
+	FableWeeklyUsed *float64 `json:"fable_weekly_used,omitempty"`
 	// Pointer so an absent field (NULL) is distinguishable from explicit false.
 	SessionActive      *bool  `json:"session_active,omitempty"`
 	WeeklyActive       *bool  `json:"weekly_active,omitempty"`
@@ -63,19 +72,20 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	rawJSON, _ := json.Marshal(req)
 
 	// Insert snapshot
-	id, err := s.store.InsertQuotaSnapshot(
-		req.ObservedAt,
-		time.Now(),
-		req.Source,
-		req.SessionUsed,
-		req.SessionWindowEnds,
-		req.WeeklyUsed,
-		req.WeeklyWindowEnds,
-		req.SessionActive,
-		req.WeeklyActive,
-		req.ContinuousWithPrev,
-		string(rawJSON),
-	)
+	id, err := s.store.InsertQuotaSnapshotRecord(store.QuotaSnapshotRecord{
+		ObservedAt:         req.ObservedAt,
+		ReceivedAt:         time.Now(),
+		Source:             req.Source,
+		SessionUsed:        req.SessionUsed,
+		SessionWindowEnds:  req.SessionWindowEnds,
+		WeeklyUsed:         req.WeeklyUsed,
+		WeeklyWindowEnds:   req.WeeklyWindowEnds,
+		FableWeeklyUsed:    req.FableWeeklyUsed,
+		SessionActive:      req.SessionActive,
+		WeeklyActive:       req.WeeklyActive,
+		ContinuousWithPrev: req.ContinuousWithPrev,
+		RawJSON:            string(rawJSON),
+	})
 
 	if err != nil {
 		slog.Error("failed to insert quota snapshot", "err", err)

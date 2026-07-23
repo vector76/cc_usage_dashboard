@@ -40,6 +40,10 @@ function loadState() {
             lastPercent: parsed.lastPercent,
             lastResetText: parsed.lastResetText,
             lastWindowEndsMs: parsed.lastWindowEndsMs,
+            // Records written before the Fable row existed have no such
+            // key. Normalize to null on read so the dedup comparison sees
+            // "absent" rather than undefined; see _absentAsNull in dedup.js.
+            lastFablePercent: parsed.lastFablePercent === undefined ? null : parsed.lastFablePercent,
         };
         if (parsed.lastSessionActive !== undefined) result.lastSessionActive = parsed.lastSessionActive;
         if (parsed.lastWeeklyActive !== undefined) result.lastWeeklyActive = parsed.lastWeeklyActive;
@@ -49,7 +53,7 @@ function loadState() {
     }
 }
 
-function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive, weeklyActive }) {
+function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionActive, weeklyActive, fablePercent }) {
     try {
         const storage = _resolveStorage();
         if (!storage) return;
@@ -58,6 +62,9 @@ function recordSentState({ sentAtMs, percent, resetText, windowEndsMs, sessionAc
             lastPercent: percent,
             lastResetText: resetText,
             lastWindowEndsMs: windowEndsMs,
+            // Always written (null when the row is absent) so the dedup
+            // comparison has a stable reference on both sides.
+            lastFablePercent: fablePercent === undefined ? null : fablePercent,
         };
         if (sessionActive !== undefined) record.lastSessionActive = sessionActive;
         if (weeklyActive !== undefined) record.lastWeeklyActive = weeklyActive;

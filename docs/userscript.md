@@ -15,7 +15,18 @@ permissions — none needed for this use case.
 ## Behavior
 
 The script is `@match`-injected on every `claude.ai/*` page but no-ops unless the URL
-path is exactly `/settings/usage`. On that path:
+indicates the user is viewing the usage settings tab, per `isUsageRoute`
+(`userscript/lib/route.js`). Two forms are accepted, because Anthropic has shipped
+both:
+
+- pathname exactly `/settings/usage` — the original full-page settings route.
+- hash route `#settings/usage` over any pathname — the modal dialog that replaced
+  it around June 2026, e.g. `https://claude.ai/new#settings/usage`, where
+  `location.pathname` is just `/new`.
+
+Accepting either keeps the predicate meaning "the user intends to view usage,"
+which is what lets a *missing* usage bar be reported as a genuine parse error
+rather than ignored on every unrelated page. On such a route:
 
 1. Wait for at least one usage-bar node to render (MutationObserver, with a
    sane timeout). A usage bar is matched by `USAGE_BAR_SELECTOR`
@@ -39,11 +50,25 @@ path is exactly `/settings/usage`. On that path:
    sections are kept:
    - session section → first bar in this section is "Current session"
      (% of the rolling 5-hour window).
-   - `Weekly limits` → first bar in this section is the aggregate "All models"
-     (% of the weekly limit).
-   Sub-rows under "Weekly limits" (Sonnet only, Claude Design, future additions),
-   the "Additional features" section (routines), and the extra-usage section are
-   all ignored. Anchoring on section titles is more durable than matching row
+   - `Weekly limits` → the first bar in this section that is *not* the
+     Fable sub-row is the aggregate "All models" (% of the weekly limit).
+   The one exception to heading-only anchoring is the **Fable** sub-row,
+   which is claimed by row label (`userscript/lib/rows.js`,
+   `isFableRowLabel`) because it sits under the same `Weekly limits`
+   heading as the aggregate and nothing structural distinguishes them.
+   Its accessible name comes from `aria-labelledby` pointing at the row
+   label; matching is a case-folded *prefix* against accepted variants,
+   the same hedge used for section headings. Note the bar's own
+   `data-variant` / `bg-*` classes are **not** usable as an identity
+   signal: they encode a threshold (`accent` → `warning` as a bar nears
+   its limit), so the Fable bar's orange styling is a fact about its
+   percentage, not about which row it is. If the label match fails, the
+   fable field simply goes absent — the aggregate is still selected
+   positionally, so the session and weekly lines cannot be collateral
+   damage.
+   Other sub-rows under "Weekly limits" (Sonnet only, Claude Design, future
+   additions), the "Additional features" section (routines), and the
+   extra-usage section are all ignored. Anchoring on section titles is more durable than matching row
    labels — Anthropic edits row text often, section headings less so but they
    do change (the session section was renamed from `Plan usage limits` to
    `Your usage limits` between April and May 2026). Carrying multiple
@@ -87,15 +112,25 @@ one **meaningful-change signal** has fired since the last successful send.
 Because every trigger goes through the same gate, the backstop is free to fire
 aggressively without producing duplicate rows.
 
-The four meaningful-change signals are:
+The five meaningful-change signals are:
 
 1. **Session percent (`aria-valuenow`) changed.** The bar visibly moved.
-2. **Verbatim "Resets in …" text changed.** Even when the percent is unchanged
+2. **Fable weekly percent changed.** Its cap is visibly tighter than the
+   session window's (77% used against the aggregate's 44% on the same
+   page), so it gains whole points while the session bar is still rounding
+   to the same integer — signal 1 cannot stand in for it. The weekly
+   *aggregate* needs no equivalent signal: its denominator is larger than
+   the session's, so it cannot advance without the session percent
+   advancing first. Absent-ness is normalized (a missing key and an
+   explicit null compare equal), or a page with no Fable row read against
+   a pre-Fable state record would fire on every trigger and defeat the
+   dedup entirely.
+3. **Verbatim "Resets in …" text changed.** Even when the percent is unchanged
    the row text ticks down; this is how we capture pure time advancement
    inside an active window.
-3. **Limbo text appeared or disappeared.** The row text matched
+4. **Limbo text appeared or disappeared.** The row text matched
    "Starts when a message is sent" on one side and not the other.
-4. **In limbo only**, `findLastUpdatedAgeMs` returned a value strictly *smaller*
+5. **In limbo only**, `findLastUpdatedAgeMs` returned a value strictly *smaller*
    than the most recently *observed* one — i.e. claude.ai's own poll fetched
    a fresh page. The reference is a rolling in-memory counter updated on
    every DOM read (whether or not we sent), not the last-sent age, because
@@ -121,7 +156,9 @@ below for the version-key rationale and cold-start fallback.
 
 The record is written only after a successful POST, so an aborted send does
 not advance the anchor. The record carries the timestamp of the send, the
-percent, the verbatim reset text, the parsed `windowEndsMs`, and the
+percent, the verbatim reset text, the parsed `windowEndsMs`, the Fable
+weekly percent (always written, `null` when the row is absent, so the
+dedup comparison has a stable reference on both sides), and the
 observed `session_active` and `weekly_active` (each persisted only when the
 script positively detected limbo on that row). The "Last updated" age is
 *not* persisted — it lives only in a rolling in-memory counter for the
@@ -220,12 +257,19 @@ Content-Type: application/json
   "session_window_ends": "2026-04-25T19:02:11Z",
   "weekly_used": 23.0,
   "weekly_window_ends": "2026-04-30T06:00:00Z",
+  "fable_weekly_used": 77.0,
   "continuous_with_prev": true
 }
 ```
 
 `session_used` and `weekly_used` are 0–100 percentages, both nullable: when only one
 row is parseable the other field is omitted and the trayapp records what was found.
+`fable_weekly_used` is the "Fable" weekly sub-row, omitted whenever the row is
+absent or unmatched; it has no `*_window_ends` companion because the page reports
+the same reset hint for it as for the weekly aggregate. The Fable row alone is
+never sufficient to consider the page parsed — it is an optional sub-row, so
+treating it as sufficient would suppress the parse-error report that fires when
+the rows we actually depend on go missing.
 `*_window_ends` are RFC3339 timestamps derived from each row's "Resets …" hint;
 they're omitted when the hint is in a format the parser doesn't recognize (e.g.
 "Resets May 1" when the boundary is far enough out that Anthropic switches to a
@@ -277,14 +321,17 @@ once via their userscript manager. Auto-update can be configured via `@updateURL
 
 ## Pure-JS helpers and the test harness
 
-Pure-JS helpers (parsing, persistent state, dedup, continuity, visibility spoof)
+Pure-JS helpers (parsing, row matching, persistent state, dedup, continuity, visibility spoof)
 live as CommonJS modules under `userscript/lib/` so `node --test` can
 `require()` them directly. The userscript itself
 is a single Tampermonkey-loaded IIFE with no build step, so each helper's function
 bodies are also **inlined** into `claude-usage-snapshot.user.js` alongside the
 existing utilities. The lib copy is the source of truth; the inlined copy is what
 runs on `claude.ai`. A header comment in the inlined block points at the lib file so
-the duplication is discoverable; edit both together. This keeps the test harness
+the duplication is discoverable; edit both together. `test/inline-drift.test.js`
+enforces this for the row-matching helper: it extracts the inlined copy from the
+userscript source and asserts it agrees with `lib/rows.js` on every input the
+lib tests cover, so a one-sided edit fails the suite instead of shipping. This keeps the test harness
 simple and the userscript install footprint a single file. If the helper count grows
 enough that the duplication becomes painful, a small concat step (Make target that
 prepends lib bodies into the user.js) is a fine future move.

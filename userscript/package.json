@@ -4,6 +4,6 @@
   "private": true,
   "description": "Test harness for the claude-usage-snapshot userscript's pure-JS logic modules.",
   "scripts": {
-    "test": "node --test test/"
+    "test": "node --test \"test/**/*.test.js\""
   }
 }

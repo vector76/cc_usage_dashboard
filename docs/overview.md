@@ -46,6 +46,14 @@ This project aims to:
    burn-down chart now mean a genuine absence of observation** (the page was closed,
    the userscript was uninstalled, the source was offline) rather than a missing
    poll on a stable plateau.
+   The weekly chart carries a second, quieter curve for the per-model **Fable**
+   sub-row, drawn in the same red the volume bars use for the fable family. It
+   shares the weekly window's domain and reset boundary but gets no
+   delta-from-pace annotation: the pace diagonal measures the aggregate quota,
+   and Fable burns against its own tighter cap, so scoring it against that
+   diagonal would read as a comparison it isn't. The curve and its legend appear
+   only when observations actually back them, so the session chart and any
+   history predating the row stay single-line.
 3. **Report** consumption over a period: dollar-equivalent token cost plus
    percent-of-session and percent-of-weekly quota consumed (both can exceed 100%
    over a multi-window period). The user reconciles those numbers against their

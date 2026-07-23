@@ -241,6 +241,33 @@ function renderStatus(s) {
 //     domain. Y of the volume panel is auto-scaled to the largest bar.
 //   - Vertical tick at `start` marks the current window's left edge when
 //     the domain extends back beyond it.
+// drawUsedPolylines paints one %-remaining curve. Grouping into one
+// polyline per continuous run is delegated to groupPolylines() (see
+// static/grouping.js): a point starts a new polyline whenever its
+// continuous_with_prev flag is not strictly true, so resets read as gaps
+// rather than as a vertical jump. Single-point groups render as markers,
+// which is the only way an isolated observation is visible at all.
+//
+// Factored out of renderBurnDown so the weekly chart can draw the Fable
+// sub-row's curve with identical semantics in a different color.
+function drawUsedPolylines(svg, series, sx, syPct, color, width) {
+  for (const g of groupPolylines(series)) {
+    if (g.length === 1) {
+      const p = g[0];
+      svg.appendChild(el("circle", {
+        cx: sx(new Date(p.observed_at).getTime()),
+        cy: syPct(100 - p.percent_used),
+        r: "2", fill: color
+      }));
+      continue;
+    }
+    const pts = g.map(p =>
+      `${sx(new Date(p.observed_at).getTime())},${syPct(100 - p.percent_used)}`
+    ).join(" ");
+    svg.appendChild(el("polyline", { points: pts, fill: "none", stroke: color, "stroke-width": width }));
+  }
+}
+
 function renderBurnDown(svgID, win, opts) {
   opts = opts || {};
   const svg = document.getElementById(svgID);
@@ -353,22 +380,7 @@ function renderBurnDown(svgID, win, opts) {
   });
 
   if (series.length > 0) {
-    const groups = groupPolylines(series);
-    for (const g of groups) {
-      if (g.length === 1) {
-        const p = g[0];
-        svg.appendChild(el("circle", {
-          cx: sx(new Date(p.observed_at).getTime()),
-          cy: syPct(100 - p.percent_used),
-          r: "2", fill: "#06c"
-        }));
-        continue;
-      }
-      const pts = g.map(p =>
-        `${sx(new Date(p.observed_at).getTime())},${syPct(100 - p.percent_used)}`
-      ).join(" ");
-      svg.appendChild(el("polyline", { points: pts, fill: "none", stroke: "#06c", "stroke-width": "2" }));
-    }
+    drawUsedPolylines(svg, series, sx, syPct, "#06c", "2");
 
     // Highlight the latest snapshot with a dot + label. When the latest
     // snapshot is inside the current window, suffix the label with the
@@ -424,6 +436,63 @@ function renderBurnDown(svgID, win, opts) {
     svg.appendChild(el("text", {
       x: W / 2, y: (PCT_TOP + PCT_BOTTOM) / 2, "text-anchor": "middle", fill: "#888"
     }, "No data yet"));
+  }
+
+  // Second curve: the per-model "Fable" weekly sub-row, present only on the
+  // weekly chart and only once the userscript has observed it (the backend
+  // omits fable_series entirely otherwise, so history from before the row
+  // existed stays blank rather than flat-lining at 0).
+  //
+  // Deliberately quieter than the primary curve — thinner stroke, no
+  // delta-from-pace annotation. The pace diagonal measures the aggregate
+  // quota; Fable burns against its own, visibly tighter cap, so scoring it
+  // against the same diagonal would read as a comparison that isn't one.
+  // The color matches the fable segment of the volume bars below, which is
+  // what ties the two panels together.
+  const fableSeries = (win.fable_series || []).filter(p => {
+    const t = new Date(p.observed_at).getTime();
+    return t >= domainStart && t < domainEnd;
+  });
+  if (fableSeries.length > 0) {
+    const FABLE_COLOR = VOLUME_FAMILY_COLORS.fable;
+    drawUsedPolylines(svg, fableSeries, sx, syPct, FABLE_COLOR, "1.5");
+
+    const latest = fableSeries[fableSeries.length - 1];
+    const lx = sx(new Date(latest.observed_at).getTime());
+    const ly = syPct(100 - latest.percent_used);
+    svg.appendChild(el("circle", { cx: lx, cy: ly, r: "2.5", fill: FABLE_COLOR }));
+    // Label below the dot by default — the primary curve labels above its
+    // own dot, so the two stay legible when the lines happen to cross.
+    // Flip up only when below would fall out of the panel.
+    const below = ly + 14 <= PCT_BOTTOM;
+    svg.appendChild(el("text", {
+      x: lx, y: below ? ly + 14 : ly - 8,
+      "font-size": "10", fill: FABLE_COLOR, "text-anchor": "middle"
+    }, fmt(100 - latest.percent_used) + "%"));
+
+    // Two curves in one panel need a key. Drawn only when the second curve
+    // is actually present, so the session chart and pre-Fable weekly
+    // history keep their uncluttered single-line frame.
+    //
+    // Bottom-left, which is the one region a burn-down chart leaves empty by
+    // construction: every curve starts at 100% remaining (the top-left) and
+    // descends rightward, and the slack polygon fills the upper right. The
+    // obvious top-left placement sits exactly on the start of the week.
+    const legend = [
+      { color: "#06c", label: "All models" },
+      { color: FABLE_COLOR, label: "Fable" },
+    ];
+    let lgx = P + 6;
+    for (const item of legend) {
+      svg.appendChild(el("line", {
+        x1: lgx, y1: PCT_BOTTOM - 6, x2: lgx + 12, y2: PCT_BOTTOM - 6,
+        stroke: item.color, "stroke-width": "2"
+      }));
+      svg.appendChild(el("text", {
+        x: lgx + 16, y: PCT_BOTTOM - 3, "font-size": "9", fill: "#444"
+      }, item.label));
+      lgx += 20 + item.label.length * 5;
+    }
   }
 
   // Hypothetical projection annotation: anchored over the right-third

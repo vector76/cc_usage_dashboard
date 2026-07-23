@@ -72,6 +72,154 @@ func TestLoadUsedSeriesContinuousWithPrev(t *testing.T) {
 	}
 }
 
+// The fable series reads its own column but borrows the weekly window's
+// boundary, and must skip snapshots that didn't report the row rather than
+// treating them as zero.
+func TestLoadUsedSeriesFableWeekly(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	weeklyEnds := base.Add(3 * 24 * time.Hour)
+
+	rows := []struct {
+		offsetMin int
+		weekly    float64
+		fable     *float64
+	}{
+		{0, 44.0, nil},          // pre-column / older userscript: no fable row
+		{5, 44.0, floatPtr(70)}, // fable starts reporting
+		{10, 45.0, floatPtr(77)},
+	}
+
+	for _, r := range rows {
+		obs := base.Add(time.Duration(r.offsetMin) * time.Minute)
+		weekly, ends := r.weekly, weeklyEnds
+		if _, err := s.InsertQuotaSnapshotRecord(store.QuotaSnapshotRecord{
+			ObservedAt: obs, ReceivedAt: obs,
+			Source:           "test",
+			WeeklyUsed:       &weekly,
+			WeeklyWindowEnds: &ends,
+			FableWeeklyUsed:  r.fable,
+			RawJSON:          "{}",
+		}); err != nil {
+			t.Fatalf("InsertQuotaSnapshotRecord: %v", err)
+		}
+	}
+
+	h := &Handler{store: s, now: func() time.Time { return base }}
+
+	weekly, err := h.loadUsedSeries(s.DB(), "weekly", base, base.Add(1*time.Hour))
+	if err != nil {
+		t.Fatalf("loadUsedSeries weekly: %v", err)
+	}
+	if len(weekly) != 3 {
+		t.Fatalf("weekly series: got %d points, want 3", len(weekly))
+	}
+
+	fable, err := h.loadUsedSeries(s.DB(), "fable_weekly", base, base.Add(1*time.Hour))
+	if err != nil {
+		t.Fatalf("loadUsedSeries fable_weekly: %v", err)
+	}
+	if len(fable) != 2 {
+		t.Fatalf("fable series: got %d points, want 2 (the NULL row is skipped)", len(fable))
+	}
+	if fable[0].PercentUsed != 70.0 || fable[1].PercentUsed != 77.0 {
+		t.Errorf("fable percents = %v, %v; want 70, 77", fable[0].PercentUsed, fable[1].PercentUsed)
+	}
+	// The boundary comes from weekly_window_ends — there is no fable-specific
+	// ends column, and the pace diagonal depends on this being populated.
+	for i, p := range fable {
+		if p.WindowEnds == nil || !p.WindowEnds.Equal(weeklyEnds) {
+			t.Errorf("fable point %d: WindowEnds = %v, want the weekly boundary %v", i, p.WindowEnds, weeklyEnds)
+		}
+	}
+}
+
+// The weekly WindowState carries the fable curve; the session one never
+// does, and a weekly window with no fable observations omits it entirely so
+// the client can distinguish "no data" from "zero".
+func TestLoadActiveWindowFableSeries(t *testing.T) {
+	base := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+
+	setup := func(t *testing.T, fable *float64) *store.Store {
+		t.Helper()
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		s, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		t.Cleanup(func() { s.Close() })
+
+		if _, err := s.DB().Exec(`
+			INSERT INTO windows (kind, started_at, ends_at, baseline_percent_used, closed)
+			VALUES ('weekly', ?, ?, 40.0, 0), ('session', ?, ?, 20.0, 0)
+		`, store.FormatTime(base), store.FormatTime(base.Add(3*24*time.Hour)),
+			store.FormatTime(base), store.FormatTime(base.Add(5*time.Hour))); err != nil {
+			t.Fatalf("insert windows: %v", err)
+		}
+
+		obs := base.Add(10 * time.Minute)
+		weekly, ends := 44.0, base.Add(3*24*time.Hour)
+		session := 27.0
+		if _, err := s.InsertQuotaSnapshotRecord(store.QuotaSnapshotRecord{
+			ObservedAt: obs, ReceivedAt: obs,
+			Source:           "test",
+			SessionUsed:      &session,
+			WeeklyUsed:       &weekly,
+			WeeklyWindowEnds: &ends,
+			FableWeeklyUsed:  fable,
+			RawJSON:          "{}",
+		}); err != nil {
+			t.Fatalf("InsertQuotaSnapshotRecord: %v", err)
+		}
+		return s
+	}
+
+	t.Run("weekly window carries the fable series", func(t *testing.T) {
+		s := setup(t, floatPtr(77))
+		h := &Handler{store: s, now: func() time.Time { return base.Add(time.Hour) }}
+
+		ws, err := h.loadActiveWindow(s.DB(), "weekly")
+		if err != nil {
+			t.Fatalf("loadActiveWindow weekly: %v", err)
+		}
+		if len(ws.FableSeries) != 1 || ws.FableSeries[0].PercentUsed != 77.0 {
+			t.Fatalf("FableSeries = %+v, want one point at 77", ws.FableSeries)
+		}
+
+		sess, err := h.loadActiveWindow(s.DB(), "session")
+		if err != nil {
+			t.Fatalf("loadActiveWindow session: %v", err)
+		}
+		if sess.FableSeries != nil {
+			t.Errorf("session window should not carry a fable series, got %+v", sess.FableSeries)
+		}
+	})
+
+	t.Run("no fable observations omits the series", func(t *testing.T) {
+		s := setup(t, nil)
+		h := &Handler{store: s, now: func() time.Time { return base.Add(time.Hour) }}
+
+		ws, err := h.loadActiveWindow(s.DB(), "weekly")
+		if err != nil {
+			t.Fatalf("loadActiveWindow weekly: %v", err)
+		}
+		if ws.FableSeries != nil {
+			t.Errorf("FableSeries should be nil when nothing reported the row, got %+v", ws.FableSeries)
+		}
+		if len(ws.Series) != 1 {
+			t.Errorf("weekly series should still be populated, got %d points", len(ws.Series))
+		}
+	})
+}
+
+func floatPtr(f float64) *float64 { return &f }
+
 func TestModelFamily(t *testing.T) {
 	cases := []struct {
 		in   string
