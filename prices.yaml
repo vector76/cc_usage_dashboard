@@ -32,6 +32,19 @@ models:
   # moved. Opus 4.7 also uses a new tokenizer that may use up to 35%
   # more tokens for the same text — that affects token counts in the
   # transcript but not these per-token rates.
+  #
+  # Opus 5 is a drop-in upgrade at Opus 4.8's rates, so the whole 4.5+
+  # family below shares one tier. Note fast mode on Opus 5 bills at
+  # $10/$50 rather than these rates; usage_events has no column for the
+  # request's speed, so a fast-mode event is recorded under the standard
+  # rate and undercounted 2x. Every event observed so far reports
+  # "speed":"standard", so this is latent rather than active.
+  claude-opus-5:
+    input_rate_usd_per_m: 5.00
+    output_rate_usd_per_m: 25.00
+    cache_creation_rate_usd_per_m: 6.25
+    cache_read_rate_usd_per_m: 0.50
+
   claude-opus-4-8:
     input_rate_usd_per_m: 5.00
     output_rate_usd_per_m: 25.00
