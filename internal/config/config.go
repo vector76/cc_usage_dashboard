@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/vector76/cc_usage_dashboard/internal/slack"
 )
 
 // Config holds the application configuration.
@@ -60,6 +62,16 @@ type Config struct {
 		// or above this fraction (0–1). Lets the gate fire early in the
 		// week before pace-relative surplus has accumulated.
 		WeeklyAbsoluteThreshold float64 `yaml:"weekly_absolute_threshold"`
+		// SessionProfile / WeeklyProfile define the slack-activation
+		// boundary as [time_pct, remaining_pct] points in burn-down chart
+		// coordinates: at time_pct percent of the window elapsed, slack is
+		// available while percent-remaining is at or above the boundary
+		// (linear interpolation between points, flat beyond the endpoints).
+		// Absent (nil) means "derive the boundary from the scalar
+		// thresholds above", which reproduces the pre-profile behavior.
+		// Validated at load by slack.ProfileFromPairs.
+		SessionProfile [][]float64 `yaml:"session_profile"`
+		WeeklyProfile  [][]float64 `yaml:"weekly_profile"`
 	} `yaml:"slack"`
 
 	Retention struct {
@@ -118,6 +130,15 @@ func Load(path string) (*Config, error) {
 	cfg.Claude.ProjectsDir = expandPlaceholders(cfg.Claude.ProjectsDir)
 	cfg.Claude.CoworkSessionsDir = expandPlaceholders(cfg.Claude.CoworkSessionsDir)
 	cfg.Pricing.TablePath = expandPlaceholders(cfg.Pricing.TablePath)
+
+	// Reject malformed slack profiles at startup with the offending key in
+	// the message, rather than letting the gate misbehave silently later.
+	if _, err := slack.ProfileFromPairs(cfg.Slack.SessionProfile); err != nil {
+		return nil, fmt.Errorf("config slack.session_profile: %w", err)
+	}
+	if _, err := slack.ProfileFromPairs(cfg.Slack.WeeklyProfile); err != nil {
+		return nil, fmt.Errorf("config slack.weekly_profile: %w", err)
+	}
 
 	return &cfg, nil
 }

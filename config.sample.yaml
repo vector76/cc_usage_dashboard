@@ -1,0 +1,83 @@
+# Claude Usage Dashboard configuration.
+#
+# The trayapp created this file automatically on first run (it is a copy of
+# the built-in sample, config.sample.yaml). Every setting has a built-in
+# default; the commented entries below show those defaults. Uncomment and
+# edit a setting to change it, then restart the trayapp — the file is read
+# once at startup. Deleting this file is safe: the app falls back to the
+# same defaults and recreates the file on the next start.
+#
+# Full reference: docs/configuration.md.
+
+# ---------------------------------------------------------------------------
+# Slack-activation profiles
+#
+# These decide when the slack signal recommends releasing low-priority
+# "free" work to the external job queue. Each profile is a list of
+#
+#     [time_pct, remaining_pct]
+#
+# points in the same orientation as the dashboard burn-down charts: at
+# time_pct percent of the window elapsed, slack is available while the
+# quota remaining is at or above remaining_pct percent. Between points the
+# boundary interpolates linearly; before the first and after the last point
+# it extends flat. The dashboard's green zone is drawn from these exact
+# points, so the chart always agrees with the gate.
+# ---------------------------------------------------------------------------
+slack:
+  # Session (5-hour) window: require 98% remaining until just past half the
+  # window, then relax along a line to 50% remaining at the window's end.
+  session_profile:
+    - [0, 98]
+    - [52, 98]
+    - [100, 50]
+
+  # Weekly window: allow slack above 80% remaining early in the week,
+  # relaxing to 10% remaining by week's end. The same boundary is applied
+  # to the "Fable" weekly sub-row whenever the usage page reports one.
+  weekly_profile:
+    - [0, 80]
+    - [30, 80]
+    - [100, 10]
+
+  # Refuse slack when the newest usage snapshot is older than this many
+  # seconds (the userscript has stopped posting).
+  # baseline_max_age_seconds: 480
+
+  # Legacy scalar thresholds. Consulted only when the corresponding
+  # *_profile above is removed from this file; the profile defaults above
+  # are exactly equivalent to these values.
+  # session_surplus_threshold: 0.50
+  # weekly_surplus_threshold: 0.10
+  # session_absolute_threshold: 0.98
+  # weekly_absolute_threshold: 0.80
+
+# database:
+#   path: "usage.db"
+
+# http:
+#   port: 27812
+#   bind:
+#     - 127.0.0.1
+
+# claude:
+#   projects_dir: "~/.claude/projects"
+#   cowork_sessions_dir: "%APPDATA%\\Claude\\local-agent-mode-sessions"
+
+# Price table override; empty means "use a prices.yaml found next to the
+# exe (or in the other search dirs), else the table embedded in the binary".
+# pricing:
+#   table_path: ""
+
+# tailer:
+#   poll_interval_ms: 1000
+
+# logging:
+#   level: info        # debug | info | warn | error
+#   file: ""           # empty -> stderr; otherwise rotated log file path
+
+# retention:
+#   parse_errors_days: 30
+#   slack_samples_days: 90
+
+# enable_slack_sampling: false

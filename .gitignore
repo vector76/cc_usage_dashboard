@@ -31,6 +31,9 @@ ehthumbs.db
 Thumbs.db
 
 # Development
+# config.yaml is materialized from config.sample.yaml on first run and is
+# user-owned; only the sample is tracked.
+/config.yaml
 usage.db
 usage.db-wal
 usage.db-shm

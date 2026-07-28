@@ -82,6 +82,23 @@ func main() {
 	if *configPath == "" {
 		*configPath = config.ResolveConfigPath()
 	}
+	if *configPath == "" {
+		// First run: no config anywhere in the search chain. Materialize
+		// the embedded sample next to the exe so the user has a real file
+		// to edit (its active values match the built-in defaults, so this
+		// never changes behavior). Failure is non-fatal — fall back to the
+		// built-in defaults, exactly as before the file existed.
+		dir := "."
+		if exe, err := os.Executable(); err == nil {
+			dir = filepath.Dir(exe)
+		}
+		if path, err := config.EnsureDefaultConfig(dir, ccusage.DefaultConfigYAML); err != nil {
+			slog.Warn("failed to create default config.yaml; using built-in defaults", "dir", dir, "err", err)
+		} else {
+			slog.Info("created default config.yaml", "path", path)
+			*configPath = path
+		}
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {

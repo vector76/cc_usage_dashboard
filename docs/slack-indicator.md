@@ -63,45 +63,56 @@ the queue is expected to apply one client-side gate of its own.
 
 ### Server-side gates (set `release_recommended`)
 
-1. **Session headroom gate.** Release work if ANY of:
-   - `session.slack_fraction >= session_surplus_threshold` (default `0.50`), or
-   - `session.percent_used <= 100 * (1 - session_absolute_threshold)` (default
-     `0.98` → percent_used ≤ 2), or
+The two headroom gates are driven by **slack-activation profiles**:
+piecewise-linear boundaries in burn-down-chart coordinates, configured as
+`[time_pct, remaining_pct]` point lists (`slack.session_profile` /
+`slack.weekly_profile` in `config.yaml` — see `docs/configuration.md`). A
+gate passes when the window's percent-remaining is at or above the
+boundary's linearly-interpolated value at the window's elapsed fraction;
+beyond the first/last points the boundary extends flat. When a profile is
+not configured it is synthesized from the legacy scalar thresholds, which
+reproduces the original two-leg (pace-surplus OR absolute-floor) rule
+exactly. The dashboard's green zone renders the same points, so the chart
+always shows the boundary the gate is enforcing.
+
+1. **Session headroom gate.** Release work if EITHER:
+   - `100 - session.percent_used >= session_profile(elapsed_pct)` — with
+     the default profile `[0, 98], [52, 98], [100, 50]`, equivalent to the
+     legacy rule `slack_fraction >= 0.50 OR percent_used <= 2`, or
    - the session window is absent entirely (no active 5-hour session row, i.e.
      the user is between sessions). This deadlock-breaker disjunct lets slack
      fire during inactive limbo when `session_active=false` has closed the
      window early — without it the gate would stay closed forever in limbo,
      since pace and percent_used are undefined when there's no window to
      measure against.
-2. **Weekly headroom gate.** Release work if ANY of:
-   - `weekly.slack_fraction >= weekly_surplus_threshold` (default `0.10`), or
-   - `weekly.percent_used <= 100 * (1 - weekly_absolute_threshold)` (default
-     `0.80` → percent_used ≤ 20), or
+2. **Weekly headroom gate.** Release work if EITHER:
+   - `100 - weekly.percent_used >= weekly_profile(elapsed_pct)` — with the
+     default profile `[0, 80], [30, 80], [100, 10]`, equivalent to the
+     legacy rule `slack_fraction >= 0.10 OR percent_used <= 20`, or
    - the weekly window is absent entirely (no active 7-day weekly row).
      Symmetric to the session deadlock-breaker: the windows engine refuses
      to mint a phantom weekly under limbo (see `docs/no-active-session.md`),
      so without this branch the gate would deadlock at "no weekly window to
      gate against" — exactly when the user has the most quota free.
 
-   Two independent thresholds (instead of a `min(session, weekly)` combined
+   Two independent boundaries (instead of a `min(session, weekly)` combined
    fraction) because the two windows have very different time horizons: a
    5-hour session can recover from over-burn within hours, while a weekly
    over-burn lingers for days. A high bar on the session and a low bar on
    the weekly captures "leave the user enough short-term headroom to do
-   real work, but don't sit on excess long-term capacity." `slack_fraction`
-   is in fraction-of-quota units (range [-1, +1]).
+   real work, but don't sit on excess long-term capacity."
 
-   The absolute-threshold leg lets weekly slack activate early in the week
-   before pace-relative surplus has accrued. Without it the gate would
-   stay closed for the first day or two of every week even with no usage,
-   defeating the purpose of harvesting unused capacity.
+   The default weekly boundary's early flat segment (80% remaining) lets
+   weekly slack activate early in the week before pace-relative surplus
+   has accrued. Without it the gate would stay closed for the first day or
+   two of every week even with no usage, defeating the purpose of
+   harvesting unused capacity.
 
-3. **Fable headroom gate.** The same two-leg rule as the weekly gate, applied
-   to the "Fable" weekly sub-row and reusing the *same* thresholds — the two
+3. **Fable headroom gate.** The same rule as the weekly gate, applied to
+   the "Fable" weekly sub-row and reusing the *same* profile — the two
    rows share a window, so a separate pace horizon would be meaningless.
-   Release work if ANY of:
-   - `fable_weekly.slack_fraction >= weekly_surplus_threshold`, or
-   - `fable_weekly.percent_used <= 100 * (1 - weekly_absolute_threshold)`, or
+   Release work if EITHER:
+   - `100 - fable_weekly.percent_used >= weekly_profile(elapsed_pct)`, or
    - **the sub-row is not currently being reported.**
 
    The gate exists because "All models" is an aggregate: it can sit deep in
@@ -298,7 +309,7 @@ v1 just records the release decision.
 | `GET /slack`: no baseline snapshot ever recorded   | `release_recommended=false`. Show alert.|
 | `GET /slack`: window has not started (no events)   | `slack_fraction = null`, `release_recommended=false`. |
 | `GET /slack`: negative slack on either window      | `release_recommended=false`.            |
-| `GET /slack`: Fable sub-row ahead of pace and over the absolute floor | `fable_headroom` fails; `release_recommended=false` even if the aggregate weekly row is green. |
+| `GET /slack`: Fable sub-row's remaining below the weekly profile boundary | `fable_headroom` fails; `release_recommended=false` even if the aggregate weekly row is green. |
 | `GET /slack`: account never reports the Fable sub-row | `fable_weekly = null`, `fable_headroom` passes (fails open). |
 | `GET /slack`: Fable sub-row stops being reported mid-week | The first weekly-bearing snapshot without it supersedes the last reading: `fable_weekly = null`, gate opens and stays open. |
 | `GET /slack`: newest snapshots parsed only the session row | Fable reading from the last weekly-bearing snapshot still stands; a session-only row cannot open the gate. |

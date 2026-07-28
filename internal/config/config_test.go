@@ -128,6 +128,146 @@ slack:
 	}
 }
 
+// writeTempConfig writes content to a temp YAML file and returns its path.
+func writeTempConfig(t *testing.T, content string) string {
+	t.Helper()
+	tmpFile, err := os.CreateTemp("", "config-*.yaml")
+	if err != nil {
+		t.Fatalf("failed to create temp file: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
+	if _, err := tmpFile.WriteString(content); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	tmpFile.Close()
+	return tmpFile.Name()
+}
+
+func TestLoadSlackProfiles(t *testing.T) {
+	t.Run("absent profiles stay nil", func(t *testing.T) {
+		cfg, err := Load("")
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		if cfg.Slack.SessionProfile != nil {
+			t.Errorf("expected nil session_profile by default, got %v", cfg.Slack.SessionProfile)
+		}
+		if cfg.Slack.WeeklyProfile != nil {
+			t.Errorf("expected nil weekly_profile by default, got %v", cfg.Slack.WeeklyProfile)
+		}
+	})
+
+	t.Run("valid profiles parse as pair lists", func(t *testing.T) {
+		path := writeTempConfig(t, `
+slack:
+  session_profile:
+    - [0, 98]
+    - [52, 98]
+    - [100, 50]
+  weekly_profile:
+    - [0, 80]
+    - [30, 80]
+    - [100, 10]
+`)
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load failed: %v", err)
+		}
+		wantSession := [][]float64{{0, 98}, {52, 98}, {100, 50}}
+		if len(cfg.Slack.SessionProfile) != len(wantSession) {
+			t.Fatalf("session_profile: got %v, want %v", cfg.Slack.SessionProfile, wantSession)
+		}
+		for i, pair := range wantSession {
+			got := cfg.Slack.SessionProfile[i]
+			if len(got) != 2 || got[0] != pair[0] || got[1] != pair[1] {
+				t.Errorf("session_profile[%d]: got %v, want %v", i, got, pair)
+			}
+		}
+		if len(cfg.Slack.WeeklyProfile) != 3 || cfg.Slack.WeeklyProfile[1][0] != 30 {
+			t.Errorf("weekly_profile: got %v", cfg.Slack.WeeklyProfile)
+		}
+	})
+
+	invalid := []struct {
+		name, yaml, wantErr string
+	}{
+		{
+			"wrong arity",
+			"slack:\n  session_profile:\n    - [0, 98, 5]\n",
+			"session_profile",
+		},
+		{
+			"time not increasing",
+			"slack:\n  weekly_profile:\n    - [50, 80]\n    - [50, 70]\n",
+			"weekly_profile",
+		},
+		{
+			"remaining out of range",
+			"slack:\n  session_profile:\n    - [0, 150]\n",
+			"session_profile",
+		},
+		{
+			"explicitly empty list",
+			"slack:\n  session_profile: []\n",
+			"session_profile",
+		},
+	}
+	for _, tt := range invalid {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempConfig(t, tt.yaml)
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error %q does not mention %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestEnsureDefaultConfig(t *testing.T) {
+	sample := []byte("# sample\nhttp:\n  port: 12345\n")
+
+	t.Run("creates the file when absent", func(t *testing.T) {
+		dir := t.TempDir()
+		path, err := EnsureDefaultConfig(dir, sample)
+		if err != nil {
+			t.Fatalf("EnsureDefaultConfig: %v", err)
+		}
+		if path != filepath.Join(dir, "config.yaml") {
+			t.Errorf("unexpected path %q", path)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if string(got) != string(sample) {
+			t.Errorf("content mismatch: got %q", got)
+		}
+	})
+
+	t.Run("never touches an existing file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.yaml")
+		userContent := []byte("http:\n  port: 9999\n")
+		if err := os.WriteFile(path, userContent, 0644); err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+		got, err := EnsureDefaultConfig(dir, sample)
+		if err != nil {
+			t.Fatalf("EnsureDefaultConfig: %v", err)
+		}
+		if got != path {
+			t.Errorf("unexpected path %q", got)
+		}
+		after, _ := os.ReadFile(path)
+		if string(after) != string(userContent) {
+			t.Errorf("existing file was modified: %q", after)
+		}
+	})
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	_, err := Load("/nonexistent/path/to/config.yaml")
 	if err == nil {

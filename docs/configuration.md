@@ -1,10 +1,29 @@
 # Configuration
 
-The trayapp reads a single YAML file at startup. Default location on Windows
-is `%APPDATA%\usage_dashboard\config.yaml`. The schema is defined in
+The trayapp reads a single YAML file at startup, resolved by
+`config.ResolveConfigPath` through the same directory chain as the
+`prices.yaml` override — in order: the directory containing `trayapp.exe`,
+the current working directory, `%APPDATA%\usage_dashboard\`, then
+`~/.config/usage-dashboard/`. The schema is defined in
 `internal/config/config.go`; the keys below mirror that struct exactly.
 Values shown are the defaults `Load` applies when the field is absent —
-the file is optional, and an empty file produces a fully-functional config.
+an empty file produces a fully-functional config.
+
+## First-run materialization
+
+When no `config.yaml` exists anywhere in the chain, the trayapp writes one
+next to the executable from the embedded sample (repo-root
+`config.sample.yaml`, wired in via `config_embed.go` exactly like the price
+table) and loads it. The sample keeps the slack-activation profiles active
+— they're the setting users actually tune — and every other key commented
+out at its default, so the materialized file is behavior-neutral until
+edited. `config_sample_test.go` pins that neutrality: the sample must load
+to the same effective config as no file at all. A user's `config.yaml` is
+never overwritten or reconciled afterward, and the repo `.gitignore`
+excludes it so `git pull` deployments (`pullrun.bat`) never conflict with
+local edits. Materialization failure (e.g. exe dir not writable) is
+non-fatal: the app logs a warning and runs on built-in defaults, exactly as
+it did before the file existed.
 
 ```yaml
 database:
@@ -42,10 +61,22 @@ slack:
   headroom_threshold: 10.0          # legacy single-window threshold (percent units)
   freshness_threshold_ms: 60000
   baseline_max_age_seconds: 480     # baseline freshness gate (8 min)
-  session_surplus_threshold: 0.50   # session headroom gate
-  weekly_surplus_threshold: 0.10    # weekly pace-relative gate
-  session_absolute_threshold: 0.98  # session absolute-floor gate (percent_used <= 2)
-  weekly_absolute_threshold: 0.80   # weekly absolute-floor gate (percent_used <= 20)
+  # Slack-activation profiles: [time_pct, remaining_pct] points, see
+  # "Slack activation profiles" below. Absent (the default) means
+  # "synthesize from the scalar thresholds beneath" — the values shown
+  # here are that synthesis, i.e. the same behavior spelled out.
+  session_profile:
+    - [0, 98]
+    - [52, 98]
+    - [100, 50]
+  weekly_profile:
+    - [0, 80]
+    - [30, 80]
+    - [100, 10]
+  session_surplus_threshold: 0.50   # profile-synthesis input (see below)
+  weekly_surplus_threshold: 0.10    #   "
+  session_absolute_threshold: 0.98  #   "
+  weekly_absolute_threshold: 0.80   #   "
 
 retention:
   parse_errors_days: 30
@@ -85,35 +116,51 @@ is **always** available with zero configuration:
 The search order is defined by `config.PriceTableSearchDirs`. To update the
 built-in rates, edit the repo-root `prices.yaml` and rebuild.
 
-## Slack absolute thresholds
+## Slack activation profiles
 
-`session_absolute_threshold` and `weekly_absolute_threshold` parameterise
-the absolute-floor leg of each headroom gate. They share a single
-convention:
+`session_profile` and `weekly_profile` define when the headroom gates pass,
+as piecewise-linear boundaries in the same coordinates as the dashboard
+burn-down charts:
 
-- Units are a **fraction in `[0, 1]`** of the full quota, not a
-  percentage. The gate passes when `percent_used <= 100 * (1 - T)`.
-  So `0.98` means "release while at most 2% of the window is used,"
-  and `0.80` means "release while at most 20% is used."
-- **`1.0` disables the absolute branch.** With `T = 1.0` the comparison
-  becomes `percent_used <= 0`, which is unreachable in practice — only
-  the pace-relative surplus leg can fire the gate. Use this when the
-  absolute floor is unwanted (e.g. for tuning experiments where only
-  surplus-relative behaviour is being measured).
-- `0.0` would mean "release at any usage level," which collapses the
-  gate to "always pass" via the absolute leg. This is allowed but
-  rarely useful.
+- Each point is `[time_pct, remaining_pct]`: at `time_pct` percent of the
+  window elapsed, slack is available while the percent of quota remaining
+  is **at or above** `remaining_pct`.
+- Between points the boundary interpolates linearly; before the first and
+  after the last point it extends flat at that point's `remaining_pct`.
+- Validation (at load, fatal on failure): every point has exactly two
+  values, both in `[0, 100]`, with `time_pct` strictly increasing. An
+  explicitly empty list is rejected; omit the key instead.
+- The weekly profile also gates the "Fable" weekly sub-row when the usage
+  page reports one — the two rows share a window, so they share a boundary.
+- The dashboard's green slack zone is drawn from the same server-reported
+  points (`/api/dashboard/state` → `slack_profiles`), so the chart and the
+  gate cannot disagree.
 
-Defaults match the values shown in the YAML block above:
-`session_absolute_threshold: 0.98` and `weekly_absolute_threshold: 0.80`.
-The threshold meanings and the disjunctive structure of the headroom
-gates are documented in full in `docs/slack-indicator.md`.
+The implementation is `slack.Profile` in `internal/slack/profile.go`;
+gate semantics and the full gate list live in `docs/slack-indicator.md`.
 
-The session headroom gate also has a third disjunct unrelated to this
-threshold — "session window absent entirely" — which short-circuits to
-true when there is no active session window. That leg is independent of
-`session_absolute_threshold`; setting the threshold to `1.0` does not
-suppress it. See `docs/no-active-session.md` for the wiring.
+### Legacy scalar thresholds
+
+When a profile key is **absent**, it is synthesized from the four scalar
+thresholds (`slack.SynthesizeProfile`), reproducing the original two-leg
+gate exactly: pass when `slack_fraction >= *_surplus_threshold` (pace leg)
+OR `percent_used <= 100 * (1 - *_absolute_threshold)` (absolute-floor leg).
+In boundary form that is a flat floor at `100 * absolute` until the pace
+line `100 * (1 + surplus) - elapsed_pct` dips below it, then the pace line
+— which is exactly the default profiles shown in the YAML block above.
+
+Scalar conventions (all fractions in `[0, 1]` of the full quota):
+
+- `*_absolute_threshold: 1.0` disables the absolute branch (the floor sits
+  at 100% remaining, reachable only at exactly-untouched quota).
+- `*_absolute_threshold: 0.0` collapses the gate to "always pass".
+
+A configured profile takes precedence; the scalars are then ignored.
+
+The session headroom gate also has a disjunct independent of any threshold
+or profile — "session window absent entirely" — which short-circuits to
+true when there is no active session window. See
+`docs/no-active-session.md` for the wiring.
 
 ## Path placeholders
 

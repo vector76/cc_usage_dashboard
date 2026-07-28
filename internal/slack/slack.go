@@ -49,6 +49,11 @@ type WindowMetrics struct {
 }
 
 // Config holds slack calculation configuration.
+//
+// The headroom gates are driven entirely by SessionProfile / WeeklyProfile.
+// The legacy scalar thresholds remain as synthesis inputs: when a profile is
+// nil, NewCalculator derives it from the corresponding surplus + absolute
+// pair via SynthesizeProfile, which reproduces the pre-profile gate exactly.
 type Config struct {
 	BaselineMaxAgeSeconds   int
 	SessionSurplusThreshold float64
@@ -61,6 +66,14 @@ type Config struct {
 	// above which the weekly headroom gate also passes, regardless of
 	// pace. Lets the gate fire early in the week.
 	WeeklyAbsoluteThreshold float64
+	// SessionProfile, when non-nil, is the session headroom gate: the gate
+	// passes iff percent_remaining is at or above the profile's threshold
+	// at the window's elapsed fraction (see Profile).
+	SessionProfile Profile
+	// WeeklyProfile is the same for the weekly window, and is shared by the
+	// Fable sub-row gate — the two rows are measured against the same
+	// window, so a separate pace horizon would be meaningless.
+	WeeklyProfile Profile
 }
 
 // Calculator computes the slack signal. It is safe for concurrent use; a
@@ -74,12 +87,28 @@ type Calculator struct {
 	paused bool
 }
 
-// NewCalculator creates a new slack calculator.
+// NewCalculator creates a new slack calculator. Nil profiles are synthesized
+// from the legacy scalar thresholds so every caller — including ones predating
+// profiles — gets gate behavior identical to the two-leg rule those scalars
+// used to drive directly.
 func NewCalculator(db *sql.DB, cfg Config) *Calculator {
+	if cfg.SessionProfile == nil {
+		cfg.SessionProfile = SynthesizeProfile(cfg.SessionSurplusThreshold, cfg.SessionAbsoluteThreshold)
+	}
+	if cfg.WeeklyProfile == nil {
+		cfg.WeeklyProfile = SynthesizeProfile(cfg.WeeklySurplusThreshold, cfg.WeeklyAbsoluteThreshold)
+	}
 	return &Calculator{
 		db:     db,
 		config: cfg,
 	}
+}
+
+// Profiles returns the active session and weekly slack-activation profiles
+// (post-synthesis, so never nil). The dashboard renders these as the green
+// slack zone so the chart can never disagree with the gate.
+func (c *Calculator) Profiles() (session, weekly Profile) {
+	return c.config.SessionProfile, c.config.WeeklyProfile
 }
 
 // SetPaused sets the pause state.
@@ -155,39 +184,25 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 
 	resp.SlackCombinedFraction = c.combineSlackFractions(resp.Session, resp.Weekly)
 
-	// Session passes if EITHER the pace-relative surplus is met OR the
-	// absolute remaining-quota floor is met. A nil session window is the
-	// deadlock-breaker: when no active session row exists, getActiveWindow
-	// returns nil and we let the absolute branch pass so the gate can fire.
-	sessionPaceOk := resp.Session != nil &&
-		resp.Session.SlackFraction != nil &&
-		*resp.Session.SlackFraction >= c.config.SessionSurplusThreshold
-	sessionAbsoluteOk := resp.Session == nil ||
-		(resp.Session.PercentUsed != nil &&
-			*resp.Session.PercentUsed <= (1-c.config.SessionAbsoluteThreshold)*100)
-	sessionHeadroomOk := sessionPaceOk || sessionAbsoluteOk
-	// Weekly passes if EITHER the pace-relative surplus is met OR the
-	// absolute remaining-quota floor is met. The latter lets slack
-	// activate early in the week before pace-relative surplus accrues.
+	// Each headroom gate compares percent-remaining against its profile's
+	// threshold at the window's elapsed fraction. A nil session window is
+	// the deadlock-breaker: when no active session row exists, getActiveWindow
+	// returns nil and the gate passes so slack can fire during inactive limbo.
+	sessionHeadroomOk := resp.Session == nil ||
+		profilePasses(c.config.SessionProfile, resp.Session)
 	// A nil weekly window is the symmetric deadlock-breaker (mirrors the
 	// session path): when the windows engine refuses to mint a phantom
 	// weekly row under limbo (see docs/no-active-session.md), there is
 	// no row to gate against and the queue would otherwise deadlock with
-	// the most quota free. Letting the absolute branch pass on nil
-	// unblocks it.
-	weeklyPaceOk := resp.Weekly != nil &&
-		resp.Weekly.SlackFraction != nil &&
-		*resp.Weekly.SlackFraction >= c.config.WeeklySurplusThreshold
-	weeklyAbsoluteOk := resp.Weekly == nil ||
-		(resp.Weekly.PercentUsed != nil &&
-			*resp.Weekly.PercentUsed <= (1-c.config.WeeklyAbsoluteThreshold)*100)
-	weeklyHeadroomOk := weeklyPaceOk || weeklyAbsoluteOk
+	// the most quota free.
+	weeklyHeadroomOk := resp.Weekly == nil ||
+		profilePasses(c.config.WeeklyProfile, resp.Weekly)
 
-	// The Fable sub-row gets the same two-leg rule and the same thresholds as
-	// the weekly aggregate, because it is measured against the same window.
-	// It exists because "All models" can sit deep in the green while the
-	// Fable sub-quota is nearly exhausted; releasing free work then would
-	// spend exactly the capacity the user is about to need.
+	// The Fable sub-row gets the same profile as the weekly aggregate,
+	// because it is measured against the same window. It exists because
+	// "All models" can sit deep in the green while the Fable sub-quota is
+	// nearly exhausted; releasing free work then would spend exactly the
+	// capacity the user is about to need.
 	//
 	// Fails OPEN whenever the sub-row is not being reported (nil FableWeekly):
 	// pre-July-2026 history, userscripts predating the extractor change,
@@ -197,13 +212,8 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 	// genuinely means "not observed" rather than "zero" — and a reading that
 	// a later observation has superseded is not a reading (see
 	// getFableWeeklyUsed).
-	fablePaceOk := resp.FableWeekly != nil &&
-		resp.FableWeekly.SlackFraction != nil &&
-		*resp.FableWeekly.SlackFraction >= c.config.WeeklySurplusThreshold
-	fableAbsoluteOk := resp.FableWeekly == nil ||
-		(resp.FableWeekly.PercentUsed != nil &&
-			*resp.FableWeekly.PercentUsed <= (1-c.config.WeeklyAbsoluteThreshold)*100)
-	fableHeadroomOk := fablePaceOk || fableAbsoluteOk
+	fableHeadroomOk := resp.FableWeekly == nil ||
+		profilePasses(c.config.WeeklyProfile, resp.FableWeekly)
 
 	freshOk, err := c.baselineFreshnessOk(now)
 	if err != nil {
@@ -219,6 +229,20 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 	resp.ReleaseRecommended = sessionHeadroomOk && weeklyHeadroomOk && fableHeadroomOk && freshOk && !paused
 
 	return resp, nil
+}
+
+// profilePasses reports whether a window's observed percent-remaining sits at
+// or above the profile's threshold at the window's elapsed fraction. A nil
+// PercentUsed fails: no measurement = don't release (the fail-open cases are
+// the callers' nil-metrics disjuncts, decided before this is consulted).
+// PercentExpected doubles as the elapsed fraction in percent — computeMetrics
+// clamps it to [0, 100], and it is 0 before the window starts, which matches
+// the profile's flat extension to the left of its first point.
+func profilePasses(p Profile, m *WindowMetrics) bool {
+	if m.PercentUsed == nil {
+		return false
+	}
+	return (100 - *m.PercentUsed) >= p.ThresholdAt(m.PercentExpected)
 }
 
 // activeWindow holds the fields we need from the windows table.

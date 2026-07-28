@@ -104,6 +104,17 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	if err != nil {
 		slog.Warn("price table load failed; cost computation disabled", "err", err)
 	}
+	// config.Load already rejected malformed profiles; a failure here means
+	// the caller built the Config by hand, so degrade to the synthesized
+	// defaults rather than refusing to start.
+	sessionProfile, err := slack.ProfileFromPairs(cfg.Slack.SessionProfile)
+	if err != nil {
+		slog.Warn("invalid slack.session_profile; using thresholds instead", "err", err)
+	}
+	weeklyProfile, err := slack.ProfileFromPairs(cfg.Slack.WeeklyProfile)
+	if err != nil {
+		slog.Warn("invalid slack.weekly_profile; using thresholds instead", "err", err)
+	}
 	srv := &Server{
 		mux:        http.NewServeMux(),
 		store:      s,
@@ -116,6 +127,8 @@ func New(s *store.Store, cfg *config.Config) *Server {
 			WeeklySurplusThreshold:   cfg.Slack.WeeklySurplusThreshold,
 			SessionAbsoluteThreshold: cfg.Slack.SessionAbsoluteThreshold,
 			WeeklyAbsoluteThreshold:  cfg.Slack.WeeklyAbsoluteThreshold,
+			SessionProfile:           sessionProfile,
+			WeeklyProfile:            weeklyProfile,
 		}),
 		windowsEngine: windows.NewEngine(s.DB()),
 		now:           time.Now,

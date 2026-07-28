@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vector76/cc_usage_dashboard/internal/config"
 	"github.com/vector76/cc_usage_dashboard/internal/dashboard"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 )
@@ -84,6 +85,7 @@ func TestDashboardStateJSONShape(t *testing.T) {
 		"parse_errors_24h",
 		"paused",
 		"slack_release_recommended",
+		"slack_profiles",
 	} {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("response missing documented field %q", key)
@@ -105,6 +107,49 @@ func TestDashboardStateJSONShape(t *testing.T) {
 	}
 	if paused {
 		t.Error("expected paused=false on fresh server")
+	}
+}
+
+// TestDashboardStateIncludesSlackProfiles: the state payload carries the
+// active slack-activation profiles so the chart's green zone is drawn from
+// the same points the gate evaluates — configured profiles pass through
+// verbatim, unconfigured ones arrive as the synthesis from the scalar
+// thresholds.
+func TestDashboardStateIncludesSlackProfiles(t *testing.T) {
+	testStore, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer testStore.Close()
+
+	cfg := &config.Config{}
+	cfg.Slack.SessionSurplusThreshold = 0.50
+	cfg.Slack.SessionAbsoluteThreshold = 0.98
+	cfg.Slack.WeeklyProfile = [][]float64{{0, 75}, {100, 25}}
+	srv := New(testStore, cfg)
+
+	state := fetchDashboardState(t, srv)
+
+	wantSession := [][]float64{{0, 98}, {52, 98}, {100, 50}}
+	assertPairsEqual(t, "session", state.SlackProfiles.Session, wantSession)
+	wantWeekly := [][]float64{{0, 75}, {100, 25}}
+	assertPairsEqual(t, "weekly", state.SlackProfiles.Weekly, wantWeekly)
+}
+
+func assertPairsEqual(t *testing.T, label string, got, want [][]float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s profile: got %v, want %v", label, got, want)
+	}
+	for i := range want {
+		if len(got[i]) != 2 {
+			t.Fatalf("%s profile point %d: got %v", label, i, got[i])
+		}
+		for j := 0; j < 2; j++ {
+			if diff := got[i][j] - want[i][j]; diff > 1e-6 || diff < -1e-6 {
+				t.Errorf("%s profile point %d: got %v, want %v", label, i, got[i], want[i])
+			}
+		}
 	}
 }
 

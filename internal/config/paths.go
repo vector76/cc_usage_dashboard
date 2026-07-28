@@ -5,25 +5,37 @@ import (
 	"path/filepath"
 )
 
-// ResolveConfigPath finds the config file, checking standard locations.
+// ResolveConfigPath finds the config file, probing the same directory chain
+// as the prices.yaml override (see PriceTableSearchDirs): exe dir, current
+// directory, %APPDATA%\usage_dashboard, ~/.config/usage-dashboard. Returns ""
+// when no config.yaml exists anywhere — the trayapp then materializes the
+// embedded sample via EnsureDefaultConfig rather than running fileless.
 func ResolveConfigPath() string {
-	// Check current directory first
-	if _, err := os.Stat("config.yaml"); err == nil {
-		return "config.yaml"
-	}
-
-	// Check user config directory
-	home, err := os.UserHomeDir()
-	if err == nil {
-		// Linux/macOS: ~/.config/usage-dashboard/
-		xdgPath := filepath.Join(home, ".config", "usage-dashboard", "config.yaml")
-		if _, err := os.Stat(xdgPath); err == nil {
-			return xdgPath
+	for _, dir := range PriceTableSearchDirs() {
+		candidate := filepath.Join(dir, "config.yaml")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
 		}
 	}
-
-	// No config found, will use defaults
 	return ""
+}
+
+// EnsureDefaultConfig writes sample to dir/config.yaml if the file does not
+// already exist, returning the file's path. An existing file is never
+// touched — the sample is a first-run scaffold, not something to reconcile
+// against later. Callers treat a write failure as non-fatal: the app can
+// always run on built-in defaults.
+func EnsureDefaultConfig(dir string, sample []byte) (string, error) {
+	path := filepath.Join(dir, "config.yaml")
+	if _, err := os.Stat(path); err == nil {
+		return path, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.WriteFile(path, sample, 0644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // ResolveDBPath returns the database path.

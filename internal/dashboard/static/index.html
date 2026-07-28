@@ -330,29 +330,30 @@ function renderBurnDown(svgID, win, opts) {
   // Slack-activation zone: faint green polygon covering where the
   // headroom gate would pass for this window. Drawn beneath the pace
   // line and the data series so they remain readable on top.
-  //   - opts.slackSurplusPct: pace-relative threshold in percentage
-  //     points (e.g. 50 for session = "50pp above pace remaining").
-  //   - opts.slackFloorPct: optional absolute percent_remaining floor
-  //     (e.g. 80 for weekly). Above this, the gate passes regardless of
-  //     pace. Pass 100 (or omit) to make the zone purely pace-relative —
-  //     the polygon then degenerates to the upper-right triangle.
-  if (opts.slackSurplusPct != null) {
-    const surplus = opts.slackSurplusPct;
-    const floor = opts.slackFloorPct != null ? opts.slackFloorPct : 100;
+  //
+  // opts.slackProfile is a list of [time_pct, remaining_pct] points — the
+  // same piecewise-linear boundary the backend gate evaluates (server-sent
+  // via state.slack_profiles, ultimately from config.yaml). The zone is
+  // everything at or above the boundary: top edge along 100%, lower edge
+  // tracing the profile from window end back to window start. Beyond the
+  // profile's first/last points the boundary extends flat, mirroring
+  // Profile.ThresholdAt.
+  if (opts.slackProfile && opts.slackProfile.length > 0) {
+    const prof = opts.slackProfile;
     const dur = end - start;
-    // t where the offset pace line crosses the absolute floor (or the
-    // chart top, when floor=100).
-    const tFloorCross = start + ((100 - floor + surplus) / 100) * dur;
-    // Vertices clockwise from top-left. When floor=100 the leftmost two
-    // vertices both sit at y=100 → the polygon collapses to the triangle
-    // (tFloorCross, 100), (end, 100), (end, surplus).
-    const verts = [
-      [start, 100],
-      [end, 100],
-      [end, surplus],
-      [tFloorCross, floor],
-      [start, floor],
-    ];
+    const tAt = (timePct) => start + (timePct / 100) * dur;
+
+    const verts = [[start, 100], [end, 100]];
+    // Lower edge, right to left. Flat extensions first/last when the
+    // profile doesn't reach the window edges.
+    const last = prof[prof.length - 1];
+    if (last[0] < 100) verts.push([end, last[1]]);
+    for (let i = prof.length - 1; i >= 0; i--) {
+      verts.push([tAt(prof[i][0]), prof[i][1]]);
+    }
+    const first = prof[0];
+    if (first[0] > 0) verts.push([start, first[1]]);
+
     const points = verts.map(([t, pct]) => `${sx(t)},${syPct(pct)}`).join(" ");
     // Hypothetical → lighter fill (the chosen "projection" treatment).
     // No live usage means no real slack to highlight; we keep the polygon
@@ -797,19 +798,21 @@ async function refresh() {
     const sResp = await fetch("/api/dashboard/state");
     const s = await sResp.json();
     renderStatus(s);
+    // Slack zones come from the server (state.slack_profiles), which
+    // reports the exact boundaries the headroom gates evaluate — either
+    // config.yaml's session_profile/weekly_profile or the defaults
+    // synthesized from the scalar thresholds. The fallbacks only matter
+    // when a cached page talks to a server predating slack_profiles.
+    const profiles = s.slack_profiles || {};
     // Session: extend domain 10h backwards so the current 5h window
     // sits in the rightmost third and the prior two sessions are
-    // visible for context. Slack zone = "50pp above pace" UNION
-    // "≥98% remaining" (mirrors SessionAbsoluteThreshold=0.98).
+    // visible for context.
     renderBurnDown("chart-session", s.session, {
       lookbackMs: 10 * 3600 * 1000,
-      slackSurplusPct: 50,
-      slackFloorPct: 98,
+      slackProfile: profiles.session || [[0, 98], [52, 98], [100, 50]],
     });
-    // Weekly slack zone = "10pp above pace" UNION "≥80% remaining".
     renderBurnDown("chart-weekly", s.weekly, {
-      slackSurplusPct: 10,
-      slackFloorPct: 80,
+      slackProfile: profiles.weekly || [[0, 80], [30, 80], [100, 10]],
     });
   } catch (e) { console.error("state error", e); }
   try {

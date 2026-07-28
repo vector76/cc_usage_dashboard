@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -128,6 +129,30 @@ type State struct {
 	// "release: yes/no" without a separate HTTP poll. Null if the slack
 	// calculator errors (rare; surfaced in logs).
 	SlackReleaseRecommended *bool `json:"slack_release_recommended"`
+	// SlackProfiles carries the slack-activation boundaries the calculator
+	// is actually gating on, as [time_pct, remaining_pct] points, so the
+	// green zone on the burn-down charts is drawn from the same numbers
+	// that decide release_recommended and can never drift from them.
+	SlackProfiles SlackProfiles `json:"slack_profiles"`
+}
+
+// SlackProfiles is the JSON shape of the active slack-activation profiles.
+type SlackProfiles struct {
+	Session [][]float64 `json:"session"`
+	Weekly  [][]float64 `json:"weekly"`
+}
+
+// profilePairs flattens a slack.Profile into JSON-friendly pairs. Values are
+// rounded to 1e-6 — synthesis arithmetic produces artifacts like
+// 30.000000000000004, which would otherwise leak into the payload; the
+// rounding is display-side only and far below any gate-relevant resolution.
+func profilePairs(p slack.Profile) [][]float64 {
+	round := func(v float64) float64 { return math.Round(v*1e6) / 1e6 }
+	out := make([][]float64, 0, len(p))
+	for _, pt := range p {
+		out = append(out, []float64{round(pt.TimePct), round(pt.RemainingPct)})
+	}
+	return out
 }
 
 // Handler serves the dashboard UI and state endpoint.
@@ -238,6 +263,12 @@ func (h *Handler) computeState() (*State, error) {
 	state.ParseErrors24h = count
 
 	state.Paused = h.slackCalc.IsPaused()
+
+	sessionProfile, weeklyProfile := h.slackCalc.Profiles()
+	state.SlackProfiles = SlackProfiles{
+		Session: profilePairs(sessionProfile),
+		Weekly:  profilePairs(weeklyProfile),
+	}
 
 	if slackResp, err := h.slackCalc.GetSlack(); err != nil {
 		// Don't fail the entire state response over a slack-calc hiccup;
