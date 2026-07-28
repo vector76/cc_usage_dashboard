@@ -48,7 +48,7 @@ func TestHandleSlackQueryShape(t *testing.T) {
 	}
 
 	wantTopKeys := []string{
-		"now", "session", "weekly",
+		"now", "session", "weekly", "fable_weekly",
 		"slack_combined_fraction",
 		"paused", "release_recommended", "gates",
 	}
@@ -62,7 +62,7 @@ func TestHandleSlackQueryShape(t *testing.T) {
 	if err := json.Unmarshal(raw["gates"], &gates); err != nil {
 		t.Fatalf("decode gates: %v", err)
 	}
-	wantGateKeys := []string{"session_headroom", "weekly_headroom", "baseline_freshness", "not_paused"}
+	wantGateKeys := []string{"session_headroom", "weekly_headroom", "fable_headroom", "baseline_freshness", "not_paused"}
 	for _, k := range wantGateKeys {
 		if _, ok := gates[k]; !ok {
 			t.Errorf("missing gate %q in gates: %v", k, gates)

@@ -13,9 +13,16 @@ import (
 // SlackResponse is the response from GET /slack endpoint. JSON keys match
 // docs/slack-indicator.md.
 type SlackResponse struct {
-	Now                   time.Time       `json:"now"`
-	Session               *WindowMetrics  `json:"session"`
-	Weekly                *WindowMetrics  `json:"weekly"`
+	Now     time.Time      `json:"now"`
+	Session *WindowMetrics `json:"session"`
+	Weekly  *WindowMetrics `json:"weekly"`
+	// FableWeekly is the "Fable" sub-row measured against the same weekly
+	// window as Weekly. Nil whenever the sub-row is not currently being
+	// reported — see getFableWeeklyUsed.
+	FableWeekly *WindowMetrics `json:"fable_weekly"`
+	// SlackCombinedFraction stays min(session, weekly) and deliberately
+	// excludes fable: consumers read it as the two-window pace signal, and
+	// the fable constraint is expressed through the fable_headroom gate.
 	SlackCombinedFraction *float64        `json:"slack_combined_fraction"`
 	Paused                bool            `json:"paused"`
 	ReleaseRecommended    bool            `json:"release_recommended"`
@@ -127,6 +134,23 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 			return nil, fmt.Errorf("failed to compute weekly metrics: %w", err)
 		}
 		resp.Weekly = metrics
+
+		// The Fable sub-row is not a window kind of its own (see
+		// docs/data-model.md): it rides the weekly window and borrows its
+		// bounds and pace, differing only in percent_used.
+		fableUsed, err := c.getFableWeeklyUsed(weeklyWindow)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get fable weekly usage: %w", err)
+		}
+		if fableUsed != nil {
+			fableWindow := *weeklyWindow
+			fableWindow.baselineTotal = fableUsed
+			fableMetrics, err := c.computeMetrics(&fableWindow, now)
+			if err != nil {
+				return nil, fmt.Errorf("failed to compute fable metrics: %w", err)
+			}
+			resp.FableWeekly = fableMetrics
+		}
 	}
 
 	resp.SlackCombinedFraction = c.combineSlackFractions(resp.Session, resp.Weekly)
@@ -159,6 +183,28 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 			*resp.Weekly.PercentUsed <= (1-c.config.WeeklyAbsoluteThreshold)*100)
 	weeklyHeadroomOk := weeklyPaceOk || weeklyAbsoluteOk
 
+	// The Fable sub-row gets the same two-leg rule and the same thresholds as
+	// the weekly aggregate, because it is measured against the same window.
+	// It exists because "All models" can sit deep in the green while the
+	// Fable sub-quota is nearly exhausted; releasing free work then would
+	// spend exactly the capacity the user is about to need.
+	//
+	// Fails OPEN whenever the sub-row is not being reported (nil FableWeekly):
+	// pre-July-2026 history, userscripts predating the extractor change,
+	// accounts whose page does not render the sub-row, and the day the page
+	// stops rendering it altogether must all behave as they did before this
+	// gate existed. There is no backfill for fable_weekly_used, so "absent"
+	// genuinely means "not observed" rather than "zero" — and a reading that
+	// a later observation has superseded is not a reading (see
+	// getFableWeeklyUsed).
+	fablePaceOk := resp.FableWeekly != nil &&
+		resp.FableWeekly.SlackFraction != nil &&
+		*resp.FableWeekly.SlackFraction >= c.config.WeeklySurplusThreshold
+	fableAbsoluteOk := resp.FableWeekly == nil ||
+		(resp.FableWeekly.PercentUsed != nil &&
+			*resp.FableWeekly.PercentUsed <= (1-c.config.WeeklyAbsoluteThreshold)*100)
+	fableHeadroomOk := fablePaceOk || fableAbsoluteOk
+
 	freshOk, err := c.baselineFreshnessOk(now)
 	if err != nil {
 		return nil, err
@@ -166,10 +212,11 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 
 	resp.Gates["session_headroom"] = sessionHeadroomOk
 	resp.Gates["weekly_headroom"] = weeklyHeadroomOk
+	resp.Gates["fable_headroom"] = fableHeadroomOk
 	resp.Gates["baseline_freshness"] = freshOk
 	resp.Gates["not_paused"] = !paused
 
-	resp.ReleaseRecommended = sessionHeadroomOk && weeklyHeadroomOk && freshOk && !paused
+	resp.ReleaseRecommended = sessionHeadroomOk && weeklyHeadroomOk && fableHeadroomOk && freshOk && !paused
 
 	return resp, nil
 }
@@ -205,6 +252,55 @@ func (c *Calculator) getActiveWindow(kind string) (*activeWindow, error) {
 		w.baselineTotal = &v
 	}
 	return &w, nil
+}
+
+// getFableWeeklyUsed returns the current reading of the "Fable" weekly sub-row,
+// or nil when the sub-row is not being reported — which is the ordinary case for
+// accounts whose plan does not render it, for history predating July 2026, and
+// for whatever comes after Anthropic stops rendering it.
+//
+// Unlike the aggregate weekly percentage there is no windows column to read:
+// the sub-row is not modelled as its own window kind, so we go to
+// quota_snapshots directly. Two filters carry the semantics:
+//
+// `weekly_used IS NOT NULL` picks the newest row that actually parsed the weekly
+// section. The userscript takes all its bars from a single DOM scan and omits
+// what it did not find (see docs/userscript.md), so such a row reporting no
+// fable value is a positive statement that the sub-row was absent at that
+// instant — and it supersedes any earlier reading. Rows that never parsed the
+// weekly section say nothing either way and must not answer the question;
+// letting a session-only row through would open the gate on no evidence.
+//
+// The window bounds are the second filter. The sub-row resets with the weekly
+// window, so a reading from before started_at describes last week's quota and
+// must not pin the gate shut for the whole of the new week.
+//
+// A sub-row that is present but transiently unparsed (weekly section rendered
+// before the sub-row hydrates) therefore reads as absent for one observation.
+// That fails open, which is the intended direction, and self-corrects on the
+// next post rather than persisting.
+func (c *Calculator) getFableWeeklyUsed(w *activeWindow) (*float64, error) {
+	var used sql.NullFloat64
+	err := c.db.QueryRow(`
+		SELECT fable_weekly_used
+		FROM quota_snapshots
+		WHERE weekly_used IS NOT NULL
+		  AND observed_at >= ? AND observed_at <= ?
+		ORDER BY observed_at DESC
+		LIMIT 1
+	`, store.FormatTime(w.startedAt), store.FormatTime(w.endsAt)).Scan(&used)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to query fable snapshot: %w", err)
+	}
+	// The newest weekly-bearing row reported no sub-row: absent, not zero.
+	if !used.Valid {
+		return nil, nil
+	}
+	v := used.Float64
+	return &v, nil
 }
 
 // computeMetrics computes window metrics for an active window using

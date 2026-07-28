@@ -96,20 +96,75 @@ the queue is expected to apply one client-side gate of its own.
    stay closed for the first day or two of every week even with no usage,
    defeating the purpose of harvesting unused capacity.
 
-3. **Baseline freshness gate.** See dedicated section below.
+3. **Fable headroom gate.** The same two-leg rule as the weekly gate, applied
+   to the "Fable" weekly sub-row and reusing the *same* thresholds — the two
+   rows share a window, so a separate pace horizon would be meaningless.
+   Release work if ANY of:
+   - `fable_weekly.slack_fraction >= weekly_surplus_threshold`, or
+   - `fable_weekly.percent_used <= 100 * (1 - weekly_absolute_threshold)`, or
+   - **the sub-row is not currently being reported.**
 
-4. **Not-paused gate.** The user can pause the slack signal from the tray menu (see
+   The gate exists because "All models" is an aggregate: it can sit deep in
+   the green while the Fable sub-quota is nearly exhausted, and releasing
+   free work then spends exactly the capacity the user is about to need. When
+   both rows are reported, both must clear the same percentage limit and
+   either one over it withdraws slack; when only the aggregate is reported,
+   only the aggregate has to clear it.
+
+   The third disjunct **fails open**, unlike the session/weekly deadlock-
+   breakers which fail open for a different reason. Here it is a
+   compatibility stance: `fable_weekly_used` has no backfill (see
+   `docs/data-model.md`), so "absent" means "not observed" — pre-July-2026
+   history, userscripts predating the extractor change, accounts whose page
+   does not render the sub-row, and the day the page stops rendering it
+   altogether must all behave exactly as they did before this gate existed,
+   rather than deadlocking the queue on data that will not arrive.
+
+   Which reading counts as "currently reported" is the subtle part — see
+   dedicated section below.
+
+4. **Baseline freshness gate.** See dedicated section below.
+
+5. **Not-paused gate.** The user can pause the slack signal from the tray menu (see
    `docs/tray-app.md`). When paused, the endpoint still computes and returns the
    numeric fields so dashboards keep working, but `paused: true` and the gate fails.
    A queue distinguishing "paused" from "below threshold" can read `paused` directly.
 
 ### Client-side gate (queue's responsibility)
 
-5. **Per-job budget cap.** Each pending job has an estimated cost in dollars or
+6. **Per-job budget cap.** Each pending job has an estimated cost in dollars or
    percent-of-quota — that's the queue's choice. The slack endpoint exposes only
    the unitless `slack_fraction`, so the queue must convert its job estimate into
    the same percent-of-quota units before applying any "fits in slack" check.
    Prevents one big job from eating all available headroom.
+
+## Which Fable reading the gate uses
+
+There is no `windows` column to read — the sub-row is deliberately not its own
+window kind — so the reading comes from `quota_snapshots` directly, under two
+filters.
+
+**The newest row that parsed the weekly section wins, and its fable column is
+taken at face value.** The userscript reads every bar in a single DOM scan and
+omits what it did not find (see `docs/userscript.md`), so a row carrying
+`weekly_used` but no `fable_weekly_used` is a positive statement that the
+sub-row was absent at that instant — and it supersedes every earlier reading.
+Selecting the newest *non-null* fable value instead would let the last real
+reading gate for the remainder of the week after the row disappeared, which is
+exactly the case the fail-open stance exists to cover.
+
+Rows that never parsed the weekly section (`weekly_used` null — session bar
+only) are skipped: they say nothing either way about the sub-row, so letting one
+answer the question would open the gate on no evidence.
+
+**The window bounds are the second filter.** The sub-row resets with the weekly
+window, so a pre-window reading describes last week's quota and would otherwise
+pin the gate shut for the whole of the new week.
+
+A sub-row that is present but transiently unparsed — the weekly section
+rendering before the sub-row hydrates — therefore reads as absent for one
+observation. That fails open, the intended direction, and self-corrects on the
+next post rather than persisting.
 
 ## API
 
@@ -136,12 +191,20 @@ Response:
     "percent_expected": 57.1,
     "slack_fraction":   0.266
   },
+  "fable_weekly": {
+    "window_start":     "2026-04-21T00:00:00Z",
+    "window_end":       "2026-04-28T00:00:00Z",
+    "percent_used":     41.0,
+    "percent_expected": 57.1,
+    "slack_fraction":   0.161
+  },
   "slack_combined_fraction": 0.132,
   "paused": false,
   "release_recommended": true,
   "gates": {
     "session_headroom":   true,
     "weekly_headroom":    true,
+    "fable_headroom":     true,
     "baseline_freshness": true,
     "not_paused":         true
   }
@@ -152,6 +215,15 @@ Response:
 the raw fractions and apply its own logic. `percent_used` and `slack_fraction`
 are null whenever no in-window snapshot has arrived; in that state the
 corresponding headroom gate fails.
+
+`fable_weekly` borrows the weekly window's bounds and pace, differing only in
+`percent_used`; it is `null` whenever the sub-row is not currently being
+reported (see "Which Fable reading the gate uses"), and unlike the other two
+blocks a `null` there passes its gate rather than failing it.
+`slack_combined_fraction` stays
+`min(session, weekly)` and deliberately excludes fable — existing consumers
+read it as the two-window pace signal, and the fable constraint is expressed
+through the `fable_headroom` gate instead.
 
 ## Baseline freshness gate
 
@@ -226,6 +298,10 @@ v1 just records the release decision.
 | `GET /slack`: no baseline snapshot ever recorded   | `release_recommended=false`. Show alert.|
 | `GET /slack`: window has not started (no events)   | `slack_fraction = null`, `release_recommended=false`. |
 | `GET /slack`: negative slack on either window      | `release_recommended=false`.            |
+| `GET /slack`: Fable sub-row ahead of pace and over the absolute floor | `fable_headroom` fails; `release_recommended=false` even if the aggregate weekly row is green. |
+| `GET /slack`: account never reports the Fable sub-row | `fable_weekly = null`, `fable_headroom` passes (fails open). |
+| `GET /slack`: Fable sub-row stops being reported mid-week | The first weekly-bearing snapshot without it supersedes the last reading: `fable_weekly = null`, gate opens and stays open. |
+| `GET /slack`: newest snapshots parsed only the session row | Fable reading from the last weekly-bearing snapshot still stands; a session-only row cannot open the gate. |
 | `GET /slack`: snapshot older than `baseline_max_age` | Freshness gate fails.                 |
 | Either endpoint: trayapp restart mid-window        | Recovers from `windows` table state.    |
 | `POST /slack/release`: no window of requested kind | HTTP 409. Queue should not have called `/release` if the corresponding `GET /slack` reported `release_recommended=false`; this catches the misuse. |

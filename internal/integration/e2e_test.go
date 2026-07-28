@@ -151,7 +151,7 @@ func TestE2E_CLIModeA_ConsumptionAndSlack(t *testing.T) {
 		t.Fatalf("decode /slack: %v", err)
 	}
 	for _, k := range []string{
-		"now", "session", "weekly", "slack_combined_fraction",
+		"now", "session", "weekly", "fable_weekly", "slack_combined_fraction",
 		"paused", "release_recommended", "gates",
 	} {
 		if _, ok := slackResp[k]; !ok {
@@ -162,7 +162,7 @@ func TestE2E_CLIModeA_ConsumptionAndSlack(t *testing.T) {
 	if err := json.Unmarshal(slackResp["gates"], &gates); err != nil {
 		t.Fatalf("decode gates: %v", err)
 	}
-	for _, k := range []string{"session_headroom", "weekly_headroom", "baseline_freshness", "not_paused"} {
+	for _, k := range []string{"session_headroom", "weekly_headroom", "fable_headroom", "baseline_freshness", "not_paused"} {
 		if _, ok := gates[k]; !ok {
 			t.Errorf("/slack missing gate %q", k)
 		}
