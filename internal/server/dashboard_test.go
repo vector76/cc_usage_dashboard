@@ -45,6 +45,56 @@ func TestDashboardIndexHTML(t *testing.T) {
 	}
 }
 
+// The range report is its own page so the always-polling dashboard stays lean.
+// It must render, and it must reach the breakdown endpoint and the shared
+// family-colour constants — a page that loads but can't fetch is worse than a
+// 404 because the failure is silent.
+func TestReportPageHTML(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	req := httptest.NewRequest("GET", "/report", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("expected text/html content type, got %q", ct)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "<html") {
+		t.Error("response body does not look like HTML")
+	}
+	for _, want := range []string{"/api/usage/breakdown", "grouping.js"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("report page does not reference %q", want)
+		}
+	}
+}
+
+// grouping.js carries the family colours both pages render from, so it has to
+// be reachable as a standalone script rather than inlined in one page.
+func TestGroupingJSServesFamilyColors(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	req := httptest.NewRequest("GET", "/grouping.js", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"VOLUME_FAMILY_COLORS", "VOLUME_FAMILY_ORDER"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("grouping.js does not define %q", want)
+		}
+	}
+}
+
 func TestDashboardStateJSONShape(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()

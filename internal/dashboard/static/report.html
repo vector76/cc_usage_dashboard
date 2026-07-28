@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Usage Report — Claude Usage Dashboard</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 1rem; background: #fafafa; color: #222; }
+  h1 { margin: 0 0 0.25rem 0; font-size: 1.4rem; }
+  h2 { margin-top: 0; font-size: 1.1rem; }
+  .nav { margin: 0 0 1rem 0; font-size: 0.85rem; }
+  .nav a { color: #2563eb; }
+  section { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 4px; }
+  section:last-child { margin-bottom: 0; }
+  .muted { color: #888; }
+  /* Range controls: presets on one line, then the two custom inputs. */
+  .presets { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.8rem; }
+  .presets button { font: inherit; font-size: 0.85rem; padding: 0.25rem 0.6rem; cursor: pointer;
+                    background: #fff; border: 1px solid #ccc; border-radius: 3px; color: #333; }
+  .presets button:hover { background: #f0f0f0; }
+  .presets button[aria-pressed="true"] { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .custom { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.75rem; }
+  .custom label { display: flex; flex-direction: column; font-size: 0.8rem; color: #666; gap: 0.2rem; }
+  .custom input { font: inherit; font-size: 0.85rem; padding: 0.25rem; border: 1px solid #ccc; border-radius: 3px; }
+  .custom button { font: inherit; font-size: 0.85rem; padding: 0.3rem 0.9rem; cursor: pointer;
+                   background: #2563eb; border: 1px solid #2563eb; border-radius: 3px; color: #fff; }
+  .range-note { font-size: 0.8rem; color: #888; margin: 0.6rem 0 0 0; }
+  .range-err { font-size: 0.85rem; color: #b91c1c; margin: 0.6rem 0 0 0; }
+  /* Totals row above the table. */
+  .totals { display: flex; flex-wrap: wrap; gap: 1.5rem; margin: 0 0 0.9rem 0; }
+  .total-item { display: flex; flex-direction: column; }
+  .total-item .label { font-size: 0.75rem; color: #666; }
+  .total-item .value { font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+  .total-item .value.est { color: #6b7280; }
+  /* The four token columns make this table wide; let it scroll rather than
+     squeezing the page or wrapping numbers mid-digit. */
+  .table-scroll { overflow-x: auto; }
+  table.report { border-collapse: collapse; font-size: 0.85rem; white-space: nowrap; min-width: 100%; }
+  table.report th, table.report td { text-align: right; padding: 0.3rem 0.6rem; border-bottom: 1px solid #eee; }
+  table.report th { color: #666; font-weight: normal; border-bottom: 1px solid #ddd; }
+  table.report th.model, table.report td.model { text-align: left; }
+  table.report td { font-variant-numeric: tabular-nums; }
+  table.report tbody tr:hover { background: #fafafa; }
+  table.report tfoot td { border-bottom: none; border-top: 1px solid #ddd; color: #444; }
+  .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 2px; vertical-align: baseline; }
+  .est-flag { color: #6b7280; font-size: 0.75rem; margin-left: 0.4rem; }
+  .footnote { font-size: 0.8rem; color: #888; margin: 0.8rem 0 0 0; }
+  .empty { color: #aaa; margin: 0; }
+</style>
+</head>
+<body>
+<h1>Usage Report</h1>
+<p class="nav"><a href="/dashboard">← Back to dashboard</a></p>
+
+<section>
+  <h2>Time range</h2>
+  <div class="presets" id="presets"></div>
+  <div class="custom">
+    <label>From <input type="datetime-local" id="from"></label>
+    <label>To <input type="datetime-local" id="to"></label>
+    <button id="run">Run</button>
+  </div>
+  <p class="range-note" id="range-note"></p>
+  <p class="range-err" id="range-err" hidden></p>
+</section>
+
+<section>
+  <h2>By model</h2>
+  <div id="totals"></div>
+  <div id="table-host"></div>
+</section>
+
+<script src="/grouping.js"></script>
+<script>
+'use strict';
+
+// VOLUME_FAMILY_COLORS comes from grouping.js so a model is coloured the same
+// here as in the dashboard's stacked volume bars.
+
+const PRESETS = [
+  { id: "24h", label: "Last 24h", period: "24h" },
+  { id: "7d", label: "Last 7d", period: "7d" },
+  { id: "30d", label: "Last 30d", period: "30d" },
+  { id: "today", label: "Today", range: todayRange },
+  { id: "week", label: "This week", range: thisWeekRange },
+];
+
+// Presets are computed in LOCAL time and sent as absolute instants, because
+// "today" means the user's day, not a UTC one. localMidnight anchors to the
+// browser's zone; toISOString then converts to the UTC instant the server
+// compares against, so the boundary lands where the user expects even at a
+// +13 or -8 offset.
+function localMidnight(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+}
+
+function todayRange() {
+  const now = new Date();
+  return { start: localMidnight(now), end: now };
+}
+
+// Week starts Monday. getDay() is 0 for Sunday, so Sunday walks back 6 days
+// rather than 0 — otherwise a Sunday session would report a one-day "week".
+function thisWeekRange() {
+  const now = new Date();
+  const dow = now.getDay();
+  const back = dow === 0 ? 6 : dow - 1;
+  const start = localMidnight(now);
+  start.setDate(start.getDate() - back);
+  return { start, end: now };
+}
+
+// --- formatting ----------------------------------------------------------
+
+function fmtUSD(v) {
+  if (typeof v !== "number" || !isFinite(v)) return "—";
+  // Sub-cent totals read as "$0.00" and look like nothing happened, so small
+  // values keep enough digits to stay distinguishable from zero.
+  const digits = v !== 0 && Math.abs(v) < 0.01 ? 4 : 2;
+  return "$" + v.toFixed(digits);
+}
+
+function fmtInt(v) {
+  if (typeof v !== "number" || !isFinite(v)) return "—";
+  return v.toLocaleString();
+}
+
+function fmtPct(part, whole) {
+  if (!whole) return "—";
+  return (100 * part / whole).toFixed(1) + "%";
+}
+
+// fmtRange labels the table with the instants the server actually used, in
+// local time — the server echoes UTC, and showing that back would contradict
+// the local-time inputs the user typed.
+function fmtRange(startISO, endISO) {
+  const s = new Date(startISO), e = new Date(endISO);
+  if (isNaN(s.getTime()) || isNaN(e.getTime())) return "";
+  return s.toLocaleString() + "  →  " + e.toLocaleString();
+}
+
+// toLocalInputValue renders a Date as the "YYYY-MM-DDTHH:MM" a datetime-local
+// input requires. Built from local getters rather than toISOString, which would
+// shift the displayed value by the zone offset.
+function toLocalInputValue(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+    "T" + p(d.getHours()) + ":" + p(d.getMinutes());
+}
+
+// --- rendering -----------------------------------------------------------
+
+const TOKEN_COLUMNS = [
+  ["Input", "input_tokens"],
+  ["Output", "output_tokens"],
+  ["Cache write", "cache_creation_tokens"],
+  ["Cache read", "cache_read_tokens"],
+];
+
+function cell(row, text, cls) {
+  const td = document.createElement("td");
+  if (cls) td.className = cls;
+  td.textContent = text;
+  row.appendChild(td);
+  return td;
+}
+
+function clear(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function renderTotals(d) {
+  const host = document.getElementById("totals");
+  clear(host);
+  const wrap = document.createElement("div");
+  wrap.className = "totals";
+
+  const add = (label, value, estimated) => {
+    const item = document.createElement("div");
+    item.className = "total-item";
+    const l = document.createElement("span");
+    l.className = "label";
+    l.textContent = label;
+    const v = document.createElement("span");
+    v.className = estimated ? "value est" : "value";
+    v.textContent = value;
+    item.appendChild(l);
+    item.appendChild(v);
+    wrap.appendChild(item);
+  };
+
+  add("Total (USD eq.)", fmtUSD(d.total_cost_usd));
+  add("Measured", fmtUSD(d.measured_cost_usd));
+  // Estimated dollars are ceiling-priced guesses at models the price table has
+  // no rates for. Shown apart from the measured figure and in gray, matching
+  // how the burn-down bars treat them.
+  add("Estimated", fmtUSD(d.estimated_cost_usd), true);
+  add("Events", fmtInt(d.events_total));
+  if (d.events_without_cost > 0) {
+    add("Uncosted events", fmtInt(d.events_without_cost), true);
+  }
+  host.appendChild(wrap);
+
+  const note = document.createElement("p");
+  note.className = "range-note";
+  note.textContent = fmtRange(d.start, d.end);
+  host.appendChild(note);
+}
+
+function renderTable(d) {
+  const host = document.getElementById("table-host");
+  clear(host);
+
+  if (!d.models || d.models.length === 0) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "No usage recorded in this range.";
+    host.appendChild(p);
+    return;
+  }
+
+  const scroll = document.createElement("div");
+  scroll.className = "table-scroll";
+  const table = document.createElement("table");
+  table.className = "report";
+
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  const headers = [["Model", "model"]].concat(
+    TOKEN_COLUMNS.map(([label]) => [label, ""]),
+    [["Events", ""], ["Cost (USD eq.)", ""], ["Share", ""]],
+  );
+  for (const [label, cls] of headers) {
+    const th = document.createElement("th");
+    if (cls) th.className = cls;
+    th.textContent = label;
+    hr.appendChild(th);
+  }
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const m of d.models) {
+    const tr = document.createElement("tr");
+
+    // Model names come from transcripts and are not trusted input: built with
+    // textContent so a hostile value never reaches the HTML parser.
+    const nameCell = document.createElement("td");
+    nameCell.className = "model";
+    const sw = document.createElement("span");
+    sw.className = "swatch";
+    sw.style.background = VOLUME_FAMILY_COLORS[m.family] || VOLUME_FAMILY_COLORS.other;
+    nameCell.appendChild(sw);
+    nameCell.appendChild(document.createTextNode(m.model || "(unnamed)"));
+    if (m.estimated) {
+      const flag = document.createElement("span");
+      flag.className = "est-flag";
+      flag.textContent = "est.";
+      flag.title = "Priced at the table ceiling — no rates for this model, so the cost is an upper bound, not a measurement.";
+      nameCell.appendChild(flag);
+    }
+    tr.appendChild(nameCell);
+
+    for (const [, key] of TOKEN_COLUMNS) cell(tr, fmtInt(m[key]));
+
+    const evText = m.events_without_cost > 0
+      ? fmtInt(m.events) + " (" + fmtInt(m.events_without_cost) + " uncosted)"
+      : fmtInt(m.events);
+    cell(tr, evText);
+    cell(tr, fmtUSD(m.cost_usd));
+    cell(tr, fmtPct(m.cost_usd, d.total_cost_usd));
+
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+
+  // Column totals, so the reader can check the rows add up to the headline
+  // figure rather than taking it on trust.
+  const tfoot = document.createElement("tfoot");
+  const fr = document.createElement("tr");
+  cell(fr, "All models", "model");
+  for (const [, key] of TOKEN_COLUMNS) {
+    cell(fr, fmtInt(d.models.reduce((a, m) => a + (m[key] || 0), 0)));
+  }
+  cell(fr, fmtInt(d.events_total));
+  cell(fr, fmtUSD(d.total_cost_usd));
+  cell(fr, d.total_cost_usd ? "100%" : "—");
+  tfoot.appendChild(fr);
+  table.appendChild(tfoot);
+
+  scroll.appendChild(table);
+  host.appendChild(scroll);
+
+  // Keyed on the rows, not on estimated_cost_usd: a ceiling-priced model whose
+  // events carried no tokens (the "<synthetic>" rows) is flagged "est." while
+  // contributing $0, and a flag with no footnote to explain it is worse than no
+  // flag at all.
+  if (d.models.some((m) => m.estimated)) {
+    const fn = document.createElement("p");
+    fn.className = "footnote";
+    fn.textContent = "Rows marked “est.” were priced at the price table's ceiling because " +
+      "no rates are configured for that model. Their dollars are a deliberate upper bound; " +
+      "their token counts are exact.";
+    host.appendChild(fn);
+  }
+}
+
+function showError(msg) {
+  const err = document.getElementById("range-err");
+  err.textContent = msg;
+  err.hidden = false;
+}
+
+function clearError() {
+  document.getElementById("range-err").hidden = true;
+}
+
+// --- fetching ------------------------------------------------------------
+
+// run issues the request. A preset passes its period (or a computed local
+// range); the custom inputs pass absolute instants derived from local values.
+async function run(params, activePresetID) {
+  clearError();
+  for (const b of document.querySelectorAll("#presets button")) {
+    b.setAttribute("aria-pressed", String(b.dataset.preset === activePresetID));
+  }
+
+  const qs = new URLSearchParams(params).toString();
+  let resp, data;
+  try {
+    resp = await fetch("/api/usage/breakdown?" + qs);
+    data = await resp.json();
+  } catch (e) {
+    console.error("breakdown fetch failed", e);
+    showError("Could not reach the server.");
+    return;
+  }
+  if (!resp.ok) {
+    // The server deliberately does not echo the submitted range, so the
+    // message is generic; the inputs are still on screen for comparison.
+    showError(data && data.error ? "Request rejected: " + data.error : "Request failed.");
+    return;
+  }
+  renderTotals(data);
+  renderTable(data);
+
+  // Reflect the resolved range back into the inputs so switching from a preset
+  // to a custom tweak starts from what was just shown.
+  document.getElementById("from").value = toLocalInputValue(new Date(data.start));
+  document.getElementById("to").value = toLocalInputValue(new Date(data.end));
+}
+
+function runPreset(p) {
+  if (p.period) return run({ period: p.period }, p.id);
+  const { start, end } = p.range();
+  return run({ start: start.toISOString(), end: end.toISOString() }, p.id);
+}
+
+// runCustom converts the two datetime-local values — which carry no zone — into
+// absolute instants via the Date constructor, which interprets them in the
+// browser's zone. That conversion is the whole reason the server only ever
+// accepts RFC3339: it never has to guess which day the user meant.
+function runCustom() {
+  const fromVal = document.getElementById("from").value;
+  const toVal = document.getElementById("to").value;
+  if (!fromVal || !toVal) {
+    showError("Pick both a start and an end, or use a preset.");
+    return;
+  }
+  const start = new Date(fromVal), end = new Date(toVal);
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+    showError("Those dates could not be read.");
+    return;
+  }
+  if (end <= start) {
+    showError("The end must be after the start.");
+    return;
+  }
+  run({ start: start.toISOString(), end: end.toISOString() }, null);
+}
+
+function buildPresets() {
+  const host = document.getElementById("presets");
+  for (const p of PRESETS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = p.label;
+    b.dataset.preset = p.id;
+    b.setAttribute("aria-pressed", "false");
+    b.addEventListener("click", () => runPreset(p));
+    host.appendChild(b);
+  }
+}
+
+document.getElementById("run").addEventListener("click", runCustom);
+
+document.getElementById("range-note").textContent =
+  "Times are local. Presets like “Today” use your local midnight.";
+
+buildPresets();
+// Load something on arrival rather than an empty page. Nothing polls on a
+// timer here: this is a report, and re-scanning a 30-day range every few
+// seconds would cost far more than it tells anyone.
+runPreset(PRESETS[0]);
+</script>
+</body>
+</html>

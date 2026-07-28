@@ -21,10 +21,12 @@ and no cross-machine state.
 |  |    POST /slack/release        <- queue reports a released job          ||
 |  |    GET  /slack                <- current slack signal (external queue) ||
 |  |    GET  /consumption          <- USD + percent-of-quota over a period  ||
+|  |    GET  /api/usage/breakdown  <- per-model tokens + USD over a range   ||
 |  |    GET  /healthz              <- liveness                              ||
 |  |    GET  /metrics              <- counters (Prometheus text format)     ||
 |  |    GET  /                     <- dashboard HTML (alias of /dashboard)  ||
 |  |    GET  /dashboard            <- dashboard HTML                        ||
+|  |    GET  /report               <- per-model usage report HTML           ||
 |  |    GET  /api/dashboard/state  <- JSON state powering the dashboard     ||
 |  |    GET  /api/feedback         <- recent warnings, unknown models,      ||
 |  |                                  parse errors (dashboard feedback panel)||

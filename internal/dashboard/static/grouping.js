@@ -61,6 +61,25 @@ function groupPolylines(points) {
     return groups;
 }
 
+// Model-family colors. Families come from the backend's ModelFamily()
+// classifier (internal/consumption/breakdown.go). VOLUME_FAMILY_ORDER fixes the
+// bottom-up stack order within a volume bar, the legend order, and the row order
+// wherever a page groups by family. Shades are picked to stay distinct from each
+// other and readable against the light background: blue / green / red / yellow /
+// gray.
+//
+// These live here rather than in index.html because two pages render from them —
+// the dashboard's stacked bars and the range report's per-model table — and a
+// second copy is a second thing to forget when a family is added.
+const VOLUME_FAMILY_ORDER = ["opus", "sonnet", "fable", "haiku", "other"];
+const VOLUME_FAMILY_COLORS = {
+    opus: "#2563eb",   // blue
+    sonnet: "#16a34a", // green
+    fable: "#dc2626",  // red
+    haiku: "#eab308",  // yellow
+    other: "#9ca3af",  // gray
+};
+
 if (typeof module !== 'undefined') {
-    module.exports = { groupPolylines };
+    module.exports = { groupPolylines, VOLUME_FAMILY_ORDER, VOLUME_FAMILY_COLORS };
 }

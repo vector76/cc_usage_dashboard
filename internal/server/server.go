@@ -154,6 +154,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("GET /slack", srv.handleSlackQuery)
 	srv.mux.HandleFunc("POST /slack/release", srv.handleSlackRelease)
 	srv.mux.HandleFunc("GET /consumption", srv.handleConsumption)
+	srv.mux.HandleFunc("GET /api/usage/breakdown", srv.handleUsageBreakdown)
 	srv.mux.HandleFunc("GET /metrics", srv.handleMetrics)
 	srv.mux.HandleFunc("GET /api/feedback", srv.handleFeedback)
 	srv.mux.HandleFunc("POST /admin/reimport", srv.handleAdminReimport)

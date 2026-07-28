@@ -6,7 +6,9 @@
 <link rel="icon" type="image/png" href="/favicon.png">
 <style>
   body { font-family: system-ui, -apple-system, sans-serif; margin: 1rem; background: #fafafa; color: #222; }
-  h1 { margin: 0 0 1rem 0; font-size: 1.4rem; }
+  h1 { margin: 0 0 0.25rem 0; font-size: 1.4rem; }
+  .nav { margin: 0 0 1rem 0; font-size: 0.85rem; }
+  .nav a { color: #2563eb; }
   h2 { margin-top: 0; font-size: 1.1rem; }
   h3 { margin: 0 0 0.5rem 0; font-size: 0.95rem; color: #444; }
   section { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 4px; }
@@ -41,6 +43,7 @@
 </head>
 <body>
 <h1>Claude Usage Dashboard</h1>
+<p class="nav"><a href="/report">Usage report by model and time range →</a></p>
 
 <div class="info-row">
   <section id="status">
@@ -104,19 +107,10 @@ function el(tag, attrs, text) {
   if (text != null) e.textContent = text;
   return e;
 }
-// Model-family colors for the stacked volume bars. Families come from the
-// backend's modelFamily() classifier (see dashboard.go). VOLUME_FAMILY_ORDER
-// fixes both the bottom-up stack order within a bar and the legend order.
-// Shades are picked to stay distinct from each other and readable against
-// the light chart background: blue / green / red / yellow / gray.
-const VOLUME_FAMILY_ORDER = ["opus", "sonnet", "fable", "haiku", "other"];
-const VOLUME_FAMILY_COLORS = {
-  opus: "#2563eb",   // blue
-  sonnet: "#16a34a", // green
-  fable: "#dc2626",  // red
-  haiku: "#eab308",  // yellow
-  other: "#9ca3af",  // gray
-};
+// VOLUME_FAMILY_ORDER / VOLUME_FAMILY_COLORS come from grouping.js, loaded
+// above — the range report renders from the same two constants, so they live in
+// one file rather than being duplicated per page.
+//
 // renderVolumeLegend paints the static color key for the stacked volume
 // bars once. Shows all five families so the legend is stable regardless of
 // which families happen to be present in the current data.

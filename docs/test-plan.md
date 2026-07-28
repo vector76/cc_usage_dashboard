@@ -37,7 +37,8 @@ development; run the full suite before declaring done.
 | Windows engine                      | `go test ./internal/windows/...`                   | session and weekly derivation, baseline assignment, clock injection              |
 | Slack calculator                    | `go test ./internal/slack/...`                     | Per-window slack fractions, gates (session/weekly headroom, baseline freshness, not-paused), pause |
 | Consumption calculator              | `go test ./internal/consumption/...`               | Documented field names; snapshot-derived `consumed_session_pct` / `consumed_weekly_pct` with cross-window resets |
-| HTTP server (handlers + dashboard)  | `go test ./internal/server/...`                    | `/log`, `/parse_error`, `/snapshot`, `/slack`, `/slack/release`, `/consumption`  |
+| Per-model range breakdown           | `go test ./internal/consumption/...`               | Half-open `[start, end)` boundaries and range adjacency; measured vs ceiling-estimated dollars kept apart; per-model `cost_source` collapse (`mixed` / `none`); NULL-cost events reporting tokens without inflating dollars; `ParseRange` precedence and rejections |
+| HTTP server (handlers + dashboard)  | `go test ./internal/server/...`                    | `/log`, `/parse_error`, `/snapshot`, `/slack`, `/slack/release`, `/consumption`, `/api/usage/breakdown` (400 on a bad range, no echo of caller input), `/report` |
 | CLI hook payload parsing            | `go test ./cmd/clusage-cli/...`                    | Hook stdin payload → `/log` POST                                                 |
 | End-to-end integration              | `go test ./internal/integration/...`               | Six scenarios documented in `testdata/e2e_test.md`                                |
 
@@ -55,6 +56,12 @@ make test-userscript        # equivalent to: npm --prefix userscript test
 Expected: every `*.test.js` file under `userscript/test/` reports
 `pass`. The Go `make test` target does **not** invoke this; CI runs it
 via `make ci`.
+
+The same runner also covers the dashboard's shared browser modules under
+`internal/dashboard/static/`, since it is the only JS harness in the repo:
+`grouping.test.js` exercises `groupPolylines`, and `families.test.js`
+guards the model-family constants against drift from the Go classifier and
+against a page redeclaring them locally.
 
 ### Continuity-flag edge cases
 

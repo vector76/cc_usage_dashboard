@@ -11,9 +11,9 @@ import (
 	"math"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
+	"github.com/vector76/cc_usage_dashboard/internal/consumption"
 	"github.com/vector76/cc_usage_dashboard/internal/icon"
 	"github.com/vector76/cc_usage_dashboard/internal/slack"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
@@ -89,27 +89,13 @@ type SeriesBucket struct {
 	OtherModels []string           `json:"other_models,omitempty"`
 }
 
-// modelFamily classifies a usage_events.model value into a coarse family
-// for the stacked volume bars. Matching is case-insensitive by substring
-// and deliberately version-insensitive: claude-opus-4-8 and claude-opus-4-1
-// both map to "opus". An empty/NULL model or any unrecognized name maps to
-// "other". This is the single source of truth for the classification —
-// loadVolumeSeries groups by the raw model column in SQL and folds each
-// group into its family here.
+// modelFamily classifies a usage_events.model value into a coarse family for
+// the stacked volume bars. It delegates to consumption.ModelFamily, which is
+// the single source of truth: the range report's per-model table classifies
+// through the same function, so a model can never be coloured one way on the
+// burn-down bars and another way in the report.
 func modelFamily(model string) string {
-	m := strings.ToLower(model)
-	switch {
-	case strings.Contains(m, "opus"):
-		return "opus"
-	case strings.Contains(m, "sonnet"):
-		return "sonnet"
-	case strings.Contains(m, "fable"):
-		return "fable"
-	case strings.Contains(m, "haiku"):
-		return "haiku"
-	default:
-		return "other"
-	}
+	return consumption.ModelFamily(model)
 }
 
 // State is the JSON response for GET /api/dashboard/state.
@@ -161,6 +147,7 @@ type Handler struct {
 	slackCalc  *slack.Calculator
 	now        func() time.Time
 	indexHTML  []byte
+	reportHTML []byte
 	groupingJS []byte
 }
 
@@ -168,6 +155,10 @@ func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
 	html, err := fs.ReadFile(staticFS, "static/index.html")
 	if err != nil {
 		return nil, fmt.Errorf("dashboard: failed to load index.html: %w", err)
+	}
+	reportHTML, err := fs.ReadFile(staticFS, "static/report.html")
+	if err != nil {
+		return nil, fmt.Errorf("dashboard: failed to load report.html: %w", err)
 	}
 	groupingJS, err := fs.ReadFile(staticFS, "static/grouping.js")
 	if err != nil {
@@ -178,6 +169,7 @@ func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
 		slackCalc:  sc,
 		now:        func() time.Time { return time.Now().UTC() },
 		indexHTML:  html,
+		reportHTML: reportHTML,
 		groupingJS: groupingJS,
 	}, nil
 }
@@ -191,6 +183,10 @@ func (h *Handler) SetNow(fn func() time.Time) {
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", h.handleIndex)
 	mux.HandleFunc("GET /dashboard", h.handleIndex)
+	// The range report is a separate page: it reads GET /api/usage/breakdown on
+	// demand instead of joining the dashboard's 10-second poll, so an arbitrary
+	// multi-week scan never runs on a timer.
+	mux.HandleFunc("GET /report", h.handleReport)
 	mux.HandleFunc("GET /api/dashboard/state", h.handleState)
 	mux.HandleFunc("GET /grouping.js", h.handleGroupingJS)
 	mux.HandleFunc("GET /favicon.png", h.handleFavicon)
@@ -214,6 +210,12 @@ func (h *Handler) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write(h.indexHTML)
+}
+
+func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(h.reportHTML)
 }
 
 func (h *Handler) handleState(w http.ResponseWriter, r *http.Request) {
