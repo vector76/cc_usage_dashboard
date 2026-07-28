@@ -63,6 +63,44 @@ func near(a, b, eps float64) bool {
 	return d < eps
 }
 
+// Ceiling-priced events carry a cost but not a real one, so they need their own
+// bucket: counting them as "computed" would hide an estimate among the
+// measurements, and leaving them out of every bucket would stop the four
+// counters from summing to EventsTotal.
+func TestCalculate_CeilingPricedEventsGetTheirOwnBucket(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	c, s := newCalc(t, now)
+	defer s.Close()
+
+	insertEvent(t, s, now.Add(-1*time.Hour), ptrF(10.00), "reported")
+	insertEvent(t, s, now.Add(-2*time.Hour), ptrF(20.00), "computed")
+	insertEvent(t, s, now.Add(-3*time.Hour), ptrF(300.00), "ceiling")
+	insertEvent(t, s, now.Add(-4*time.Hour), nil, "")
+
+	res, err := c.Calculate("24h")
+	if err != nil {
+		t.Fatalf("Calculate: %v", err)
+	}
+
+	if res.EventsWithCeilingCost != 1 {
+		t.Errorf("EventsWithCeilingCost = %d, want 1", res.EventsWithCeilingCost)
+	}
+	if res.EventsWithComputedCost != 1 {
+		t.Errorf("EventsWithComputedCost = %d, want 1 (the ceiling row must not count as computed)",
+			res.EventsWithComputedCost)
+	}
+	sum := res.EventsWithReportedCost + res.EventsWithComputedCost +
+		res.EventsWithCeilingCost + res.EventsWithoutCost
+	if sum != res.EventsTotal {
+		t.Errorf("buckets sum to %d but EventsTotal = %d: %+v", sum, res.EventsTotal, res)
+	}
+	// The overstated ceiling dollars still count toward consumption — that is
+	// the point of pricing pessimistically.
+	if !near(res.ConsumedUSDEquivalent, 330.00, 1e-9) {
+		t.Errorf("ConsumedUSDEquivalent = %v, want 330", res.ConsumedUSDEquivalent)
+	}
+}
+
 func TestCalculate_USDAndEventBuckets(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)
 	c, s := newCalc(t, now)

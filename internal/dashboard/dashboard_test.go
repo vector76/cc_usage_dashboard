@@ -252,6 +252,149 @@ func TestModelFamily(t *testing.T) {
 	}
 }
 
+// A ceiling-priced event is a guess, not a measurement, so it belongs in the
+// gray "other" family regardless of what its name looks like — claude-opus-5
+// contains "opus" and would otherwise be stacked in with real Opus dollars at a
+// rate we invented. OtherModels then names the guesses for the tooltip, since
+// "other" alone gives the reader no way to tell what is being estimated.
+func TestLoadVolumeSeriesCeilingPricedIsOtherAndNamed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	bucketSecs := 15 * 60
+
+	msgN := 0
+	insert := func(offsetMin int, model string, cost float64, costSource string) {
+		msgN++
+		obs := base.Add(time.Duration(offsetMin) * time.Minute)
+		if _, err := s.InsertUsageEvent(
+			obs, "tailer", "sess", fmt.Sprintf("msg-%d", msgN), "/proj", model,
+			1, 1, 0, 0, &cost, costSource, "{}",
+		); err != nil {
+			t.Fatalf("InsertUsageEvent: %v", err)
+		}
+	}
+
+	// Real opus dollars, plus two ceiling-priced models whose names would
+	// otherwise classify as opus and fable, plus an unnamed-family event that
+	// reaches "other" the old way.
+	insert(0, "claude-opus-4-8", 4.0, "computed")
+	insert(1, "claude-opus-5", 10.0, "ceiling")
+	insert(2, "claude-fable-6", 5.0, "ceiling")
+	insert(3, "gpt-4", 1.0, "computed")
+
+	h := &Handler{store: s, now: func() time.Time { return base }}
+	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), bucketSecs)
+	if err != nil {
+		t.Fatalf("loadVolumeSeries: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("got %d buckets, want 1: %+v", len(buckets), buckets)
+	}
+	b := buckets[0]
+
+	if !approxEqual(b.ByFamily["opus"], 4.0) {
+		t.Errorf("opus = %v, want 4 (the ceiling-priced opus-5 must not join it)", b.ByFamily["opus"])
+	}
+	if _, ok := b.ByFamily["fable"]; ok {
+		t.Errorf("fable must be absent; the ceiling-priced fable-6 belongs to other: %+v", b.ByFamily)
+	}
+	if !approxEqual(b.ByFamily["other"], 16.0) {
+		t.Errorf("other = %v, want 16 (10 + 5 ceiling + 1 gpt-4)", b.ByFamily["other"])
+	}
+	if !approxEqual(b.CostUSD, 20.0) {
+		t.Errorf("total = %v, want 20", b.CostUSD)
+	}
+
+	want := []string{"claude-fable-6", "claude-opus-5", "gpt-4"}
+	if len(b.OtherModels) != len(want) {
+		t.Fatalf("OtherModels = %v, want %v", b.OtherModels, want)
+	}
+	for i, m := range want {
+		if b.OtherModels[i] != m {
+			t.Errorf("OtherModels = %v, want %v (sorted)", b.OtherModels, want)
+			break
+		}
+	}
+}
+
+// A model contributing exactly nothing is not worth naming: the live DB carries
+// "<synthetic>" rows with zero tokens, which cost $0 at any rate, and listing
+// them in the tooltip implies they are part of the segment's dollars.
+func TestLoadVolumeSeriesOtherModelsSkipsZeroCost(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	insert := func(msg, model string, cost float64, costSource string) {
+		if _, err := s.InsertUsageEvent(
+			base, "tailer", "sess", msg, "/proj", model,
+			0, 0, 0, 0, &cost, costSource, "{}",
+		); err != nil {
+			t.Fatalf("InsertUsageEvent: %v", err)
+		}
+	}
+	insert("m1", "claude-opus-5", 10.0, "ceiling")
+	insert("m2", "<synthetic>", 0.0, "ceiling")
+
+	h := &Handler{store: s, now: func() time.Time { return base }}
+	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), 15*60)
+	if err != nil {
+		t.Fatalf("loadVolumeSeries: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("got %d buckets, want 1", len(buckets))
+	}
+	got := buckets[0].OtherModels
+	if len(got) != 1 || got[0] != "claude-opus-5" {
+		t.Errorf("OtherModels = %v, want just [claude-opus-5]", got)
+	}
+}
+
+// An event with no model name has nothing to name in the tooltip, but its
+// dollars must still land in "other" rather than vanishing.
+func TestLoadVolumeSeriesUnnamedModelHasNoTooltipEntry(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	base := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	cost := 2.0
+	if _, err := s.InsertUsageEvent(
+		base, "tailer", "sess", "msg-1", "/proj", "",
+		1, 1, 0, 0, &cost, "computed", "{}",
+	); err != nil {
+		t.Fatalf("InsertUsageEvent: %v", err)
+	}
+
+	h := &Handler{store: s, now: func() time.Time { return base }}
+	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), 15*60)
+	if err != nil {
+		t.Fatalf("loadVolumeSeries: %v", err)
+	}
+	if len(buckets) != 1 {
+		t.Fatalf("got %d buckets, want 1", len(buckets))
+	}
+	if !approxEqual(buckets[0].ByFamily["other"], 2.0) {
+		t.Errorf("other = %v, want 2", buckets[0].ByFamily["other"])
+	}
+	if len(buckets[0].OtherModels) != 0 {
+		t.Errorf("OtherModels = %v, want empty for an unnamed model", buckets[0].OtherModels)
+	}
+}
+
 func approxEqual(a, b float64) bool {
 	const eps = 1e-9
 	d := a - b

@@ -20,7 +20,12 @@ Three signals are collected in `internal/feedback` and read by the server's
 2. **Unknown-model aggregate** — `feedback.UnknownModels` counts usage events
    whose model is missing from the price table, keyed by model name with
    `{count, first_seen, last_seen}` since process start. This is the actionable
-   "add it to `prices.yaml`" signal. It is **aggregated, not logged per event**:
+   "add it to `prices.yaml`" signal. Such events are not left uncosted — they
+   are priced at the table's ceiling (see `docs/data-model.md` "Unrecognized
+   models") — so both call sites test for *either* a nil cost or a `ceiling`
+   cost source. Keying on the nil cost alone would have quietly retired this
+   whole signal the moment ceiling pricing landed. It is **aggregated, not
+   logged per event**:
    one usage event per message means per-event logging would flood the buffer
    with exactly the model that is missing. Both `ResolveCost` call sites feed
    the same aggregate — the tailer ingest path (`internal/ingest/tailer.go`) and

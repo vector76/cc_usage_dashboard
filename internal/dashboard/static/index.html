@@ -134,7 +134,10 @@ function renderVolumeLegend() {
     const sw = document.createElement("span");
     sw.style.cssText = "display:inline-block;width:11px;height:11px;margin-right:4px;border-radius:2px;background:" + VOLUME_FAMILY_COLORS[fam] + ";";
     item.appendChild(sw);
-    item.appendChild(document.createTextNode(fam));
+    // "other" also collects every model priced at the table ceiling because
+    // we have no rates for it, so the label flags that those dollars are
+    // estimates. Hovering a bar names the models involved.
+    item.appendChild(document.createTextNode(fam === "other" ? "other / est." : fam));
     c.appendChild(item);
   }
 }
@@ -571,7 +574,16 @@ function renderBurnDown(svgID, win, opts) {
         // attached to every segment so hovering anywhere on the bar shows it.
         const startLabel = fmtTooltipTime(t);
         const endLabel = fmtTooltipTime(t + bucketMs);
-        const famText = segs.map(p => p[0] + " $" + fmt(p[1])).join(", ");
+        // "other" is mostly models the price table has never heard of, priced
+        // at its ceiling so they can't hide at zero height. Name them, or the
+        // gray segment is an unactionable mystery.
+        const otherModels = b.other_models || [];
+        const famText = segs.map(([fam, cost]) => {
+          const label = fam + " $" + fmt(cost);
+          return fam === "other" && otherModels.length
+            ? label + " (" + otherModels.join(", ") + ")"
+            : label;
+        }).join(", ");
         const titleText = startLabel + " – " + endLabel +
           "\n$" + fmt(b.cost_usd) + " total" + (famText ? " — " + famText : "");
 
@@ -634,8 +646,10 @@ function renderConsumption(d) {
   appendKV(kv, "Consumed (USD eq.)", "$" + fmt(d.consumed_usd_equivalent));
   appendKV(kv, "Consumed % session", d.consumed_session_pct == null ? "—" : fmt(d.consumed_session_pct, 0) + "%");
   appendKV(kv, "Consumed % weekly", d.consumed_weekly_pct == null ? "—" : fmt(d.consumed_weekly_pct, 0) + "%");
-  appendKV(kv, "Events (total / reported / computed / none)",
-    d.events_total + " / " + d.events_with_reported_cost + " / " + d.events_with_computed_cost + " / " + d.events_without_cost);
+  appendKV(kv, "Events (total / reported / computed / est. / none)",
+    d.events_total + " / " + d.events_with_reported_cost + " / " +
+    d.events_with_computed_cost + " / " + (d.events_with_ceiling_cost || 0) + " / " +
+    d.events_without_cost);
 }
 
 // fmtFbTime renders a feedback timestamp in local time, tolerating both the

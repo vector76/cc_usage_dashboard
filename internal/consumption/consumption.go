@@ -25,7 +25,13 @@ type Result struct {
 	EventsTotal            int64     `json:"events_total"`
 	EventsWithReportedCost int64     `json:"events_with_reported_cost"`
 	EventsWithComputedCost int64     `json:"events_with_computed_cost"`
-	EventsWithoutCost      int64     `json:"events_without_cost"`
+	// EventsWithCeilingCost counts events priced at the price table's
+	// pessimistic ceiling because their model is unrecognized. Their dollars
+	// are deliberately overstated, so they are reported apart from the
+	// measured ones rather than folded into EventsWithComputedCost. The four
+	// buckets sum to EventsTotal.
+	EventsWithCeilingCost int64 `json:"events_with_ceiling_cost"`
+	EventsWithoutCost     int64 `json:"events_without_cost"`
 }
 
 // Calculator computes the consumption report.
@@ -90,6 +96,7 @@ func (c *Calculator) aggregateEvents(res *Result, startTime, endTime time.Time) 
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN cost_usd_equivalent IS NOT NULL AND cost_source = 'reported' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN cost_usd_equivalent IS NOT NULL AND cost_source = 'computed' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN cost_usd_equivalent IS NOT NULL AND cost_source = 'ceiling' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN cost_usd_equivalent IS NULL THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(cost_usd_equivalent), 0)
 		FROM usage_events
@@ -98,6 +105,7 @@ func (c *Calculator) aggregateEvents(res *Result, startTime, endTime time.Time) 
 		&res.EventsTotal,
 		&res.EventsWithReportedCost,
 		&res.EventsWithComputedCost,
+		&res.EventsWithCeilingCost,
 		&res.EventsWithoutCost,
 		&res.ConsumedUSDEquivalent,
 	)

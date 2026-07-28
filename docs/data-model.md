@@ -27,7 +27,10 @@ source granularity).
 |                       |              | neither the source nor the price-table         |
 |                       |              | computation produced a value.                  |
 | cost_source           | TEXT         | `reported` (came from JSONL/POST) \|           |
-|                       |              | `computed` (derived from tokens × price table).|
+|                       |              | `computed` (tokens × the model's own rates) \| |
+|                       |              | `ceiling` (tokens × the price table's         |
+|                       |              | per-rate maximum, for a model the table does  |
+|                       |              | not list — a deliberate overestimate).        |
 | model                 | TEXT         | Model name when known. Needed for cost compute.|
 | raw_json              | TEXT         | Original event payload for forensic replay.    |
 
@@ -260,6 +263,42 @@ It is refreshed by hand when Anthropic updates rates: edit `prices.yaml` and reb
 runtime the table is selected by `ingest.ResolvePriceTable` following a precedence chain
 (explicit `pricing.table_path` → local `prices.yaml` override → embedded default); see
 `docs/configuration.md` "Price table resolution" for the full order and the rationale.
+
+### Unrecognized models: the ceiling estimate
+
+A model the table does not list is priced at the table's **ceiling** — the
+maximum of each rate across every entry (`ingest.CeilingPrices`) — and marked
+`cost_source = 'ceiling'`.
+
+The alternative, leaving such events NULL, hid them twice over: they were
+excluded from every dollar total, *and* the dashboard's stacked bars skip NULL
+costs, so an unrecognized model rendered as a zero-height segment. It was
+invisible rather than conspicuous. That is how `claude-opus-5` went unnoticed
+for four days after release, during which 3062 events carrying 1.9M output and
+394M cache-read tokens contributed nothing at all — leaving the Fable sub-row
+looking like 93% of all spend when its real share was closer to 9%.
+
+Overstating is the safe direction for a signal whose job is to say how much
+quota is left: the pessimistic number withholds slack rather than releasing work
+against capacity that has already been spent. The estimate is also *visibly* an
+estimate — the dashboard renders ceiling-priced events in the gray "other"
+family whatever their name suggests, names them in the bar's hover text, and
+counts them in their own `events_with_ceiling_cost` bucket. The unknown-model
+aggregate (see `docs/feedback.md`) still fires, so the fix is still prompted.
+
+The ceiling is a per-rate maximum rather than the priciest single model's row.
+The two coincide in the shipped table (`claude-opus-4-1` / `4-0` hold every
+maximum at 15/75/18.75/1.50), but cache reads outnumber output tokens by two
+orders of magnitude in real usage, so that rate must not be sampled from
+whichever model happened to win on output.
+
+The estimate is provisional. Adding the model to `prices.yaml` and restarting
+makes `ingest.BackfillCosts` replace every `ceiling` row with a `computed` one
+at the real rates, so historical dollars come back down rather than staying
+inflated forever. The guards on that update are narrow: `reported` and
+`computed` costs are immovable, and one ceiling estimate never replaces another
+(otherwise the same rows would be rewritten on every startup for as long as the
+model stays unlisted).
 
 ## Retention
 

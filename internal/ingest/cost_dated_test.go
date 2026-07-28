@@ -52,12 +52,16 @@ func TestResolveCostExactDatedEntryWinsOverFallback(t *testing.T) {
 	}
 }
 
-func TestResolveCostDatedIDWithoutBaseEntryStaysUnknown(t *testing.T) {
+// A dated id whose base is also absent is not a price-table match. It now
+// lands on the ceiling like any other unrecognized model; what matters here is
+// that it is *not* reported as "computed", which would claim a real rate lookup
+// had happened.
+func TestResolveCostDatedIDWithoutBaseEntryIsNotComputed(t *testing.T) {
 	cost, source := ResolveCost(nil, "claude-mystery-9-20260101",
 		1000, 1000, 0, 0, datedTestTable())
 
-	if cost != nil || source != "" {
-		t.Errorf("cost=%v source=%q, want nil/empty for unknown base", cost, source)
+	if source != "ceiling" {
+		t.Errorf("cost=%v source=%q, want ceiling for an unknown base", cost, source)
 	}
 }
 
@@ -69,8 +73,10 @@ func TestResolveCostNonDateSuffixIsNotStripped(t *testing.T) {
 		"-20251001",                  // empty base
 	} {
 		cost, source := ResolveCost(nil, model, 1000, 1000, 0, 0, datedTestTable())
-		if cost != nil || source != "" {
-			t.Errorf("model %q: cost=%v source=%q, want nil/empty (no fallback)", model, cost, source)
+		// The point is that no undated match is fabricated: these must not be
+		// priced at haiku's rates. Landing on the ceiling instead is correct.
+		if source != "ceiling" {
+			t.Errorf("model %q: cost=%v source=%q, want ceiling (no undated fallback)", model, cost, source)
 		}
 	}
 }

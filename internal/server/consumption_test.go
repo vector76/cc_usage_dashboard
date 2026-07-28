@@ -29,7 +29,8 @@ func TestHandleConsumption_ResponseShape(t *testing.T) {
 		"consumed_usd_equivalent",
 		"consumed_session_pct", "consumed_weekly_pct",
 		"events_total", "events_with_reported_cost",
-		"events_with_computed_cost", "events_without_cost",
+		"events_with_computed_cost", "events_with_ceiling_cost",
+		"events_without_cost",
 	}
 	for _, k := range required {
 		if _, ok := got[k]; !ok {

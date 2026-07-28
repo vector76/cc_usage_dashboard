@@ -417,11 +417,13 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		s.priceTable,
 	)
 
-	// A non-empty model that yields no cost is missing from the price table.
-	// Aggregate it (never log per event — one usage event per message would
-	// flood the buffer with the same missing model) so the dashboard can
-	// prompt the user to add it to prices.yaml.
-	if cost == nil && req.Model != "" {
+	// A non-empty model missing from the price table — whether it got a
+	// ceiling estimate or no cost at all — is aggregated (never logged per
+	// event — one usage event per message would flood the buffer with the same
+	// missing model) so the dashboard can prompt the user to add it to
+	// prices.yaml. A ceiling estimate is never nil, so testing cost == nil
+	// alone would silently retire this signal.
+	if req.Model != "" && (cost == nil || costSource == "ceiling") {
 		s.unknownModels.Record(req.Model, time.Now())
 	}
 

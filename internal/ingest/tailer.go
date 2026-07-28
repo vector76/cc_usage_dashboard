@@ -330,11 +330,14 @@ func (t *Tailer) processFile(filePath string) {
 			event.CacheReadTokens,
 			t.priceTable,
 		)
-		// A non-empty model that yields no cost is missing from the price
-		// table — aggregate it so the dashboard can prompt the user to add
-		// it to prices.yaml. (An empty model is a different, already-handled
-		// case and is ignored by UnknownModels.Record.)
-		if cost == nil && event.Model != "" {
+		// A non-empty model that is missing from the price table — whether it
+		// got a ceiling estimate or no cost at all — is aggregated so the
+		// dashboard can prompt the user to add it to prices.yaml. Keying this
+		// on cost == nil alone would have gone quiet the moment ceiling
+		// pricing landed, since a ceiling estimate is never nil. (An empty
+		// model is a different, already-handled case and is ignored by
+		// UnknownModels.Record.)
+		if event.Model != "" && (cost == nil || costSource == "ceiling") {
 			t.unknown.Record(event.Model, time.Now())
 		}
 		if _, err := tx.Exec(`

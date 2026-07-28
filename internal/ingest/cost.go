@@ -54,10 +54,54 @@ func ResolveCost(
 			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, prices)
 			return &cost, "computed"
 		}
+
+		// Unrecognized model: price it at the table's ceiling rather than
+		// leaving it NULL. A NULL cost drops the event out of every dollar
+		// total and out of the dashboard's stacked bars, so a newly released
+		// model silently vanishes until someone edits prices.yaml — which is
+		// exactly what happened when claude-opus-5 arrived. Overstating is the
+		// safe direction for a quota signal, and the dashboard renders
+		// ceiling-priced events in the gray "other" family so the number is
+		// visibly a guess rather than a measurement.
+		if ceiling := CeilingPrices(priceTable); ceiling != nil {
+			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, ceiling)
+			return &cost, "ceiling"
+		}
 	}
 
-	// Unknown model or no price table
+	// No model name, or no price table to draw a ceiling from.
 	return nil, ""
+}
+
+// CeilingPrices returns the per-rate maximum across every entry in the table:
+// the most expensive each token kind can possibly be. Returns nil for an empty
+// or nil table, where there is no ceiling to speak of.
+//
+// The maximum is taken per rate rather than by picking the single priciest
+// model's row. In the shipped table the two coincide — claude-opus-4-1 / 4-0
+// hold every maximum at 15/75/18.75/1.50 — but a table where one model has the
+// highest output rate and another the highest cache-read rate would let the
+// row-picking version understate. Cache reads dominate real usage by two orders
+// of magnitude (394M cache-read against 1.9M output tokens in a recent week),
+// so that rate in particular must not be sampled from whichever model happened
+// to win on output.
+func CeilingPrices(t PriceTable) *ModelPrices {
+	var ceiling ModelPrices
+	found := false
+	for _, p := range t {
+		if p == nil {
+			continue
+		}
+		found = true
+		ceiling.InputRate = max(ceiling.InputRate, p.InputRate)
+		ceiling.OutputRate = max(ceiling.OutputRate, p.OutputRate)
+		ceiling.CacheCreationRate = max(ceiling.CacheCreationRate, p.CacheCreationRate)
+		ceiling.CacheReadRate = max(ceiling.CacheReadRate, p.CacheReadRate)
+	}
+	if !found {
+		return nil
+	}
+	return &ceiling
 }
 
 // datedModelID matches a model id ending in an 8-digit date suffix

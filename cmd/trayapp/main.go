@@ -133,10 +133,11 @@ func main() {
 	}
 	srv.SetPriceTable(priceTable)
 
-	// Repair rows that were unpriceable at ingest (NULL cost, model missing
-	// from the then-loaded price table) now that the current table may know
-	// them. Only NULL costs are touched; a failure is diagnostic, not fatal.
-	if _, err := ingest.BackfillNullCosts(db, priceTable); err != nil {
+	// Repair rows the then-loaded price table could not price properly now that
+	// the current table may know them: costs left NULL, and ceiling estimates
+	// that real rates should supersede. Measured costs are untouched; a failure
+	// is diagnostic, not fatal.
+	if _, err := ingest.BackfillCosts(db, priceTable); err != nil {
 		slog.Warn("cost backfill failed", "err", err)
 	}
 

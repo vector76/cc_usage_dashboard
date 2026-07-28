@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -75,10 +76,16 @@ type UsedSeriesPoint struct {
 // family (see modelFamily): keys are opus/sonnet/fable/haiku/other and the
 // values sum to CostUSD. Only families with a nonzero cost in the bucket
 // are present, so the client can render each bar as stacked segments.
+// OtherModels names the distinct models folded into the "other" family in
+// this bucket, sorted, so the tooltip can say what the gray segment actually
+// is. Most of "other" is ceiling-priced guesses at models we have no rates
+// for, and a bare "other $12.34" gives the reader no way to act on it. Models
+// with no name, or contributing $0, get no entry.
 type SeriesBucket struct {
 	BucketStart time.Time          `json:"bucket_start"`
 	CostUSD     float64            `json:"cost_usd"`
 	ByFamily    map[string]float64 `json:"by_family"`
+	OtherModels []string           `json:"other_models,omitempty"`
 }
 
 // modelFamily classifies a usage_events.model value into a coarse family
@@ -411,10 +418,11 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 		SELECT
 			(CAST(strftime('%%s', occurred_at) AS INTEGER) / %d) * %d AS bucket_unix,
 			model,
+			cost_source,
 			COALESCE(SUM(cost_usd_equivalent), 0) AS total
 		FROM usage_events
 		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
-		GROUP BY bucket_unix, model
+		GROUP BY bucket_unix, model, cost_source
 		ORDER BY bucket_unix
 	`, bucketSecs, bucketSecs)
 	rows, err := db.Query(query, store.FormatTime(startedAt), store.FormatTime(endsAt))
@@ -428,11 +436,12 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 	// sums keyed by bucket, tracking first-seen order for a stable result.
 	order := []int64{}
 	byUnix := map[int64]*SeriesBucket{}
+	otherModels := map[int64]map[string]bool{}
 	for rows.Next() {
 		var bucketUnix int64
-		var model sql.NullString
+		var model, costSource sql.NullString
 		var total float64
-		if err := rows.Scan(&bucketUnix, &model, &total); err != nil {
+		if err := rows.Scan(&bucketUnix, &model, &costSource, &total); err != nil {
 			return nil, err
 		}
 		b := byUnix[bucketUnix]
@@ -443,10 +452,26 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 			}
 			byUnix[bucketUnix] = b
 			order = append(order, bucketUnix)
+			otherModels[bucketUnix] = map[string]bool{}
 		}
+		// A ceiling-priced event is an estimate at rates we invented for a
+		// model the price table has never heard of, so it goes to "other"
+		// whatever its name suggests. Letting claude-opus-5 stack into "opus"
+		// on the strength of its name would present a guess in the same color
+		// as measured Opus dollars.
+		//
 		// NullString.String is "" when the model column is NULL, which
-		// modelFamily maps to "other".
+		// modelFamily also maps to "other".
 		fam := modelFamily(model.String)
+		if costSource.String == "ceiling" {
+			fam = "other"
+		}
+		// Only name models that actually contribute dollars. Zero-token rows
+		// ("<synthetic>") cost $0 at any rate, and listing them would imply
+		// they are part of the segment the reader is hovering.
+		if fam == "other" && model.String != "" && total > 0 {
+			otherModels[bucketUnix][model.String] = true
+		}
 		b.ByFamily[fam] += total
 		b.CostUSD += total
 	}
@@ -456,7 +481,15 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 
 	out := make([]SeriesBucket, 0, len(order))
 	for _, u := range order {
-		out = append(out, *byUnix[u])
+		b := *byUnix[u]
+		if names := otherModels[u]; len(names) > 0 {
+			b.OtherModels = make([]string, 0, len(names))
+			for n := range names {
+				b.OtherModels = append(b.OtherModels, n)
+			}
+			sort.Strings(b.OtherModels)
+		}
+		out = append(out, b)
 	}
 	return out, nil
 }

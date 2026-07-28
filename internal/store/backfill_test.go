@@ -100,7 +100,7 @@ func TestSetComputedCostOnlyUpdatesNullRows(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	updated, err := s.SetComputedCost(id, 0.021)
+	updated, err := s.SetComputedCost(id, 0.021, "computed")
 	if err != nil {
 		t.Fatalf("SetComputedCost: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestSetComputedCostOnlyUpdatesNullRows(t *testing.T) {
 	}
 
 	// Second call must be a no-op: the row is no longer NULL.
-	updated, err = s.SetComputedCost(id, 99.0)
+	updated, err = s.SetComputedCost(id, 99.0, "computed")
 	if err != nil {
 		t.Fatalf("SetComputedCost second call: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestSetComputedCostNeverTouchesReportedRows(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	updated, err := s.SetComputedCost(id, 0.021)
+	updated, err := s.SetComputedCost(id, 0.021, "computed")
 	if err != nil {
 		t.Fatalf("SetComputedCost: %v", err)
 	}

@@ -124,7 +124,8 @@ func TestE2E_CLIModeA_ConsumptionAndSlack(t *testing.T) {
 		"consumed_usd_equivalent",
 		"consumed_session_pct", "consumed_weekly_pct",
 		"events_total",
-		"events_with_reported_cost", "events_with_computed_cost", "events_without_cost",
+		"events_with_reported_cost", "events_with_computed_cost",
+		"events_with_ceiling_cost", "events_without_cost",
 	} {
 		if _, ok := cons[k]; !ok {
 			t.Errorf("/consumption missing field %q: %s", k, w.Body.String())

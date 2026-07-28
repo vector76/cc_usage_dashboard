@@ -55,7 +55,11 @@ func TestBackfillNullCostsComputesOnlyKnownModelNullRows(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	// NULL cost, model still missing from the table — must stay NULL.
+	// NULL cost, model still missing from the table — gets the pessimistic
+	// ceiling estimate rather than staying NULL. A NULL cost is invisible
+	// twice over: excluded from every dollar total, and drawn as a
+	// zero-height segment in the stacked bars, so an unrecognized model
+	// could not be seen at all until it carried a number.
 	idUnknown, err := s.InsertUsageEvent(now, "tailer", "s", "m2", "/p",
 		"claude-mystery-9", 1000, 500, 0, 0, nil, "", "{}")
 	if err != nil {
@@ -70,12 +74,12 @@ func TestBackfillNullCostsComputesOnlyKnownModelNullRows(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	n, err := BackfillNullCosts(s, backfillPriceTable())
+	n, err := BackfillCosts(s, backfillPriceTable())
 	if err != nil {
-		t.Fatalf("BackfillNullCosts: %v", err)
+		t.Fatalf("BackfillCosts: %v", err)
 	}
-	if n != 1 {
-		t.Errorf("backfilled %d events, want 1", n)
+	if n != 2 {
+		t.Errorf("backfilled %d events, want 2 (known model + ceiling estimate)", n)
 	}
 
 	// 1000*3.0/1e6 + 500*15.0/1e6 + 2000*3.75/1e6 + 10000*0.30/1e6 = 0.021
@@ -87,9 +91,14 @@ func TestBackfillNullCostsComputesOnlyKnownModelNullRows(t *testing.T) {
 		t.Errorf("known-model row cost_source = %q, want computed", source.String)
 	}
 
-	cost, _ = eventCost(t, s, idUnknown)
-	if cost.Valid {
-		t.Errorf("unknown-model row must stay NULL, got %v", cost.Float64)
+	// The one-entry table makes its own rates the ceiling:
+	// 1000*3.0/1e6 + 500*15.0/1e6 = 0.0105.
+	cost, source = eventCost(t, s, idUnknown)
+	if !cost.Valid || cost.Float64 < 0.010499 || cost.Float64 > 0.010501 {
+		t.Errorf("unknown-model row cost = %+v, want ~0.0105 at the ceiling", cost)
+	}
+	if source.String != "ceiling" {
+		t.Errorf("unknown-model row cost_source = %q, want ceiling", source.String)
 	}
 
 	cost, source = eventCost(t, s, idReported)
@@ -112,9 +121,9 @@ func TestBackfillNullCostsResolvesDatedModelIDs(t *testing.T) {
 	table := PriceTable{
 		"claude-haiku-4-5": &ModelPrices{InputRate: 1.0, OutputRate: 5.0},
 	}
-	n, err := BackfillNullCosts(s, table)
+	n, err := BackfillCosts(s, table)
 	if err != nil {
-		t.Fatalf("BackfillNullCosts: %v", err)
+		t.Fatalf("BackfillCosts: %v", err)
 	}
 	if n != 1 {
 		t.Errorf("backfilled %d events, want 1", n)
@@ -129,6 +138,90 @@ func TestBackfillNullCostsResolvesDatedModelIDs(t *testing.T) {
 	}
 }
 
+// A ceiling estimate is provisional: the moment the price table learns the
+// model, the real rates must replace it. Without this, adding a newly released
+// model to prices.yaml would fix new events while leaving history permanently
+// overstated at the ceiling — and the ceiling can be 3x the true rate.
+func TestBackfillUpgradesCeilingEstimateToRealRates(t *testing.T) {
+	s := openBackfillStore(t)
+
+	// Ingested when the model was unknown: priced at the ceiling.
+	id, err := s.InsertUsageEvent(time.Now(), "tailer", "s", "m1", "/p",
+		"claude-opus-5", 1000, 1000, 0, 0, ptrFloat(0.09), "ceiling", "{}")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	// prices.yaml now lists it, at rates well below the ceiling.
+	table := backfillPriceTable() // ceiling = 3.0 / 15.0
+	table["claude-opus-5"] = &ModelPrices{InputRate: 1.0, OutputRate: 5.0}
+
+	n, err := BackfillCosts(s, table)
+	if err != nil {
+		t.Fatalf("BackfillCosts: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("backfilled %d events, want 1", n)
+	}
+
+	// 1000*1.0/1e6 + 1000*5.0/1e6 = 0.006, replacing the 0.09 estimate.
+	cost, source := eventCost(t, s, id)
+	if !cost.Valid || cost.Float64 < 0.005999 || cost.Float64 > 0.006001 {
+		t.Errorf("cost = %+v, want ~0.006 from the real rates", cost)
+	}
+	if source.String != "computed" {
+		t.Errorf("cost_source = %q, want computed", source.String)
+	}
+}
+
+// While the model stays unknown the estimate must be left exactly as it is: no
+// churn, and in particular no re-estimating on every startup.
+func TestBackfillLeavesCeilingEstimateAloneWhileModelUnknown(t *testing.T) {
+	s := openBackfillStore(t)
+	id, err := s.InsertUsageEvent(time.Now(), "tailer", "s", "m1", "/p",
+		"claude-opus-5", 1000, 1000, 0, 0, ptrFloat(0.09), "ceiling", "{}")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	n, err := BackfillCosts(s, backfillPriceTable())
+	if err != nil {
+		t.Fatalf("BackfillCosts: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("backfilled %d events, want 0 while the model is still unknown", n)
+	}
+	cost, source := eventCost(t, s, id)
+	if cost.Float64 != 0.09 || source.String != "ceiling" {
+		t.Errorf("estimate changed: cost=%v source=%q, want 0.09/ceiling", cost.Float64, source.String)
+	}
+}
+
+// A measured cost is never displaced, in either direction.
+func TestBackfillNeverOverwritesMeasuredCosts(t *testing.T) {
+	s := openBackfillStore(t)
+	table := backfillPriceTable()
+
+	for _, src := range []string{"reported", "computed"} {
+		t.Run(src, func(t *testing.T) {
+			id, err := s.InsertUsageEvent(time.Now(), "tailer", "s", "m-"+src, "/p",
+				"claude-fable-5", 1000, 1000, 0, 0, ptrFloat(0.5), src, "{}")
+			if err != nil {
+				t.Fatalf("insert: %v", err)
+			}
+			if _, err := BackfillCosts(s, table); err != nil {
+				t.Fatalf("BackfillCosts: %v", err)
+			}
+			cost, source := eventCost(t, s, id)
+			if cost.Float64 != 0.5 || source.String != src {
+				t.Errorf("row changed: cost=%v source=%q, want 0.5/%s", cost.Float64, source.String, src)
+			}
+		})
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }
+
 func TestBackfillNullCostsIsIdempotent(t *testing.T) {
 	s := openBackfillStore(t)
 	if _, err := s.InsertUsageEvent(time.Now(), "tailer", "s", "m1", "/p",
@@ -136,7 +229,7 @@ func TestBackfillNullCostsIsIdempotent(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	n, err := BackfillNullCosts(s, backfillPriceTable())
+	n, err := BackfillCosts(s, backfillPriceTable())
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
@@ -144,7 +237,7 @@ func TestBackfillNullCostsIsIdempotent(t *testing.T) {
 		t.Errorf("first run backfilled %d, want 1", n)
 	}
 
-	n, err = BackfillNullCosts(s, backfillPriceTable())
+	n, err = BackfillCosts(s, backfillPriceTable())
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -160,15 +253,15 @@ func TestBackfillNullCostsEmptyTableIsNoOp(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	n, err := BackfillNullCosts(s, PriceTable{})
+	n, err := BackfillCosts(s, PriceTable{})
 	if err != nil {
-		t.Fatalf("BackfillNullCosts: %v", err)
+		t.Fatalf("BackfillCosts: %v", err)
 	}
 	if n != 0 {
 		t.Errorf("backfilled %d with empty table, want 0", n)
 	}
 
-	n, err = BackfillNullCosts(s, nil)
+	n, err = BackfillCosts(s, nil)
 	if err != nil {
 		t.Fatalf("BackfillNullCosts(nil): %v", err)
 	}
@@ -194,8 +287,8 @@ func TestBackfillNullCostsSurfacesViaFeedback(t *testing.T) {
 		slog.NewTextHandler(io.Discard, nil), buf)))
 	defer slog.SetDefault(prev)
 
-	if _, err := BackfillNullCosts(s, backfillPriceTable()); err != nil {
-		t.Fatalf("BackfillNullCosts: %v", err)
+	if _, err := BackfillCosts(s, backfillPriceTable()); err != nil {
+		t.Fatalf("BackfillCosts: %v", err)
 	}
 
 	recs := buf.Recent()
@@ -217,8 +310,8 @@ func TestBackfillNullCostsSurfacesViaFeedback(t *testing.T) {
 
 	// A run that backfills nothing must NOT add feedback noise.
 	buf.Reset()
-	if _, err := BackfillNullCosts(s, backfillPriceTable()); err != nil {
-		t.Fatalf("second BackfillNullCosts: %v", err)
+	if _, err := BackfillCosts(s, backfillPriceTable()); err != nil {
+		t.Fatalf("second BackfillCosts: %v", err)
 	}
 	if got := buf.Len(); got != 0 {
 		t.Errorf("no-op backfill buffered %d records, want 0: %+v", got, buf.Recent())
