@@ -58,8 +58,6 @@ tailer:
   poll_interval_ms: 1000
 
 slack:
-  headroom_threshold: 10.0          # legacy single-window threshold (percent units)
-  freshness_threshold_ms: 60000
   baseline_max_age_seconds: 480     # baseline freshness gate (8 min)
   # Slack-activation profiles: [time_pct, remaining_pct] points, see
   # "Slack activation profiles" below. Absent (the default) means

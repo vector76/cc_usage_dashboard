@@ -49,8 +49,6 @@ type Config struct {
 	} `yaml:"logging"`
 
 	Slack struct {
-		HeadroomThreshold       float64 `yaml:"headroom_threshold"`
-		FreshnessThresholdMs    int     `yaml:"freshness_threshold_ms"`
 		BaselineMaxAgeSeconds   int     `yaml:"baseline_max_age_seconds"`
 		SessionSurplusThreshold float64 `yaml:"session_surplus_threshold"`
 		WeeklySurplusThreshold  float64 `yaml:"weekly_surplus_threshold"`
@@ -99,8 +97,6 @@ func Load(path string) (*Config, error) {
 	cfg.Tailer.PollIntervalMs = 1000
 	cfg.Logging.Level = "info"
 	cfg.Logging.File = ""
-	cfg.Slack.HeadroomThreshold = 10.0
-	cfg.Slack.FreshnessThresholdMs = 60000
 	cfg.Slack.BaselineMaxAgeSeconds = 480
 	cfg.Slack.SessionSurplusThreshold = 0.50
 	cfg.Slack.WeeklySurplusThreshold = 0.10
