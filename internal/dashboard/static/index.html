@@ -514,9 +514,10 @@ function renderBurnDown(svgID, win, opts) {
     }, "projection if started now"));
   }
 
-  // Lower panel: $ volume bars over the full domain. Buckets are
-  // UTC-aligned, so the leftmost bucket's start can sit slightly before
-  // domainStart (e.g. window starts 12:34, 15-min bucket starts 12:30).
+  // Lower panel: $ volume bars over the full domain. The bucket grid is
+  // phased to the window boundary, so the leftmost bucket's start can still
+  // sit slightly before domainStart (a 12:34 boundary anchors the grid at
+  // 13:00, and the session chart's domain starts 10h before 12:34).
   // We keep any bucket that overlaps the domain and clip the rendered
   // bar's x extent to the chart, rather than dropping the bucket entirely
   // — otherwise events in the first partial bucket render as nothing.

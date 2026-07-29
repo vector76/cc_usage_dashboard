@@ -289,7 +289,7 @@ func TestLoadVolumeSeriesCeilingPricedIsOtherAndNamed(t *testing.T) {
 	insert(3, "gpt-4", 1.0, "computed")
 
 	h := &Handler{store: s, now: func() time.Time { return base }}
-	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), bucketSecs)
+	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), bucketSecs, base)
 	if err != nil {
 		t.Fatalf("loadVolumeSeries: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestLoadVolumeSeriesOtherModelsSkipsZeroCost(t *testing.T) {
 	insert("m2", "<synthetic>", 0.0, "ceiling")
 
 	h := &Handler{store: s, now: func() time.Time { return base }}
-	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), 15*60)
+	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), 15*60, base)
 	if err != nil {
 		t.Fatalf("loadVolumeSeries: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestLoadVolumeSeriesUnnamedModelHasNoTooltipEntry(t *testing.T) {
 	}
 
 	h := &Handler{store: s, now: func() time.Time { return base }}
-	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), 15*60)
+	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), 15*60, base)
 	if err != nil {
 		t.Fatalf("loadVolumeSeries: %v", err)
 	}
@@ -392,6 +392,97 @@ func TestLoadVolumeSeriesUnnamedModelHasNoTooltipEntry(t *testing.T) {
 	}
 	if len(buckets[0].OtherModels) != 0 {
 		t.Errorf("OtherModels = %v, want empty for an unnamed model", buckets[0].OtherModels)
+	}
+}
+
+// The bar grid must line up with the window it sits under: a weekly window
+// that resets Wednesday 10:00 gets bars at 10:00/16:00/22:00, not the UTC
+// 6h grid (00/06/12/18) that would render the first and last bar straddling
+// the reset instead of starting and ending on it.
+func TestLoadVolumeSeriesBucketsAlignToWindowStart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	start := time.Date(2026, 7, 29, 10, 0, 0, 0, time.UTC)
+	bucketSecs := 6 * 3600
+
+	msgN := 0
+	insert := func(offset time.Duration) {
+		msgN++
+		cost := 1.0
+		if _, err := s.InsertUsageEvent(
+			start.Add(offset), "tailer", "sess", fmt.Sprintf("msg-%d", msgN), "/proj",
+			"claude-opus-4-8", 1, 1, 0, 0, &cost, "computed", "{}",
+		); err != nil {
+			t.Fatalf("InsertUsageEvent: %v", err)
+		}
+	}
+	// One event just inside the first anchored bucket, one just inside the
+	// second. On the UTC grid both would fall in the same 06:00–12:00 bar.
+	insert(30 * time.Minute)
+	insert(6*time.Hour + 30*time.Minute)
+
+	h := &Handler{store: s, now: func() time.Time { return start }}
+	buckets, err := h.loadVolumeSeries(s.DB(), start, start.Add(7*24*time.Hour), bucketSecs, start)
+	if err != nil {
+		t.Fatalf("loadVolumeSeries: %v", err)
+	}
+	want := []time.Time{start, start.Add(6 * time.Hour)}
+	if len(buckets) != len(want) {
+		t.Fatalf("got %d buckets, want %d: %+v", len(buckets), len(want), buckets)
+	}
+	for i, w := range want {
+		if !buckets[i].BucketStart.Equal(w) {
+			t.Errorf("bucket %d starts %v, want %v", i, buckets[i].BucketStart, w)
+		}
+	}
+}
+
+// A window boundary is not always on the hour, but a bar grid phased by
+// minutes reads as an error. Round the anchor to the nearest hour: a 14:15
+// reset anchors the grid at 14:00, a 14:45 reset at 15:00.
+func TestLoadVolumeSeriesAnchorRoundsToNearestHour(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	day := time.Date(2026, 7, 29, 0, 0, 0, 0, time.UTC)
+	cost := 1.0
+	if _, err := s.InsertUsageEvent(
+		day.Add(15*time.Hour), "tailer", "sess", "msg-1", "/proj",
+		"claude-opus-4-8", 1, 1, 0, 0, &cost, "computed", "{}",
+	); err != nil {
+		t.Fatalf("InsertUsageEvent: %v", err)
+	}
+
+	h := &Handler{store: s, now: func() time.Time { return day }}
+	cases := []struct {
+		anchor time.Time
+		want   time.Time
+	}{
+		{day.Add(14*time.Hour + 15*time.Minute), day.Add(14 * time.Hour)},
+		{day.Add(14*time.Hour + 45*time.Minute), day.Add(15 * time.Hour)},
+	}
+	for _, tc := range cases {
+		buckets, err := h.loadVolumeSeries(s.DB(), day, day.Add(24*time.Hour), 6*3600, tc.anchor)
+		if err != nil {
+			t.Fatalf("loadVolumeSeries: %v", err)
+		}
+		if len(buckets) != 1 {
+			t.Fatalf("anchor %v: got %d buckets, want 1", tc.anchor, len(buckets))
+		}
+		// The 15:00 event lands in the bucket opened by the rounded anchor
+		// (14:00 grid → 14:00–20:00; 15:00 grid → 15:00–21:00).
+		if !buckets[0].BucketStart.Equal(tc.want) {
+			t.Errorf("anchor %v: bucket starts %v, want %v", tc.anchor, buckets[0].BucketStart, tc.want)
+		}
 	}
 }
 
@@ -442,7 +533,7 @@ func TestLoadVolumeSeriesByFamily(t *testing.T) {
 	insert(25, "gpt-4", c(1.0))
 
 	h := &Handler{store: s, now: func() time.Time { return base }}
-	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), bucketSecs)
+	buckets, err := h.loadVolumeSeries(s.DB(), base, base.Add(1*time.Hour), bucketSecs, base)
 	if err != nil {
 		t.Fatalf("loadVolumeSeries: %v", err)
 	}

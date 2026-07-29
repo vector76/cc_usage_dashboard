@@ -69,9 +69,13 @@ type UsedSeriesPoint struct {
 
 // SeriesBucket is one bucket of summed consumption. Width is set by the
 // caller (see bucketSecsForKind) and reported to the client via
-// WindowState.BucketSecs. BucketStart is UTC-aligned to multiples of the
-// bucket width; the leftmost bucket can therefore start slightly before
-// the chart's domain when the window doesn't begin on a bucket boundary.
+// WindowState.BucketSecs. BucketStart sits on a grid of bucket-width steps
+// phased to the window boundary (see bucketPhaseSecs), so the first bucket
+// begins at the window start and the last ends at the window end. The
+// leftmost bucket can still start slightly before the chart's domain — the
+// anchor is the boundary rounded to the nearest hour, and the session chart
+// extends its domain 10h back from a boundary that need not be a multiple of
+// the bucket width away.
 //
 // CostUSD is the bucket total. ByFamily breaks that total down by model
 // family (see modelFamily): keys are opus/sonnet/fable/haiku/other and the
@@ -351,7 +355,7 @@ func (h *Handler) loadActiveWindow(db *sql.DB, kind string) (*WindowState, error
 	}
 
 	bucketSecs := bucketSecsForKind(kind)
-	volume, err := h.loadVolumeSeries(db, seriesStart, endsAt, bucketSecs)
+	volume, err := h.loadVolumeSeries(db, seriesStart, endsAt, bucketSecs, startedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +385,7 @@ func (h *Handler) synthesizeHypotheticalSession(db *sql.DB) (*WindowState, error
 		return nil, err
 	}
 	bucketSecs := bucketSecsForKind("session")
-	volume, err := h.loadVolumeSeries(db, historyStart, startedAt, bucketSecs)
+	volume, err := h.loadVolumeSeries(db, historyStart, startedAt, bucketSecs, startedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +429,8 @@ func (h *Handler) synthesizeHypotheticalWeekly() *WindowState {
 // bucketSecsForKind picks a bucket width that yields a readable number of
 // bars across the chart's domain. Session view spans 15h (current 5h + 10h
 // pre-window history) → 15-min buckets ≈ 60 bars; weekly = 7 days / 6h = 28
-// bars. Returned size aligns to UTC by virtue of strftime('%s').
+// bars. The grid's phase comes from the window boundary, not from UTC
+// midnight — see bucketPhaseSecs.
 func bucketSecsForKind(kind string) int {
 	switch kind {
 	case "weekly":
@@ -433,6 +438,29 @@ func bucketSecsForKind(kind string) int {
 	default:
 		return 15 * 60
 	}
+}
+
+// bucketPhaseSecs returns the offset, in seconds past a bucket-width
+// boundary, at which the bucket grid should start so that the grid lines up
+// with anchor (the window's start, which is also its end modulo the window
+// length). Without it the grid is phased to the Unix epoch: a weekly window
+// resetting Wednesday 10:00 would get 6h bars at 00/06/12/18 UTC, so the
+// first and last bar would straddle the reset instead of beginning and
+// ending on it.
+//
+// The anchor is rounded to the nearest hour: window boundaries can carry odd
+// minutes, and a grid phased by minutes reads as a bug even though the bars
+// would technically bracket the window.
+func bucketPhaseSecs(anchor time.Time, bucketSecs int) int64 {
+	if bucketSecs <= 0 {
+		return 0
+	}
+	w := int64(bucketSecs)
+	p := anchor.Round(time.Hour).Unix() % w
+	if p < 0 {
+		p += w
+	}
+	return p
 }
 
 // loadVolumeSeries buckets dollar consumption inside a window for the
@@ -443,13 +471,17 @@ func bucketSecsForKind(kind string) int {
 // by (bucket, raw model); Go folds each raw model into its family so the
 // classification lives in exactly one place. Events with a NULL cost are
 // excluded and contribute nothing, same as the total-only query it replaced.
-func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, bucketSecs int) ([]SeriesBucket, error) {
+//
+// anchor phases the bucket grid so the bars align with the window boundary
+// rather than with UTC midnight (see bucketPhaseSecs).
+func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, bucketSecs int, anchor time.Time) ([]SeriesBucket, error) {
 	if bucketSecs <= 0 {
 		return []SeriesBucket{}, nil
 	}
+	phase := bucketPhaseSecs(anchor, bucketSecs)
 	query := fmt.Sprintf(`
 		SELECT
-			(CAST(strftime('%%s', occurred_at) AS INTEGER) / %d) * %d AS bucket_unix,
+			((CAST(strftime('%%s', occurred_at) AS INTEGER) - %d) / %d) * %d + %d AS bucket_unix,
 			model,
 			cost_source,
 			COALESCE(SUM(cost_usd_equivalent), 0) AS total
@@ -457,7 +489,7 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 		WHERE occurred_at >= ? AND occurred_at < ? AND cost_usd_equivalent IS NOT NULL
 		GROUP BY bucket_unix, model, cost_source
 		ORDER BY bucket_unix
-	`, bucketSecs, bucketSecs)
+	`, phase, bucketSecs, bucketSecs, phase)
 	rows, err := db.Query(query, store.FormatTime(startedAt), store.FormatTime(endsAt))
 	if err != nil {
 		return nil, err
