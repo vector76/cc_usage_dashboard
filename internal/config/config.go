@@ -85,7 +85,12 @@ func Load(path string) (*Config, error) {
 	var cfg Config
 
 	// Set defaults
-	cfg.Database.Path = "usage.db"
+	// Left empty on purpose: the database location is resolved by the
+	// caller via ResolveDBPath, which knows about $USAGE_DASHBOARD_DB, an
+	// existing checkout database, and the per-user data dir. A literal
+	// default here would shadow all three and pin the database to the
+	// process working directory.
+	cfg.Database.Path = ""
 	cfg.HTTP.Port = 27812
 	cfg.HTTP.Bind = []string{"127.0.0.1"}
 	cfg.Claude.ProjectsDir = expandHome("~/.claude/projects")

@@ -84,14 +84,15 @@ func main() {
 	}
 	if *configPath == "" {
 		// First run: no config anywhere in the search chain. Materialize
-		// the embedded sample next to the exe so the user has a real file
-		// to edit (its active values match the built-in defaults, so this
-		// never changes behavior). Failure is non-fatal — fall back to the
-		// built-in defaults, exactly as before the file existed.
-		dir := "."
-		if exe, err := os.Executable(); err == nil {
-			dir = filepath.Dir(exe)
-		}
+		// the embedded sample in the per-user config dir so the user has a
+		// real file to edit (its active values match the built-in defaults,
+		// so this never changes behavior). Not next to the exe: for a
+		// `go install`ed binary that is GOBIN, a tool directory that may not
+		// even be writable. The exe dir is still probed first, so a
+		// config.yaml sitting in a checkout continues to win. Failure is
+		// non-fatal — fall back to the built-in defaults, exactly as before
+		// the file existed.
+		dir := config.UserConfigDir()
 		if path, err := config.EnsureDefaultConfig(dir, ccusage.DefaultConfigYAML); err != nil {
 			slog.Warn("failed to create default config.yaml; using built-in defaults", "dir", dir, "err", err)
 		} else {
@@ -115,7 +116,7 @@ func main() {
 
 	dbDir := filepath.Dir(cfg.Database.Path)
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create database directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to create database directory %s: %v\n", dbDir, err)
 		os.Exit(1)
 	}
 
@@ -128,7 +129,10 @@ func main() {
 
 	db, err := store.Open(cfg.Database.Path)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to open database: %v\n", err)
+		// Name the path: the previous relative default made this error
+		// ("unable to open database file (14)") impossible to act on,
+		// because it never said which file had been tried.
+		fmt.Fprintf(os.Stderr, "failed to open database %s: %v\n", cfg.Database.Path, err)
 		os.Exit(1)
 	}
 	// db.Close is invoked explicitly during graceful shutdown after the

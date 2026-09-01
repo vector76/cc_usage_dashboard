@@ -52,8 +52,13 @@ slack:
   # session_absolute_threshold: 0.98
   # weekly_absolute_threshold: 0.80
 
+# Leave unset to resolve automatically: $USAGE_DASHBOARD_DB, else an existing
+# usage.db in the working directory (build-from-checkout), else the per-user
+# data dir — %LOCALAPPDATA%\usage_dashboard\ on Windows,
+# ~/.local/share/usage-dashboard/ elsewhere. See docs/configuration.md
+# "Database location". Set an explicit path here to override.
 # database:
-#   path: "usage.db"
+#   path: ""
 
 # http:
 #   port: 27812

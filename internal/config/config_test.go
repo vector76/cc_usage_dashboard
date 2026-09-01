@@ -14,8 +14,9 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load failed: %v", err)
 	}
 
-	if cfg.Database.Path != "usage.db" {
-		t.Errorf("expected database path 'usage.db', got %s", cfg.Database.Path)
+	// Empty by design — see TestLoadLeavesDatabasePathUnresolved.
+	if cfg.Database.Path != "" {
+		t.Errorf("expected empty database path, got %s", cfg.Database.Path)
 	}
 	if cfg.HTTP.Port != 27812 {
 		t.Errorf("expected port 27812, got %d", cfg.HTTP.Port)

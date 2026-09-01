@@ -56,11 +56,18 @@ The build is pure Go (no CGO, no C toolchain) — all you need is
 go install github.com/vector76/cc_usage_dashboard/cmd/trayapp@latest
 ```
 
-The binary lands in `%USERPROFILE%\go\bin\trayapp.exe`. Run it directly:
+The binary lands in `%USERPROFILE%\go\bin\trayapp.exe`. Run it directly — from
+any working directory:
 
 ```powershell
 & "$env:USERPROFILE\go\bin\trayapp.exe"
 ```
+
+On first run it writes its config to `%APPDATA%\usage_dashboard\config.yaml`
+and keeps its database in `%LOCALAPPDATA%\usage_dashboard\usage.db`. Neither
+depends on where you launch it from. Override the database location with
+`$env:USAGE_DASHBOARD_DB` or a `database.path` entry in the config — see
+[docs/configuration.md](docs/configuration.md).
 
 ### Option B — clone and build from source
 

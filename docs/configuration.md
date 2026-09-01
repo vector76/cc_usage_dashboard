@@ -12,7 +12,9 @@ an empty file produces a fully-functional config.
 ## First-run materialization
 
 When no `config.yaml` exists anywhere in the chain, the trayapp writes one
-next to the executable from the embedded sample (repo-root
+into the per-user config dir — `config.UserConfigDir()`:
+`%APPDATA%\usage_dashboard\` on Windows, `~/.config/usage-dashboard/`
+elsewhere — from the embedded sample (repo-root
 `config.sample.yaml`, wired in via `config_embed.go` exactly like the price
 table) and loads it. The sample keeps the slack-activation profiles active
 — they're the setting users actually tune — and every other key commented
@@ -21,13 +23,22 @@ edited. `config_sample_test.go` pins that neutrality: the sample must load
 to the same effective config as no file at all. A user's `config.yaml` is
 never overwritten or reconciled afterward, and the repo `.gitignore`
 excludes it so `git pull` deployments (`pullrun.bat`) never conflict with
-local edits. Materialization failure (e.g. exe dir not writable) is
+local edits. Materialization failure (e.g. the config dir not writable) is
 non-fatal: the app logs a warning and runs on built-in defaults, exactly as
 it did before the file existed.
 
+The target is deliberately *not* the executable's own directory. For a
+`go install`ed binary that is `GOBIN` (`~/go/bin`) — a tool directory that
+should not accumulate application state and is not always writable. Because
+`ResolveConfigPath` still probes the exe dir *first*, a `config.yaml` sitting
+in a build checkout continues to take precedence, so the
+build-and-run-from-checkout workflow is unaffected.
+
 ```yaml
 database:
-  path: "usage.db"
+  # Absent or empty means "resolve automatically" — see "Database location"
+  # below. An explicit value here is used as written.
+  path: ""
 
 http:
   port: 27812
@@ -86,6 +97,39 @@ logging:
   level: info
   file: ""                          # empty -> stdout; otherwise rotated file path
 ```
+
+## Database location
+
+`database.path` defaults to empty, not to a filename. `config.Load` leaves it
+that way on purpose and `cmd/trayapp` then calls `config.ResolveDBPath`,
+which picks, in order:
+
+1. `$USAGE_DASHBOARD_DB`, used verbatim — the explicit override.
+2. An existing `usage.db` in the current working directory. This is the
+   build-from-checkout workflow: the exe runs from the repo root with its
+   database beside it. Honoring an *existing* file means installing a newer
+   binary never strands accumulated history in the old location. A
+   *directory* named `usage.db` does not count.
+3. `config.UserDataDir()/usage.db` — the installed case:
+   `%LOCALAPPDATA%\usage_dashboard\usage.db` on Windows,
+   `~/.local/share/usage-dashboard/usage.db` elsewhere.
+
+Cases 2 and 3 always yield an absolute path, and `cmd/trayapp` `MkdirAll`s
+the parent directory before opening.
+
+Local rather than Roaming on Windows is deliberate: a roaming profile would
+sync a live SQLite file and its `-wal`/`-shm` sidecars between machines. That
+is also why the data dir is separate from `UserConfigDir()` — configuration
+may roam with the user, a database must not.
+
+Historically the default was the bare relative string `"usage.db"`, applied
+in `Load` itself. That shadowed `ResolveDBPath` entirely — the caller only
+consults it when the path is empty — and pinned the database to whatever
+directory the process happened to start in. A `go install`ed binary launched
+from a shell sitting in `C:\Windows\system32` therefore tried to create its
+database *there* and failed with `unable to open database file (14)`
+(`SQLITE_CANTOPEN`). The `MkdirAll` guard did not catch it, because
+`filepath.Dir("usage.db")` is `"."`, which always exists.
 
 ## Price table resolution
 
