@@ -79,7 +79,10 @@ slack:
 
 # logging:
 #   level: info        # debug | info | warn | error
-#   file: ""           # empty -> stderr; otherwise rotated log file path
+#   # Empty resolves automatically: stderr when a console is attached, else a
+#   # rotated trayapp.log in the data dir next to usage.db. A -H=windowsgui
+#   # build has no console, so leaving this empty still gets you logs.
+#   file: ""
 
 # retention:
 #   parse_errors_days: 30

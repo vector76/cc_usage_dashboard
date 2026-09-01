@@ -25,7 +25,9 @@ Build command (run on the Windows host):
 go build -ldflags="-H=windowsgui" -o trayapp.exe ./cmd/trayapp
 ```
 
-The `-H=windowsgui` flag suppresses the console window.
+The `-H=windowsgui` flag suppresses the console window. It also means the
+process has no stderr, which is why logging falls back to a file — see
+"Health and observability" below.
 
 ## Tray menu (v1)
 
@@ -69,7 +71,11 @@ Provide both via a small `install.ps1` script that the user runs once.
 - `GET /metrics` — minimal Prometheus-style counters (events ingested, snapshots received,
   parse errors, slack queries). Useful even without a Prometheus server: it's a quick
   status dump for debugging.
-- All logs to a rotating file in `%LOCALAPPDATA%`.
+- Logs go to a rotating `trayapp.log` in `%LOCALAPPDATA%\usage_dashboard\`,
+  beside the database — but only when no console is attached, which is the
+  case for any `-H=windowsgui` build. Run a console build from a terminal and
+  logs stay on stderr where you can see them. An explicit `logging.file`
+  overrides both. See docs/configuration.md "Log destination".
 
 ## Graceful shutdown
 

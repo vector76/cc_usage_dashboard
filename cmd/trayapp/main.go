@@ -121,7 +121,10 @@ func main() {
 	}
 
 	// Configure logging destination before opening the DB so startup errors
-	// land in the rotated log when one is configured.
+	// land in the rotated log when one is configured. With no console to
+	// write to, an unconfigured log goes to a file rather than a discarded
+	// stderr — see resolveLogFile.
+	cfg.Logging.File = resolveLogFile(cfg.Logging.File, consoleAttached())
 	logCloser := setupLogging(cfg.Logging.File, cfg.Logging.Level)
 	if logCloser != nil {
 		defer logCloser.Close()

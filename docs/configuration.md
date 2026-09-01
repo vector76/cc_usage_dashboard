@@ -95,8 +95,33 @@ enable_slack_sampling: false        # writes to slack_samples on every /slack hi
 
 logging:
   level: info
-  file: ""                          # empty -> stdout; otherwise rotated file path
+  file: ""                          # empty -> resolved; see "Log destination"
 ```
+
+## Log destination
+
+`logging.file` is resolved by `resolveLogFile` in `cmd/trayapp/logdest.go`:
+
+1. A non-empty `logging.file` is used as written — an explicit setting is an
+   instruction, not a hint.
+2. Otherwise, if a console is attached, logs go to stderr. This is the
+   build-from-checkout case: the operator is watching the terminal, and
+   diverting to a file would hide output they asked to see.
+3. Otherwise, logs go to a rotating `trayapp.log` in `config.UserDataDir()`,
+   beside the database.
+
+Rung three exists because a release binary is linked with `-H=windowsgui`
+(see the Makefile `release` target) and therefore has **no console at all**.
+Every write to stderr is silently discarded, so an unconfigured headless build
+would run blind — which is precisely how a startup failure such as an
+unopenable database becomes unreportable. `consoleAttached` decides this by
+calling `GetConsoleWindow`, which returns NULL for a process with no console;
+off Windows it is hardcoded true, since stderr there is always a real
+descriptor whether it is a terminal, a pipe, or captured by systemd.
+
+The log sits in `UserDataDir` rather than `UserConfigDir` because it is mutable
+state, not configuration — on Windows that means Local, never the roaming
+profile.
 
 ## Database location
 

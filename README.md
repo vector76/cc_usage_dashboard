@@ -53,8 +53,14 @@ The build is pure Go (no CGO, no C toolchain) — all you need is
 ### Option A — install with `go install`
 
 ```powershell
-go install github.com/vector76/cc_usage_dashboard/cmd/trayapp@latest
+go install -ldflags="-H=windowsgui" github.com/vector76/cc_usage_dashboard/cmd/trayapp@latest
 ```
+
+`-H=windowsgui` is what makes it a background tray app. Without it you get a
+console-subsystem binary that holds your prompt open and prints logs to the
+terminal until you quit — `go install` cannot pick the flag up from this repo,
+because the subsystem is set by the linker, so it has to be passed here. All
+the other build paths (`make release`, README Option B) already pass it.
 
 The binary lands in `%USERPROFILE%\go\bin\trayapp.exe`. Run it directly — from
 any working directory:
@@ -68,6 +74,14 @@ and keeps its database in `%LOCALAPPDATA%\usage_dashboard\usage.db`. Neither
 depends on where you launch it from. Override the database location with
 `$env:USAGE_DASHBOARD_DB` or a `database.path` entry in the config — see
 [docs/configuration.md](docs/configuration.md).
+
+Because a `windowsgui` build has no console, logs go to a rotating
+`%LOCALAPPDATA%\usage_dashboard\trayapp.log` instead of the terminal. That is
+the first place to look if the tray icon never appears:
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\usage_dashboard\trayapp.log" -Tail 30
+```
 
 ### Option B — clone and build from source
 
