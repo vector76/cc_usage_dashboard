@@ -70,8 +70,11 @@ type ModelBreakdown struct {
 // never colour the same model differently.
 //
 // Matching is case-insensitive by substring and deliberately version-
-// insensitive: claude-opus-4-8 and claude-opus-4-1 both map to "opus". An empty
-// model, or any unrecognized name, maps to "other".
+// insensitive: claude-opus-4-8 and claude-opus-4-1 both map to "opus". Mythos
+// is kept as its own family rather than folded into fable so the report table
+// names the model honestly; the client paints both the same colour because an
+// account has one or the other, never both. An empty model, or any
+// unrecognized name, maps to "other".
 func ModelFamily(model string) string {
 	m := strings.ToLower(model)
 	switch {
@@ -81,6 +84,8 @@ func ModelFamily(model string) string {
 		return "sonnet"
 	case strings.Contains(m, "fable"):
 		return "fable"
+	case strings.Contains(m, "mythos"):
+		return "mythos"
 	case strings.Contains(m, "haiku"):
 		return "haiku"
 	default:

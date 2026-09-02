@@ -66,16 +66,19 @@ function groupPolylines(points) {
 // bottom-up stack order within a volume bar, the legend order, and the row order
 // wherever a page groups by family. Shades are picked to stay distinct from each
 // other and readable against the light background: blue / green / red / yellow /
-// gray.
+// gray. Mythos deliberately reuses fable's red: it is the separately gated build
+// of the same model, and an account uses one or the other, so the two never
+// compete for attention in the same bar or table.
 //
 // These live here rather than in index.html because two pages render from them —
 // the dashboard's stacked bars and the range report's per-model table — and a
 // second copy is a second thing to forget when a family is added.
-const VOLUME_FAMILY_ORDER = ["opus", "sonnet", "fable", "haiku", "other"];
+const VOLUME_FAMILY_ORDER = ["opus", "sonnet", "fable", "mythos", "haiku", "other"];
 const VOLUME_FAMILY_COLORS = {
     opus: "#2563eb",   // blue
     sonnet: "#16a34a", // green
     fable: "#dc2626",  // red
+    mythos: "#dc2626", // red, same as fable (see note above)
     haiku: "#eab308",  // yellow
     other: "#9ca3af",  // gray
 };

@@ -100,7 +100,10 @@ even on a row whose dollars are an upper bound. A NULL cost is reported as
 ## Model families
 
 `consumption.ModelFamily` is the single source of truth for the
-opus/sonnet/fable/haiku/other classification. The dashboard's stacked
+opus/sonnet/fable/mythos/haiku/other classification. Mythos is its own
+family so the report labels the model honestly, but the client colours it
+the same red as fable: it is the separately gated build of the same model
+and an account uses one or the other, never both on one chart. The dashboard's stacked
 volume bars delegate to it (`dashboard.modelFamily`) and the report's
 per-model swatches colour from it, so a model cannot be coloured one way
 on the burn-down chart and another way in the report.

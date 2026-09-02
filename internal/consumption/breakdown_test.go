@@ -572,6 +572,8 @@ func TestModelFamily(t *testing.T) {
 		"claude-opus-4-1-20250805":  "opus",
 		"claude-sonnet-4-5":         "sonnet",
 		"claude-fable-5":            "fable",
+		"claude-fable-5-1":          "fable",
+		"claude-mythos-5-1":         "mythos",
 		"claude-haiku-4-5-20251001": "haiku",
 		"CLAUDE-OPUS-4-5":           "opus",
 		"":                          "other",

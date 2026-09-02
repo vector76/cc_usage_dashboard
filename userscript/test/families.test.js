@@ -45,6 +45,20 @@ test('families match the Go ModelFamily classifier', () => {
     );
 });
 
+// Mythos is a separately gated build of the same model as Fable, and an account
+// will have one or the other, never both on one chart. Reusing the fable colour
+// keeps the palette to five distinguishable shades; the two families stay
+// distinct so the report table still labels the model honestly.
+test('mythos shares the fable colour', () => {
+    assert.ok(VOLUME_FAMILY_ORDER.includes('mythos'), 'mythos missing from family order');
+    assert.strictEqual(VOLUME_FAMILY_COLORS.mythos, VOLUME_FAMILY_COLORS.fable);
+    assert.strictEqual(
+        VOLUME_FAMILY_ORDER.indexOf('mythos'),
+        VOLUME_FAMILY_ORDER.indexOf('fable') + 1,
+        'mythos should stack and list directly after fable',
+    );
+});
+
 // Both pages load the constants from grouping.js. A page that redeclares them
 // locally would shadow the shared copy and drift from it silently.
 test('no page redeclares the family constants', () => {

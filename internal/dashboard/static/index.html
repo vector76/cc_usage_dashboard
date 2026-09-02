@@ -112,8 +112,9 @@ function el(tag, attrs, text) {
 // one file rather than being duplicated per page.
 //
 // renderVolumeLegend paints the static color key for the stacked volume
-// bars once. Shows all five families so the legend is stable regardless of
-// which families happen to be present in the current data.
+// bars once. Shows every family so the legend is stable regardless of which
+// families happen to be present in the current data. Fable and mythos share a
+// swatch by design (see grouping.js), so the legend shows two red entries.
 function renderVolumeLegend() {
   const c = document.getElementById("burn-legend");
   if (!c) return;

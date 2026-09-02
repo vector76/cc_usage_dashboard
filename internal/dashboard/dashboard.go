@@ -78,7 +78,7 @@ type UsedSeriesPoint struct {
 // the bucket width away.
 //
 // CostUSD is the bucket total. ByFamily breaks that total down by model
-// family (see modelFamily): keys are opus/sonnet/fable/haiku/other and the
+// family (see modelFamily): keys are opus/sonnet/fable/mythos/haiku/other and the
 // values sum to CostUSD. Only families with a nonzero cost in the bucket
 // are present, so the client can render each bar as stacked segments.
 // OtherModels names the distinct models folded into the "other" family in
