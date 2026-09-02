@@ -14,7 +14,22 @@
 # schema migration and is deferred until it bites.
 
 models:
-  # ---- Fable 5 / Mythos 5: most capable widely released model, priced above Opus ----
+  # ---- Fable 5.1 / Mythos 5.1: same $10/$50 tier as Fable 5, but cache reads
+  # are billed at 0.025x input ($0.25/MTok) rather than the standard 0.1x, so
+  # these rows cannot share the Fable 5 numbers. ----
+  claude-fable-5-1:
+    input_rate_usd_per_m: 10.00
+    output_rate_usd_per_m: 50.00
+    cache_creation_rate_usd_per_m: 12.50
+    cache_read_rate_usd_per_m: 0.25
+
+  claude-mythos-5-1:
+    input_rate_usd_per_m: 10.00
+    output_rate_usd_per_m: 50.00
+    cache_creation_rate_usd_per_m: 12.50
+    cache_read_rate_usd_per_m: 0.25
+
+  # ---- Fable 5 / Mythos 5: priced above Opus, standard 0.1x cache reads ----
   claude-fable-5:
     input_rate_usd_per_m: 10.00
     output_rate_usd_per_m: 50.00
@@ -83,9 +98,9 @@ models:
     cache_read_rate_usd_per_m: 1.50
 
   # ---- Sonnet 5 ----
-  # Introductory rate ($2/$10 per MTok) runs through 2026-08-31; standard
-  # rate ($3/$15) applies after. Update this entry once the intro window
-  # closes.
+  # Launched at an introductory $2/$10 per MTok with a planned rise to
+  # $3/$15 on 2026-09-01. Anthropic later made the introductory rate the
+  # standard price and cancelled the increase, so $2/$10 is permanent.
   claude-sonnet-5:
     input_rate_usd_per_m: 2.00
     output_rate_usd_per_m: 10.00
