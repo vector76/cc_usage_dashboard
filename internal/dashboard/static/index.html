@@ -111,19 +111,22 @@ function el(tag, attrs, text) {
 // above — the range report renders from the same two constants, so they live in
 // one file rather than being duplicated per page.
 //
-// renderVolumeLegend paints the static color key for the stacked volume
-// bars once. Shows every family so the legend is stable regardless of which
-// families happen to be present in the current data. Fable and mythos share a
-// swatch by design (see grouping.js), so the legend shows two red entries.
-function renderVolumeLegend() {
+// renderVolumeLegend paints the color key for the stacked volume bars.
+// Lists only the families passed in — presentFamilies() over the session and
+// weekly windows — so the key matches the segments actually drawn: no sonnet
+// entry for an account that never uses sonnet, and only one of fable / mythos
+// (they share a swatch and are never both in use). An empty list, as before
+// the first /state response, leaves the row blank.
+function renderVolumeLegend(families) {
   const c = document.getElementById("burn-legend");
   if (!c) return;
   while (c.firstChild) c.removeChild(c.firstChild);
+  if (!families || families.length === 0) return;
   const label = document.createElement("span");
   label.style.cssText = "font-size:12px;color:#444;margin-right:8px;";
   label.textContent = "Model family:";
   c.appendChild(label);
-  for (const fam of VOLUME_FAMILY_ORDER) {
+  for (const fam of families) {
     const item = document.createElement("span");
     item.style.cssText = "display:inline-flex;align-items:center;margin-right:14px;font-size:12px;color:#444;";
     const sw = document.createElement("span");
@@ -810,6 +813,7 @@ async function refresh() {
     renderBurnDown("chart-weekly", s.weekly, {
       slackProfile: profiles.weekly || [[0, 80], [30, 80], [100, 10]],
     });
+    renderVolumeLegend(presentFamilies([s.session, s.weekly]));
   } catch (e) { console.error("state error", e); }
   try {
     const dResp = await fetch("/consumption?period=24h");
@@ -821,7 +825,6 @@ async function refresh() {
   refreshFeedback();
 }
 
-renderVolumeLegend();
 refresh();
 setInterval(refresh, 10000);
 </script>

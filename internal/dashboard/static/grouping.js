@@ -83,6 +83,35 @@ const VOLUME_FAMILY_COLORS = {
     other: "#9ca3af",  // gray
 };
 
+// presentFamilies returns, in VOLUME_FAMILY_ORDER, every family that has a
+// nonzero cost in any volume bucket of any of the given window payloads. The
+// dashboard feeds it the session and weekly windows so the legend keys exactly
+// the segments on screen: an account that never uses sonnet gets no green
+// entry, and fable / mythos — which share a swatch and are never both in use —
+// appear as one line rather than two. A bucket that carries a total but no
+// by_family map renders as a single "other" segment, so it counts as "other"
+// here for the same reason.
+function presentFamilies(windows) {
+    const seen = new Set();
+    for (const win of windows || []) {
+        for (const b of (win && win.volume) || []) {
+            const byFam = (b && b.by_family) || {};
+            let any = false;
+            for (const fam of VOLUME_FAMILY_ORDER) {
+                const v = byFam[fam];
+                if (typeof v === 'number' && v > 0) {
+                    seen.add(fam);
+                    any = true;
+                }
+            }
+            if (!any && b && typeof b.cost_usd === 'number' && b.cost_usd > 0) {
+                seen.add('other');
+            }
+        }
+    }
+    return VOLUME_FAMILY_ORDER.filter((fam) => seen.has(fam));
+}
+
 if (typeof module !== 'undefined') {
-    module.exports = { groupPolylines, VOLUME_FAMILY_ORDER, VOLUME_FAMILY_COLORS };
+    module.exports = { groupPolylines, presentFamilies, VOLUME_FAMILY_ORDER, VOLUME_FAMILY_COLORS };
 }
