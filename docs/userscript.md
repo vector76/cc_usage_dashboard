@@ -39,41 +39,56 @@ rather than ignored on every unrelated page. On such a route:
      label. The "Usage credits" section renders its own `role="meter"` bar,
      which matches the selector but is discarded by the section-heading
      anchoring below.
-2. **Anchor on section headings, not row labels.** For each usage bar, find
-   the most recent preceding `<h2>` or `<h3>` in document order (Anthropic
-   has used both in different revisions). Section names are matched as a
-   *prefix* against a list of known variants — a heading whose text starts
-   with any of `Your usage limits` / `Plan usage limits` (the session
-   section, both forms observed in the wild) or `Weekly limits` qualifies,
-   even if a plan-tier badge has been concatenated onto the end (e.g.
-   `"Plan usage limitsMax (20x)"`, `"Your usage limitsTeam"`). Only two
-   sections are kept:
-   - session section → first bar in this section is "Current session"
-     (% of the rolling 5-hour window).
-   - `Weekly limits` → the first bar in this section that is *not* the
-     Fable sub-row is the aggregate "All models" (% of the weekly limit).
-   The one exception to heading-only anchoring is the **Fable** sub-row,
-   which is claimed by row label (`userscript/lib/rows.js`,
-   `isFableRowLabel`) because it sits under the same `Weekly limits`
-   heading as the aggregate and nothing structural distinguishes them.
-   Its accessible name comes from `aria-labelledby` pointing at the row
-   label; matching is a case-folded *prefix* against accepted variants,
-   the same hedge used for section headings. Note the bar's own
+2. **Anchor on section headings, then on row labels.** For each usage bar,
+   find the most recent preceding `<h2>` or `<h3>` in document order
+   (Anthropic has used both in different revisions) and classify it
+   (`userscript/lib/rows.js`, `classifySection`). Section names are matched
+   as a case-folded *prefix* against a list of known variants, so a
+   plan-tier badge concatenated onto the end (`"Plan usage limitsMax (20x)"`,
+   `"Your usage limitsTeam"`) doesn't break the match. Two page generations
+   are supported side by side, because different accounts see different
+   ones at the same time:
+   - **Legacy two-section layout** (through August 2026; still served to
+     some accounts). A heading starting with `Your usage limits` /
+     `Plan usage limits` is the session section: its first bar is
+     "Current session" (% of the rolling 5-hour window). A heading starting
+     with `Weekly limits` is the weekly section: the first bar that is *not*
+     the Fable sub-row is the aggregate "All models" (% of the weekly
+     limit), and the Fable sub-row is claimed by row label
+     (`isFableRowLabel`). Other sub-rows (Sonnet only, Claude Design) are
+     ignored.
+   - **Combined layout** (observed September 2026). A single `Your usage`
+     heading holds "Current session", "This week" and "Fable this week",
+     and is followed by unrelated sections whose meters must be ignored
+     ("Usage credits", "This week's usage by product" with per-product
+     bars). With one heading for three rows there is no positional rule
+     left, so every row in this section is claimed by label
+     (`classifyUsageRow`); unrecognised labels are ignored rather than
+     guessed. `Your usage` is a prefix of the legacy `Your usage limits`,
+     so the legacy forms are tested first.
+   Row labels are the accessible name of the bar, resolved through
+   `aria-labelledby` (the July 2026 Meter component carries no
+   `aria-label`). Label matching is the same case-folded prefix hedge as
+   the headings, absorbing version suffixes ("Fable 5"), qualifiers
+   ("Fable only") and badges ("This weekMax (20x)"). Note the bar's own
    `data-variant` / `bg-*` classes are **not** usable as an identity
    signal: they encode a threshold (`accent` → `warning` as a bar nears
    its limit), so the Fable bar's orange styling is a fact about its
-   percentage, not about which row it is. If the label match fails, the
-   fable field simply goes absent — the aggregate is still selected
-   positionally, so the session and weekly lines cannot be collateral
+   percentage, not about which row it is. When a label match fails that
+   field simply goes absent; in the legacy layout the session and weekly
+   aggregate are still selected positionally and cannot be collateral
    damage.
-   Other sub-rows under "Weekly limits" (Sonnet only, Claude Design, future
-   additions), the "Additional features" section (routines), and the
-   extra-usage section are all ignored. Anchoring on section titles is more durable than matching row
-   labels — Anthropic edits row text often, section headings less so but they
-   do change (the session section was renamed from `Plan usage limits` to
-   `Your usage limits` between April and May 2026). Carrying multiple
-   accepted variants and matching as a prefix hedges against future cosmetic
-   reshuffles.
+   Per-row text (the reset hint, the limbo copy) is searched only within
+   the row's own subtree — the highest ancestor that contains no other
+   usage bar and no heading (`usageRowRoot`). In the combined layout the
+   rows are siblings, and a fixed-depth walk that reaches their shared
+   container would read the *first* row's hint for every row.
+   Headings and labels both change: the session section was renamed from
+   `Plan usage limits` to `Your usage limits` between April and May 2026,
+   the weekly aggregate went from "All models" to "This week" in September
+   2026. Carrying multiple accepted variants and matching as a prefix
+   hedges against future cosmetic reshuffles; a structural reshuffle shows
+   up in the parse-error fingerprint (see Failure handling).
 3. Read `aria-valuenow` (0–100) directly. We do not text-scrape the "X% used" label.
 4. Parse the page's "Last updated: N minutes ago" indicator into a staleness
    delta. The percent values and the "Resets in …" hint are accurate as of
@@ -81,11 +96,20 @@ rather than ignored on every unrelated page. On such a route:
    delta; the session-reset timestamp uses the back-dated time as its base
    (`baseMs + Δ` rather than `now + Δ`). When the indicator can't be found
    the snapshot is treated as current.
-5. Parse the row's reset hint into a UTC ISO timestamp:
-   - "Resets in 3 hr 33 min" / "Resets in 19 min" → `observedAt + Δ`.
-   - "Resets Thu 11:00 PM" → next future occurrence of that weekday at that
-     local time, converted to UTC. Absolute clock-time hints are unaffected
-     by page staleness.
+5. Parse the row's reset hint into a UTC ISO timestamp
+   (`userscript/lib/resets.js`):
+   - Session, relative form (through August 2026): "Resets in 3 hr 33 min" /
+     "Resets in 19 min" → `observedAt + Δ`.
+   - Session, absolute form (September 2026): "Resets Thu 3:50 AM" → the
+     occurrence of that weekday and local clock time *nearest* to
+     `observedAt`. A session window is at most five hours, so the reset is
+     always within a few hours either side; on a stale page whose reset has
+     just passed this lands a few minutes in the past, which the server
+     accepts (it tolerates an end up to an hour back), whereas "next future
+     occurrence" would jump a week ahead and be rejected.
+   - Weekly: "Resets Thu 11:00 PM" / "Resets Thursday 11:00 PM" → next
+     future occurrence of that weekday at that local time, converted to
+     UTC. Absolute clock-time hints are unaffected by page staleness.
    These land in `session_window_ends` / `weekly_window_ends` so the server can
    anchor the windows on Anthropic's actual reset boundary. Without a parseable
    hint the server declines to mint and the dashboard renders a `[now, now+7d]`
@@ -112,7 +136,7 @@ one **meaningful-change signal** has fired since the last successful send.
 Because every trigger goes through the same gate, the backstop is free to fire
 aggressively without producing duplicate rows.
 
-The five meaningful-change signals are:
+The six meaningful-change signals are:
 
 1. **Session percent (`aria-valuenow`) changed.** The bar visibly moved.
 2. **Fable weekly percent changed.** Its cap is visibly tighter than the
@@ -125,9 +149,12 @@ The five meaningful-change signals are:
    explicit null compare equal), or a page with no Fable row read against
    a pre-Fable state record would fire on every trigger and defeat the
    dedup entirely.
-3. **Verbatim "Resets in …" text changed.** Even when the percent is unchanged
-   the row text ticks down; this is how we capture pure time advancement
-   inside an active window.
+3. **Verbatim "Resets …" text changed.** On the legacy page the relative
+   "Resets in N min" text ticks down every minute even when the percent is
+   unchanged, so this signal alone captured pure time advancement inside an
+   active window. On the September 2026 page the text is an absolute clock
+   time that only changes when the window does, which is why signal 6
+   exists.
 4. **Limbo text appeared or disappeared.** The row text matched
    "Starts when a message is sent" on one side and not the other.
 5. **In limbo only**, `findLastUpdatedAgeMs` returned a value strictly *smaller*
@@ -137,6 +164,14 @@ The five meaningful-change signals are:
    the last-sent age pins to its floor of 0 once a send lands while the
    page shows "just now" and would self-trap the trigger forever after.
    Null on either side is "no information" and must not fire.
+
+6. **Heartbeat, outside limbo only.** More than five minutes
+   (`HEARTBEAT_MS`) have passed since the last successful send. This is the
+   floor on the send cadence now that the session reset text no longer
+   ticks: a flat percent would otherwise go silent long enough to trip the
+   15-minute `continuous_with_prev` gap (below) and the server's Slack
+   baseline-age gate (8 minutes). It is deliberately not applied in limbo,
+   where signal 5 remains the only liveness evidence.
 
 **Why "Last updated" is excluded as a generic trigger.** The "Last updated:
 N minutes ago" indicator advances on pure wall-clock time even when nothing
@@ -319,9 +354,13 @@ The userscript must:
 - Tolerate DOM changes. If the expected nodes are missing for >N seconds, post a
   `parse_error` payload to the local server (separate endpoint) so the trayapp can
   surface "userscript broke, please update" in the tray UI. The payload is a
-  structured **fingerprint** (heading texts, progressbar/meter counts, pathname) — not
-  raw page HTML — so conversation content and account names never leave the
-  browser.
+  structured **fingerprint** (heading texts, progressbar/meter counts, the
+  bars' resolved row labels, pathname) — not raw page HTML — so conversation
+  content and account names never leave the browser. The row labels were
+  added after the September 2026 relayout: the fingerprint showed seven
+  meters under an unfamiliar heading, but which meter was which had to be
+  captured by hand from the live page. Recent fingerprints are served by
+  `GET /api/feedback` on the running trayapp.
 
 ## Distribution
 

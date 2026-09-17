@@ -30,7 +30,17 @@ function _absentAsNull(v) {
     return v === undefined ? null : v;
 }
 
-function shouldSend(observation, prevState, lastObservedAgeMs) {
+// Floor on the send cadence while a session window is active. Through
+// August 2026 the session row's "Resets in N min" text ticked every minute
+// and the reset-text signal alone produced roughly one send per minute; the
+// September 2026 page shows an absolute clock time that only changes when
+// the window does, so a flat percent would otherwise go silent long enough
+// to trip the 15-minute continuity gap (lib/continuity.js) and the server's
+// Slack baseline-age gate (8 minutes). Deliberately not applied in limbo,
+// where the only liveness evidence is the "Last updated" decrease below.
+const HEARTBEAT_MS = 5 * 60 * 1000;
+
+function shouldSend(observation, prevState, lastObservedAgeMs, nowMs) {
     if (!prevState) return 'send';
 
     if (observation.sessionUsed !== prevState.lastPercent) return 'send';
@@ -72,11 +82,14 @@ function shouldSend(observation, prevState, lastObservedAgeMs) {
         if (cur != null && lastObservedAgeMs != null && cur < lastObservedAgeMs) {
             return 'send';
         }
+    } else if (typeof nowMs === 'number' && typeof prevState.lastSentAtMs === 'number' &&
+        nowMs - prevState.lastSentAtMs >= HEARTBEAT_MS) {
+        return 'send';
     }
 
     return 'skip';
 }
 
 if (typeof module !== 'undefined') {
-    module.exports = { shouldSend };
+    module.exports = { shouldSend, HEARTBEAT_MS };
 }

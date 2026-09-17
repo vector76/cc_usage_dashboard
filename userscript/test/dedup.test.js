@@ -236,3 +236,44 @@ test('fable row disappearing (extractor break or plan change) → send', () => {
     const obs = makeObservation({ fableWeeklyUsed: null });
     assert.strictEqual(shouldSend(obs, state, null), 'send');
 });
+
+// ---------- heartbeat ----------
+//
+// Through August 2026 the session row's "Resets in N min" text ticked every
+// minute, so signal 3 alone produced roughly one send per minute inside an
+// active window. The September 2026 page shows an absolute clock time that
+// only changes when the window does, so a flat percent would otherwise go
+// silent for as long as it stays flat -- long enough to trip the 15-minute
+// continuity gap and the Slack baseline age gate.
+
+const { HEARTBEAT_MS } = require('../lib/dedup');
+
+test('heartbeat constant sits inside the continuity gap and the Slack baseline age', () => {
+    const { WALL_CLOCK_GAP_MS } = require('../lib/continuity');
+    assert.ok(HEARTBEAT_MS < WALL_CLOCK_GAP_MS);
+    assert.ok(HEARTBEAT_MS < 480 * 1000);
+});
+
+test('heartbeat: frozen page but last send older than the heartbeat -> send', () => {
+    const state = makeState({ lastSentAtMs: 1714200000000 });
+    const obs = makeObservation();
+    assert.strictEqual(shouldSend(obs, state, null, 1714200000000 + HEARTBEAT_MS), 'send');
+});
+
+test('heartbeat: frozen page, last send younger than the heartbeat -> skip', () => {
+    const state = makeState({ lastSentAtMs: 1714200000000 });
+    const obs = makeObservation();
+    assert.strictEqual(shouldSend(obs, state, null, 1714200000000 + HEARTBEAT_MS - 1), 'skip');
+});
+
+test('heartbeat: does not fire in limbo (fresh-poll evidence remains the only limbo signal)', () => {
+    const state = makeState({ lastSentAtMs: 1714200000000, lastSessionActive: false, lastResetText: null });
+    const obs = makeObservation({ sessionActive: false, resetText: null, lastUpdatedAgeMs: 4 * 60 * 1000 });
+    assert.strictEqual(shouldSend(obs, state, 4 * 60 * 1000, 1714200000000 + 2 * HEARTBEAT_MS), 'skip');
+});
+
+test('heartbeat: callers that pass no clock (legacy three-argument form) never heartbeat', () => {
+    const state = makeState({ lastSentAtMs: 0 });
+    const obs = makeObservation();
+    assert.strictEqual(shouldSend(obs, state, null), 'skip');
+});

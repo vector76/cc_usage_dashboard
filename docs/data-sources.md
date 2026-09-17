@@ -135,8 +135,9 @@ the implementation plan.
 
 The userscript performs **freshness-driven dedup** on the client side: a POST
 is emitted only when at least one meaningful-change signal has fired since
-the last successful send (percent moved, "Resets in …" text changed, limbo
-appeared/disappeared, or — in limbo — the "Last updated" age decreased).
+the last successful send (percent moved, "Resets …" text changed, limbo
+appeared/disappeared, five minutes elapsed while a session window is active,
+or — in limbo — the "Last updated" age decreased).
 Identical-value re-observations are intentionally suppressed; a 60-second
 backstop catches missed observer events but is gated by the same dedup, so
 stable plateaus produce no extra rows. Every POST also carries a
@@ -166,9 +167,9 @@ for write-time plateau compaction.
 ### Limbo signal: `session_active` / `weekly_active`
 
 When Anthropic's UI shows "Starts when a message is sent" instead of a
-"Resets in …" hint on the Current session row, no 5-hour window is
+"Resets …" hint on the Current session row, no 5-hour window is
 currently open. The same UI treatment applies independently to the
-weekly "All models" row. The userscript detects each cue and reports
+weekly "All models" / "This week" row. The userscript detects each cue and reports
 it on the snapshot POST as `session_active: false` and/or
 `weekly_active: false`. For each field:
 

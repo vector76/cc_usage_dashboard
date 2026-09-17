@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.9.0
-// @description  Reads "Current session", "All models", and "Fable" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
+// @version      0.10.0
+// @description  Reads "Current session", "This week" (formerly "All models"), and "Fable" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
 // @grant        GM.xmlHttpRequest
@@ -81,30 +81,51 @@
     const DOM_MISSING_REPORT_MS = 5 * 60 * 1000;
     const PARSE_ERROR_REPORT_COOLDOWN_MS = 60 * 60 * 1000;
 
-    // Section heading texts that anchor extraction. Row labels under each
-    // heading change as Anthropic adjusts plan features (Sonnet only, Claude
-    // Design, Routines, …); section names move occasionally too. We match
-    // any of the known variants as a prefix so a trailing plan-tier badge
-    // ("Your usage limitsTeam", "Plan usage limitsMax (20x)") doesn't break
-    // extraction. The first usage bar following each heading is the one
-    // we keep.
+    // ---------- section and row recognition (mirror of userscript/lib/rows.js) ----------
     //
-    // Known session-heading history:
-    //   "Plan usage limits" — through April 2026
-    //   "Your usage limits" — observed May 2026
-    const SESSION_HEADINGS = ['Your usage limits', 'Plan usage limits'];
-    const WEEKLY_HEADING = 'Weekly limits';
-
-    // Mirror of userscript/lib/rows.js — see there for why the per-model
-    // Fable sub-row has to be matched by label while every other row we
-    // read is selected positionally. Edit both together.
+    // See lib/rows.js for the full rationale. Section headings anchor
+    // extraction and are matched as a prefix so a trailing plan-tier badge
+    // ("Your usage limitsTeam", "Plan usage limitsMax (20x)") doesn't break
+    // it. In the legacy two-section layout the first bar under each heading
+    // is the one we keep (plus the Fable sub-row by label); in the
+    // September 2026 combined "Your usage" section every row is claimed by
+    // its label. Edit both copies together; test/inline-drift.test.js
+    // enforces that they agree.
+    //
+    // Known heading history:
+    //   "Plan usage limits" + "Weekly limits" — through April 2026
+    //   "Your usage limits" + "Weekly limits" — May 2026 through August 2026
+    //   "Your usage" (combined)               — observed September 2026
     const FABLE_ROW_LABEL_PREFIXES = ['fable'];
+    const SESSION_ROW_LABEL_PREFIXES = ['current session'];
+    const WEEKLY_ROW_LABEL_PREFIXES = ['this week', 'all models'];
+    const SESSION_HEADINGS = ['Your usage limits', 'Plan usage limits'];
+    const WEEKLY_HEADINGS = ['Weekly limits'];
+    const COMBINED_HEADINGS = ['Your usage'];
+
+    function _hasPrefix(text, prefixes) {
+        if (typeof text !== 'string') return false;
+        const t = text.trim().toLowerCase();
+        if (!t) return false;
+        return prefixes.some(p => t.startsWith(p.toLowerCase()));
+    }
 
     function isFableRowLabel(label) {
-        if (typeof label !== 'string') return false;
-        const t = label.trim().toLowerCase();
-        if (!t) return false;
-        return FABLE_ROW_LABEL_PREFIXES.some(p => t.startsWith(p));
+        return _hasPrefix(label, FABLE_ROW_LABEL_PREFIXES);
+    }
+
+    function classifyUsageRow(label) {
+        if (isFableRowLabel(label)) return 'fable';
+        if (_hasPrefix(label, SESSION_ROW_LABEL_PREFIXES)) return 'session';
+        if (_hasPrefix(label, WEEKLY_ROW_LABEL_PREFIXES)) return 'weekly';
+        return null;
+    }
+
+    function classifySection(heading) {
+        if (_hasPrefix(heading, SESSION_HEADINGS)) return 'session';
+        if (_hasPrefix(heading, WEEKLY_HEADINGS)) return 'weekly';
+        if (_hasPrefix(heading, COMBINED_HEADINGS)) return 'combined';
+        return null;
     }
 
     // Coalesce burst mutations (multiple bars updating in one React commit)
@@ -212,7 +233,13 @@
         return v === undefined ? null : v;
     }
 
-    function shouldSend(observation, prevState, lastObservedAgeMs) {
+    // Floor on the send cadence while a session window is active. See
+    // lib/dedup.js: the September 2026 page's absolute reset time no longer
+    // ticks every minute, so without this a flat percent would go silent
+    // past the 15-minute continuity gap and the Slack baseline-age gate.
+    const HEARTBEAT_MS = 5 * 60 * 1000;
+
+    function shouldSend(observation, prevState, lastObservedAgeMs, nowMs) {
         if (!prevState) return 'send';
 
         if (observation.sessionUsed !== prevState.lastPercent) return 'send';
@@ -250,6 +277,9 @@
             if (cur != null && lastObservedAgeMs != null && cur < lastObservedAgeMs) {
                 return 'send';
             }
+        } else if (typeof nowMs === 'number' && typeof prevState.lastSentAtMs === 'number' &&
+            nowMs - prevState.lastSentAtMs >= HEARTBEAT_MS) {
+            return 'send';
         }
 
         return 'skip';
@@ -356,57 +386,136 @@
         return bar.getAttribute('aria-label');
     }
 
-    // Walk up from a usage bar to locate the row's reset hint. The label
-    // column for each row carries text like "Resets in 19 min" or
-    // "Resets Thu 11:00 PM" or "Resets May 1". Anthropic has shipped this
-    // hint inside <p>, <span>, and <div> elements at various points, so
-    // we scan any leaf element (one with no element children) under each
-    // ancestor and stop at the first whose trimmed text starts with
-    // "Resets". The leaf restriction prevents matching a row container
-    // whose textContent starts with the hint but trails into other copy.
+    // The subtree that makes up one usage row: walk up from the bar while the
+    // parent still holds no other usage bar and no section heading. Row text
+    // (the reset hint, the limbo copy) is searched within this subtree only.
+    // Through August 2026 the rows we read sat in different sections, so a
+    // fixed six-level walk rarely strayed into another row; in the September
+    // 2026 combined section the session and weekly rows are siblings and a
+    // walk that reaches their shared container reads the *first* row's text
+    // for every row. The eight-level cap bounds the climb when a bar is the
+    // only one on the page.
+    const ROW_ROOT_MAX_CLIMB = 8;
+
+    function usageRowRoot(bar) {
+        let node = bar;
+        for (let i = 0; i < ROW_ROOT_MAX_CLIMB && node.parentElement; i++) {
+            const parent = node.parentElement;
+            if (parent.querySelectorAll(USAGE_BAR_SELECTOR).length > 1) break;
+            if (parent.querySelector('h1, h2, h3, h4')) break;
+            node = parent;
+        }
+        return node;
+    }
+
+    // Leaf elements (no element children) within a row, in document order.
+    // Anthropic has shipped the row copy inside <p>, <span>, and <div>
+    // elements at various points; the leaf restriction prevents matching a
+    // container whose textContent starts with the hint but trails into
+    // other copy.
+    function rowLeafTexts(bar) {
+        const out = [];
+        for (const el of usageRowRoot(bar).querySelectorAll('*')) {
+            if (el.children.length > 0) continue;
+            out.push((el.textContent || '').trim());
+        }
+        return out;
+    }
+
+    // Locate the row's reset hint: "Resets in 19 min", "Resets Thu 11:00 PM",
+    // "Resets May 1". Null when the row carries none (limbo, or a sub-row
+    // whose hint is folded into other copy).
     function findRowResetText(bar) {
-        let node = bar.parentElement;
-        for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
-            for (const el of node.querySelectorAll(':scope *')) {
-                if (el.children.length > 0) continue;
-                const t = (el.textContent || '').trim();
-                if (/^Resets\b/i.test(t)) return t;
-            }
+        for (const t of rowLeafTexts(bar)) {
+            if (/^Resets\b/i.test(t)) return t;
         }
         return null;
     }
 
     // Detect the "no active window" limbo label on a row. Anthropic uses the
     // same copy ("Starts when a message is sent") on both the session row and
-    // the weekly row when the corresponding window is not open. Same leaf-
-    // element walk as findRowResetText: scope to the row's ancestors so
-    // similar marketing/help text elsewhere on the page can't trigger a
-    // false match.
+    // the weekly row when the corresponding window is not open. Scoped to
+    // the row so similar marketing/help text elsewhere on the page — or the
+    // sibling row's limbo copy — can't trigger a false match.
     function isLimboLabel(bar) {
         const needle = 'starts when a message is sent';
-        let node = bar.parentElement;
-        for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
-            for (const el of node.querySelectorAll(':scope *')) {
-                if (el.children.length > 0) continue;
-                const t = (el.textContent || '').toLowerCase();
-                if (t.includes(needle)) return true;
-            }
-        }
-        return false;
+        return rowLeafTexts(bar).some(t => t.toLowerCase().includes(needle));
     }
 
-    // "Resets in 3 hr 33 min" / "Resets in 19 min" / "Resets in 5 hr".
+    // ---------- reset-hint parsing (mirror of userscript/lib/resets.js) ----------
+    //
+    // See lib/resets.js for the full rationale. The session hint was
+    // relative ("Resets in 3 hr 33 min") through August 2026 and is an
+    // absolute local clock time ("Resets Thu 3:50 AM") as of September
+    // 2026; the weekly hint has always been absolute ("Resets Thu 11:00 PM",
+    // spelled "Thursday" since September 2026). A session reset resolves to
+    // the *nearest* occurrence of that weekday/time to the observation (a
+    // just-passed reset on a stale page stays a few minutes in the past,
+    // which the server accepts); a weekly reset resolves to the next future
+    // occurrence. Edit both copies together; test/inline-drift.test.js
+    // enforces that they agree.
+    const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const WEEKDAY_CLOCK_RE = /Resets\s+(Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i;
+
+    function parseWeekdayClock(text) {
+        if (!text) return null;
+        const m = String(text).match(WEEKDAY_CLOCK_RE);
+        if (!m) return null;
+        const key = m[1].slice(0, 3).toLowerCase();
+        const dow = WEEKDAYS.findIndex(d => d.toLowerCase() === key);
+        if (dow < 0) return null;
+        let hour = parseInt(m[2], 10) % 12;
+        if (m[4].toUpperCase() === 'PM') hour += 12;
+        return { dow, hour, minute: parseInt(m[3], 10) };
+    }
+
+    function nearestWeekdayClockMs(clock, baseMs) {
+        let best = null;
+        for (let d = -3; d <= 3; d++) {
+            const c = new Date(baseMs);
+            c.setDate(c.getDate() + d);
+            c.setHours(clock.hour, clock.minute, 0, 0);
+            if (c.getDay() !== clock.dow) continue;
+            const dist = Math.abs(c.getTime() - baseMs);
+            if (best === null || dist < best.dist) best = { ms: c.getTime(), dist };
+        }
+        return best === null ? null : best.ms;
+    }
+
     // baseMs is the wall-clock time the reset string was current — typically
     // Date.now() minus the page's "Last updated: N minutes ago" staleness, so
     // a stale page doesn't shift the computed end forward in time.
     function parseSessionEnds(text, baseMs) {
         if (!text) return null;
-        const m = text.match(/Resets in\s+(?:(\d+)\s*hr)?\s*(?:(\d+)\s*min)?/i);
-        if (!m) return null;
-        const hours = parseInt(m[1] || '0', 10);
-        const mins = parseInt(m[2] || '0', 10);
-        if (hours === 0 && mins === 0) return null;
-        return new Date(baseMs + (hours * 60 + mins) * 60 * 1000).toISOString();
+        const rel = String(text).match(/Resets in\s+(?:(\d+)\s*hr)?\s*(?:(\d+)\s*min)?/i);
+        if (rel) {
+            const hours = parseInt(rel[1] || '0', 10);
+            const mins = parseInt(rel[2] || '0', 10);
+            if (hours === 0 && mins === 0) return null;
+            return new Date(baseMs + (hours * 60 + mins) * 60 * 1000).toISOString();
+        }
+        const clock = parseWeekdayClock(text);
+        if (!clock) return null;
+        const ms = nearestWeekdayClockMs(clock, baseMs);
+        return ms === null ? null : new Date(ms).toISOString();
+    }
+
+    // Absolute clock-time hints are unaffected by page staleness, so nowMs
+    // is the real wall clock (defaulting to Date.now()). "Resets May 1"
+    // style hints are not parsed; null makes the server skip minting a
+    // weekly window until a parseable hint arrives, and the dashboard
+    // renders a [now, now+7d] hypothetical projection in the meantime.
+    function parseWeeklyEnds(text, nowMs) {
+        const clock = parseWeekdayClock(text);
+        if (!clock) return null;
+        const now = typeof nowMs === 'number' ? nowMs : Date.now();
+        const target = new Date(now);
+        target.setHours(clock.hour, clock.minute, 0, 0);
+        for (let i = 0; i < 8; i++) {
+            if (target.getDay() === clock.dow && target.getTime() > now) break;
+            target.setDate(target.getDate() + 1);
+        }
+        return target.toISOString();
     }
 
     // Parse the page's "Last updated" indicator into staleness in milliseconds.
@@ -436,36 +545,6 @@
         return null;
     }
 
-    // "Resets Thu 11:00 PM" — weekday + time-of-day in the browser's local
-    // timezone. We pick the next future occurrence of that weekday at that
-    // local time and convert to UTC. Format variants like "Resets May 1"
-    // (when far enough out that Anthropic switches to a date) are not
-    // currently parsed; null causes the server to skip minting a weekly
-    // window until a parseable hint arrives, and the dashboard renders a
-    // [now, now+7d] hypothetical projection in the meantime.
-    const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    function parseWeeklyEnds(text) {
-        if (!text) return null;
-        const m = text.match(/Resets\s+(Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-        if (!m) return null;
-        const targetDow = WEEKDAYS.indexOf(m[1].slice(0, 3));
-        if (targetDow < 0) return null;
-        const ampm = m[4].toUpperCase();
-        let hour = parseInt(m[2], 10) % 12;
-        if (ampm === 'PM') hour += 12;
-        const min = parseInt(m[3], 10);
-
-        const now = new Date();
-        const target = new Date(now);
-        target.setHours(hour, min, 0, 0);
-        // Step forward until we hit the right weekday strictly in the future.
-        for (let i = 0; i < 8; i++) {
-            if (target.getDay() === targetDow && target > now) break;
-            target.setDate(target.getDate() + 1);
-        }
-        return target.toISOString();
-    }
-
     // Returns { sessionUsed, weeklyUsed, sessionWindowEnds, weeklyWindowEnds,
     //           sessionActive, weeklyActive, observedAtMs, resetText,
     //           lastUpdatedAgeMs }
@@ -481,9 +560,9 @@
     function extractQuota() {
         // Anthropic moved the section headings from <h2> to <h3> as of late
         // April 2026 and started appending plan-tier badges to the heading
-        // text (e.g. "Plan usage limitsMax (20x)", "Your usage limitsTeam").
-        // We accept either tag and match the section name as a *prefix*
-        // against the known variants in SESSION_HEADINGS / WEEKLY_HEADING
+        // text (e.g. "Plan usage limitsMax (20x)", "Your usage limitsTeam");
+        // the September 2026 combined section is back to an <h2>. We accept
+        // either tag and classify the heading text by prefix (classifySection)
         // so a trailing badge or rename doesn't break extraction.
         const headings = Array.from(document.querySelectorAll('h2, h3'))
             .map(h => ({ node: h, text: (h.textContent || '').trim() }));
@@ -498,6 +577,27 @@
         let weeklyActive;
         let sessionResetText = null;
 
+        // First claim wins for each row; later bars with the same
+        // classification are ignored.
+        const claimSession = (bar, value) => {
+            if (sessionUsed !== null) return;
+            sessionUsed = value;
+            sessionResetText = findRowResetText(bar);
+            sessionEnds = parseSessionEnds(sessionResetText, observedAtMs);
+            if (isLimboLabel(bar)) sessionActive = false;
+        };
+        const claimWeekly = (bar, value) => {
+            if (weeklyUsed !== null) return;
+            weeklyUsed = value;
+            // Weekly hint is an absolute clock time ("Resets Thu 11:00 PM"),
+            // so page staleness doesn't shift it.
+            weeklyEnds = parseWeeklyEnds(findRowResetText(bar));
+            if (isLimboLabel(bar)) weeklyActive = false;
+        };
+        const claimFable = (value) => {
+            if (fableWeeklyUsed === null) fableWeeklyUsed = value;
+        };
+
         for (const bar of bars) {
             const heading = precedingHeading(bar, headings);
             if (!heading) continue;
@@ -505,27 +605,33 @@
             const value = parseFloat(bar.getAttribute('aria-valuenow'));
             if (Number.isNaN(value)) continue;
 
-            if (SESSION_HEADINGS.some(h => heading.startsWith(h)) && sessionUsed === null) {
-                sessionUsed = value;
-                sessionResetText = findRowResetText(bar);
-                sessionEnds = parseSessionEnds(sessionResetText, observedAtMs);
-                if (isLimboLabel(bar)) sessionActive = false;
-            } else if (heading.startsWith(WEEKLY_HEADING)) {
-                // The weekly section holds an aggregate row plus per-model
+            const section = classifySection(heading);
+            if (section === 'session') {
+                // Legacy two-section layout (through August 2026): the first
+                // bar under the session heading is "Current session".
+                claimSession(bar, value);
+            } else if (section === 'weekly') {
+                // Legacy weekly section: an aggregate row plus per-model
                 // sub-rows. Fable is claimed by label; the aggregate stays
                 // positional (first non-Fable bar in the section), so a label
                 // rename can only ever cost us the fable series, never the
                 // weekly line. Checking the label first also means we stay
                 // correct if Anthropic ever renders Fable above "All models".
                 if (isFableRowLabel(resolveBarLabel(bar))) {
-                    if (fableWeeklyUsed === null) fableWeeklyUsed = value;
-                } else if (weeklyUsed === null) {
-                    weeklyUsed = value;
-                    // Weekly hint is an absolute clock time ("Resets Thu 11:00 PM"),
-                    // so page staleness doesn't shift it.
-                    weeklyEnds = parseWeeklyEnds(findRowResetText(bar));
-                    if (isLimboLabel(bar)) weeklyActive = false;
+                    claimFable(value);
+                } else {
+                    claimWeekly(bar, value);
                 }
+            } else if (section === 'combined') {
+                // September 2026 layout: one "Your usage" section holding
+                // "Current session", "This week" and "Fable this week". With
+                // a single heading for three rows there is no positional
+                // rule; every row is claimed by label, and unrecognised
+                // labels are ignored rather than guessed.
+                const row = classifyUsageRow(resolveBarLabel(bar));
+                if (row === 'session') claimSession(bar, value);
+                else if (row === 'weekly') claimWeekly(bar, value);
+                else if (row === 'fable') claimFable(value);
             }
         }
 
@@ -575,6 +681,13 @@
                 progressbar_count: document.querySelectorAll('[role="progressbar"]').length,
                 meter_count: document.querySelectorAll('[role="meter"]').length,
                 usage_bar_count: document.querySelectorAll(USAGE_BAR_SELECTOR).length,
+                // Resolved accessible names of the usage bars. These are
+                // Anthropic's row labels ("Current session", "Claude Code"),
+                // not user content; the September 2026 break would have been
+                // self-diagnosing with them in the fingerprint.
+                usage_bar_labels: Array.from(document.querySelectorAll(USAGE_BAR_SELECTOR))
+                    .slice(0, 12)
+                    .map(bar => String(resolveBarLabel(bar) || '').slice(0, 40)),
                 user_agent_short: (navigator.userAgent || '').slice(0, 120),
             };
             return JSON.stringify(fp);
@@ -636,7 +749,7 @@
         domFirstMissingAt = null;
 
         const prevState = loadState();
-        const decision = shouldSend(extracted, prevState, lastObservedAgeMs);
+        const decision = shouldSend(extracted, prevState, lastObservedAgeMs, Date.now());
 
         // Update the rolling observed-age *after* the comparison, so
         // the next call sees this read as "previous." Update on every

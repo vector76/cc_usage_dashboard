@@ -18,8 +18,10 @@ Access) and the snapshot payload schema.
    `@connect 127.0.0.1` when prompted.
 4. Make sure the trayapp is running locally on port `27812`.
 5. Open `https://claude.ai/settings/usage` in any tab. Within ~30 seconds the
-   script will detect the "Current session" and "All models" usage bars and
-   start sending one snapshot per minute. The script no-ops on every other
+   script will detect the "Current session", "This week" (or "All models" on
+   the older two-section layout) and "Fable" usage bars and start sending
+   snapshots whenever they change, at least every five minutes while a
+   session window is active. The script no-ops on every other
    route (chat threads, projects, etc.) so it never touches private DOM.
 
 ## Updating
