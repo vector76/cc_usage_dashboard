@@ -153,6 +153,7 @@ type Handler struct {
 	indexHTML  []byte
 	reportHTML []byte
 	groupingJS []byte
+	summaryJS []byte
 }
 
 func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
@@ -168,6 +169,10 @@ func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dashboard: failed to load grouping.js: %w", err)
 	}
+	summaryJS, err := fs.ReadFile(staticFS, "static/summary.js")
+	if err != nil {
+		return nil, fmt.Errorf("dashboard: failed to load summary.js: %w", err)
+	}
 	return &Handler{
 		store:      s,
 		slackCalc:  sc,
@@ -175,6 +180,7 @@ func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
 		indexHTML:  html,
 		reportHTML: reportHTML,
 		groupingJS: groupingJS,
+		summaryJS: summaryJS,
 	}, nil
 }
 
@@ -193,6 +199,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /report", h.handleReport)
 	mux.HandleFunc("GET /api/dashboard/state", h.handleState)
 	mux.HandleFunc("GET /grouping.js", h.handleGroupingJS)
+	mux.HandleFunc("GET /summary.js", h.handleSummaryJS)
 	mux.HandleFunc("GET /favicon.png", h.handleFavicon)
 	mux.HandleFunc("GET /favicon.ico", h.handleFavicon)
 }
@@ -201,6 +208,12 @@ func (h *Handler) handleGroupingJS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write(h.groupingJS)
+}
+
+func (h *Handler) handleSummaryJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write(h.summaryJS)
 }
 
 func (h *Handler) handleFavicon(w http.ResponseWriter, r *http.Request) {

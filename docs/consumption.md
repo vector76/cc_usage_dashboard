@@ -2,10 +2,14 @@
 
 A flat report of usage over a chosen period: dollar-equivalent cost from
 `usage_events`, plus snapshot-derived percent-of-quota consumption split
-into the session and weekly windows. The relation between the dollar
-number and the percent numbers is left to the reader; we don't synthesize
-a "discount" or "value ratio" — those depend on what the user is paying,
-which the dashboard doesn't model.
+into the session and weekly windows.
+
+The endpoint stays flat: it reports the dollar number and the percent
+numbers and nothing derived from both. We still don't synthesize a
+"discount" or "value ratio" — those depend on what the user is paying,
+which the dashboard doesn't model. The one relation we *do* draw is the
+allowance extrapolation below, and it lives on the client because it is a
+presentation choice with a threshold in it, not a measurement.
 
 ## Inputs
 
@@ -129,3 +133,54 @@ not bounded at 100.
 - **Unknown-model events** are still counted in `events_without_cost`
   and excluded from `consumed_usd_equivalent`. They have no effect on
   the percent numbers.
+
+## Allowance extrapolation (client-side)
+
+The dashboard prints, under the measured numbers, an estimate of what
+100% of a session window and 100% of a weekly window are worth in dollars:
+
+```
+est_full_allowance = consumed_usd / (consumed_pct / 100)
+```
+
+Both inputs cover the same period, so the division is just "dollars per
+percent, scaled to a full window". If $20 moved the session gauge 50%, a
+whole session window is worth about $40.
+
+`extrapolateAllowance` in `internal/dashboard/static/summary.js` is the
+single source of truth for the rule;
+`userscript/test/summary.test.js` covers it.
+
+### Why a single division rather than a fit
+
+Both inputs already aggregate the whole selected period. Picking a longer
+period is what averages out a burst of unusually cheap or expensive
+traffic — that is the job the period picker does. A curve fit over the
+snapshot series would add machinery without adding information, and would
+have to re-derive the same window-start detection the percent walk above
+already does.
+
+### The 10% floor
+
+Below 10% consumed the estimate is reported as "insufficient data" rather
+than a number. The percent gauges are scraped from Anthropic's UI at
+whole- or near-whole-percent resolution, so a reading of 3% carries about
+±0.5% of quantization error — a ±17% band on the result, and worse the
+closer to zero it gets. At 10% the band is down to ±5%, which is honest
+enough to print. In practice this is what a 24h period usually hits on the
+weekly window; 7d or 30d clears it.
+
+### Percentages above 100
+
+A period longer than one window reports more than 100% consumed — a 30-day
+period spans roughly 140 session windows. That is more evidence, not less,
+and the same division holds: "1416% consumed for $2480" is a
+better-measured $175 per session window than any single window's reading.
+
+### Zero dollars is not zero allowance
+
+Percent comes from the userscript's snapshots; dollars come from
+`usage_events`, written by the tailer. A half-configured install can have
+one running and not the other, which would make the division print a
+confident $0.00 allowance. `consumed_usd <= 0` is therefore also
+"insufficient data".

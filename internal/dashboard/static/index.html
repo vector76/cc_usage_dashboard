@@ -6,21 +6,30 @@
 <link rel="icon" type="image/png" href="/favicon.png">
 <style>
   body { font-family: system-ui, -apple-system, sans-serif; margin: 1rem; background: #fafafa; color: #222; }
-  h1 { margin: 0 0 0.25rem 0; font-size: 1.4rem; }
-  .nav { margin: 0 0 1rem 0; font-size: 0.85rem; }
+  h1 { margin: 0 0 1rem 0; font-size: 1.4rem; }
+  .nav { margin: 0; font-size: 0.85rem; }
   .nav a { color: #2563eb; }
+  /* Pushed to the far end of the heading row, away from the period picker:
+     it navigates off the page, the picker changes what is on it. */
+  .section-head .nav { margin-left: auto; }
   h2 { margin-top: 0; font-size: 1.1rem; }
   h3 { margin: 0 0 0.5rem 0; font-size: 0.95rem; color: #444; }
   section { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 4px; }
   section:last-child { margin-bottom: 0; }
-  .info-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
-  .info-row > section { margin-bottom: 0; }
-  @media (max-width: 700px) { .info-row { grid-template-columns: 1fr; } }
   .chart-block { margin-bottom: 1rem; }
   .chart-block:last-child { margin-bottom: 0; }
-  .kv { display: grid; grid-template-columns: max-content auto; column-gap: 1rem; row-gap: 0.25rem; margin: 0; }
-  .kv dt { color: #666; }
-  .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+  /* A section's heading and its one adornment — the slack-release flag, the
+     period picker — share a baseline row so neither costs vertical space. */
+  .section-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0.25rem 0.9rem; margin-bottom: 0.75rem; }
+  .section-head h2 { margin: 0; }
+  .slack-flag { font-size: 0.85rem; color: #666; }
+  .metric-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 1.5rem; margin: 0 0 0.45rem 0; font-size: 0.95rem; }
+  .metric-line:last-of-type { margin-bottom: 0; }
+  .metric { white-space: nowrap; }
+  .metric .label { color: #666; margin-right: 0.35rem; }
+  .metric .value { font-variant-numeric: tabular-nums; }
+  .snapshot-line { margin: 0.9rem 0 0 0; font-size: 0.8rem; color: #888; }
+  #period { font: inherit; font-size: 0.85rem; padding: 0.05rem 0.25rem; }
   .muted { color: #888; }
   svg { width: 100%; height: auto; display: block; }
   details.feedback { background: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 0.5rem 1rem; }
@@ -43,21 +52,12 @@
 </head>
 <body>
 <h1>Claude Usage Dashboard</h1>
-<p class="nav"><a href="/report">Usage report by model and time range →</a></p>
-
-<div class="info-row">
-  <section id="status">
-    <h2>Status</h2>
-    <dl class="kv" id="status-kv"><dd class="muted">Loading…</dd></dl>
-  </section>
-  <section id="consumption">
-    <h2>Consumption (last 24h)</h2>
-    <dl class="kv" id="consumption-kv"><dd class="muted">Loading…</dd></dl>
-  </section>
-</div>
 
 <section>
-  <h2>Burn-down</h2>
+  <div class="section-head">
+    <h2>Burn-down</h2>
+    <span class="slack-flag">Slack release: <span id="slack-release" class="muted">—</span></span>
+  </div>
   <div class="chart-block">
     <h3>Session window (last 15h, current window in rightmost third)</h3>
     <svg id="chart-session" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
@@ -69,6 +69,21 @@
   <div class="chart-block" id="burn-legend"></div>
 </section>
 
+<section id="consumption">
+  <div class="section-head">
+    <h2>Consumption</h2>
+    <select id="period" aria-label="Consumption period">
+      <option value="24h">last 24 hours</option>
+      <option value="7d">last 7 days</option>
+      <option value="30d">last 30 days</option>
+    </select>
+    <span class="nav"><a href="/report">Usage report by model and time range →</a></span>
+  </div>
+  <p class="metric-line" id="consumed-line"><span class="muted">Loading…</span></p>
+  <p class="metric-line" id="estimate-line"></p>
+  <p class="snapshot-line" id="snapshot-line">Last allowance snapshot: <span class="muted">…</span></p>
+</section>
+
 <details class="feedback" id="feedback">
   <summary>Feedback <span class="fb-badge" id="fb-badge">(none)</span></summary>
   <div id="fb-body">
@@ -77,12 +92,12 @@
 </details>
 
 <script src="/grouping.js"></script>
+<script src="/summary.js"></script>
 <script>
 function fmt(x, d) {
   if (x == null || (typeof x === "number" && !isFinite(x))) return "—";
   return Number(x).toFixed(d == null ? 2 : d);
 }
-function fmtTime(s) { return s ? new Date(s).toLocaleString() : "—"; }
 // fmtAxisTime renders a short 12-hour AM/PM label for the burn-down X
 // axis. Short windows (session, ≤24h) get "h:mm AM/PM" in local time;
 // longer windows (weekly) get the weekday prefix so "Thu 11:00 PM" is
@@ -154,67 +169,75 @@ function fmtTooltipTime(ms) {
   return `${month} ${d.getDate()} ${h}:${mm} ${ampm}`;
 }
 
-// kvSpan returns a <span> with the given text content and inline style. Used
-// by renderStatus so the slack-release indicator can carry colour without
-// concatenating HTML strings (which would let any future server-controlled
-// value escape into markup — see the audit notes for the reflected-XSS sink
-// this pattern existed to close).
-function kvSpan(text, style) {
-  const el = document.createElement("span");
-  if (style) el.setAttribute("style", style);
-  el.textContent = text;
-  return el;
+// span returns a <span> with the given text content and inline style. Every
+// server-controlled value on this page goes through textContent rather than
+// string-concatenated markup, so no value can escape into the HTML parser —
+// see the audit notes for the reflected-XSS sink this pattern exists to close.
+function span(text, style) {
+  const e = document.createElement("span");
+  if (style) e.setAttribute("style", style);
+  e.textContent = text;
+  return e;
 }
 
-// appendKV appends a <dt>label</dt><dd>value</dd> pair to dl. value can be
-// a string (set via textContent) or an Element (appended as a child).
-function appendKV(dl, label, value) {
-  const dt = document.createElement("dt");
-  dt.textContent = label;
-  const dd = document.createElement("dd");
-  if (value instanceof Element) {
-    dd.appendChild(value);
-  } else {
-    dd.textContent = String(value);
+// clear empties an element, returning it for chaining.
+function clear(e) {
+  while (e.firstChild) e.removeChild(e.firstChild);
+  return e;
+}
+
+// metric builds one "Label value" pair for the consumption lines. The line
+// itself is a flex row, so several of these sit side by side and wrap only
+// on a narrow viewport.
+function metric(label, value, valueStyle) {
+  const wrap = document.createElement("span");
+  wrap.className = "metric";
+  const l = span(label);
+  l.className = "label";
+  const v = span(value, valueStyle);
+  v.className = "value";
+  wrap.appendChild(l);
+  wrap.appendChild(v);
+  return wrap;
+}
+
+// The label and colour for each slackReleaseState() verdict. Only "yes" and
+// "paused" are loud: one is a call to action, the other says the flag below
+// is not currently answering the question at all.
+const SLACK_RELEASE_DISPLAY = {
+  yes:     { text: "yes",     style: "color:#060;font-weight:bold;" },
+  no:      { text: "no",      style: "color:#888;" },
+  paused:  { text: "paused",  style: "color:#b45309;font-weight:bold;" },
+  unknown: { text: "—",       style: "color:#888;" },
+};
+
+// renderSlackRelease writes the flag that rides alongside the Burn-down
+// heading — the one piece of the old Status panel worth permanent screen
+// space, and the question the charts below it exist to answer. The verdict
+// itself comes from slackReleaseState (summary.js).
+function renderSlackRelease(s) {
+  const t = clear(document.getElementById("slack-release"));
+  t.className = "";
+  const d = SLACK_RELEASE_DISPLAY[slackReleaseState(s)] || SLACK_RELEASE_DISPLAY.unknown;
+  t.appendChild(span(d.text, d.style));
+}
+
+// renderSnapshotLine reports when the userscript last delivered an allowance
+// reading. Both halves derive from the server's clock — the age is
+// last_snapshot_age_seconds and the absolute stamp is the server's `now`
+// minus that age — so a skewed client clock shifts neither. The stamp says
+// what you are looking at; the age says whether to trust it.
+function renderSnapshotLine(s) {
+  const p = clear(document.getElementById("snapshot-line"));
+  p.appendChild(document.createTextNode("Last allowance snapshot: "));
+  const age = s.last_snapshot_age_seconds;
+  if (age == null) {
+    p.appendChild(span("none yet"));
+    return;
   }
-  dl.appendChild(dt);
-  dl.appendChild(dd);
-}
-
-// sessionStatusText computes the Session row's value. Uses the server's
-// `now` (not Date.now()) so a skewed client clock can't shift the
-// displayed remaining time. Backend guarantees that session_active=true
-// implies session is non-null with ends_at set; the second guard is
-// defensive only.
-function sessionStatusText(s) {
-  if (!s.session_active) return "not active";
-  if (!s.session || !s.session.ends_at) return "active";
-  const endMs = new Date(s.session.ends_at).getTime();
   const nowMs = s.now ? new Date(s.now).getTime() : Date.now();
-  const remMs = Math.max(0, endMs - nowMs);
-  const h = Math.floor(remMs / 3600000);
-  const m = Math.floor((remMs % 3600000) / 60000);
-  return `active (${h}h ${m}m remaining)`;
-}
-
-function renderStatus(s) {
-  const kv = document.getElementById("status-kv");
-  while (kv.firstChild) kv.removeChild(kv.firstChild);
-  appendKV(kv, "Now", fmtTime(s.now));
-  appendKV(kv, "Last snapshot age",
-    s.last_snapshot_age_seconds == null ? "no snapshots yet" : fmt(s.last_snapshot_age_seconds, 0) + " s");
-  appendKV(kv, "Parse errors (24h)", s.parse_errors_24h);
-  appendKV(kv, "Paused", s.paused ? "yes" : "no");
-  appendKV(kv, "Session", sessionStatusText(s));
-  let slackEl;
-  if (s.slack_release_recommended == null) {
-    slackEl = kvSpan("—", "color:#888");
-  } else if (s.slack_release_recommended) {
-    slackEl = kvSpan("yes", "color:#060;font-weight:bold;");
-  } else {
-    slackEl = kvSpan("no", "color:#888;");
-  }
-  appendKV(kv, "Slack release", slackEl);
+  p.appendChild(document.createTextNode(
+    fmtTooltipTime(nowMs - age * 1000) + " (" + fmtAge(age) + " ago)"));
 }
 
 // renderBurnDown plots % remaining vs. time, with a dollar-volume bar
@@ -629,27 +652,66 @@ function renderBurnDown(svgID, win, opts) {
   svg.appendChild(el("text", { x: 4, y: PCT_BOTTOM, "font-size": "10", fill: "#444" }, "0"));
 }
 
+// estimateMetric builds one "Est. full X allowance" pair. extrapolateAllowance
+// (summary.js) returns null whenever the division would be noise — too little
+// of the window consumed, or no dollars recorded — and that is printed as
+// "insufficient data" rather than a number nobody should act on.
+function estimateMetric(label, consumedUsd, pct) {
+  const v = extrapolateAllowance(consumedUsd, pct);
+  if (v == null) return metric(label, "insufficient data", "color:#888;");
+  return metric(label, "$" + fmt(v));
+}
+
+// renderConsumption paints the two consumption lines for the selected period:
+// what was actually spent, then what that implies a full window costs.
 function renderConsumption(d) {
-  const kv = document.getElementById("consumption-kv");
-  while (kv.firstChild) kv.removeChild(kv.firstChild);
+  const line = clear(document.getElementById("consumed-line"));
+  const est = clear(document.getElementById("estimate-line"));
   if (!d || d.error) {
-    const dd = document.createElement("dd");
-    dd.className = "muted";
-    dd.textContent = "unavailable";
-    kv.appendChild(dd);
+    line.appendChild(span("unavailable", "color:#888;"));
     return;
   }
-  // d.period is whatever the caller passed in ?period= and the server
-  // echoes back. Building it via textContent (not innerHTML) means a
-  // hostile value never reaches the HTML parser.
-  appendKV(kv, "Period", d.period);
-  appendKV(kv, "Consumed (USD eq.)", "$" + fmt(d.consumed_usd_equivalent));
-  appendKV(kv, "Consumed % session", d.consumed_session_pct == null ? "—" : fmt(d.consumed_session_pct, 0) + "%");
-  appendKV(kv, "Consumed % weekly", d.consumed_weekly_pct == null ? "—" : fmt(d.consumed_weekly_pct, 0) + "%");
-  appendKV(kv, "Events (total / reported / computed / est. / none)",
-    d.events_total + " / " + d.events_with_reported_cost + " / " +
-    d.events_with_computed_cost + " / " + (d.events_with_ceiling_cost || 0) + " / " +
-    d.events_without_cost);
+  const usd = d.consumed_usd_equivalent;
+  const pctText = (p) => (p == null ? "—" : fmt(p, 0) + "%");
+  line.appendChild(metric("Consumed", "$" + fmt(usd)));
+  line.appendChild(metric("Session", pctText(d.consumed_session_pct)));
+  line.appendChild(metric("Weekly", pctText(d.consumed_weekly_pct)));
+  est.appendChild(estimateMetric("Est. full session allowance", usd, d.consumed_session_pct));
+  est.appendChild(estimateMetric("Est. full weekly allowance", usd, d.consumed_weekly_pct));
+}
+
+// The period picker's choice outlives the page: it is the lens the user reads
+// everything below the charts through, and re-picking it on every reload is
+// friction for no gain. Only the three offered values are ever accepted back
+// out of storage — the value goes into a URL query, so a tampered or stale
+// localStorage entry must not be able to steer the request.
+const PERIODS = ["24h", "7d", "30d"];
+const PERIOD_KEY = "cc-dashboard-consumption-period";
+
+function loadPeriod() {
+  try {
+    const v = localStorage.getItem(PERIOD_KEY);
+    if (PERIODS.indexOf(v) !== -1) return v;
+  } catch (e) { /* storage blocked (private mode, site data cleared) */ }
+  return PERIODS[0];
+}
+
+function savePeriod(v) {
+  try { localStorage.setItem(PERIOD_KEY, v); } catch (e) { /* see loadPeriod */ }
+}
+
+// selectedPeriod reads the live control, falling back to the default if the
+// element somehow holds a value outside the allowlist.
+function selectedPeriod() {
+  const v = document.getElementById("period").value;
+  return PERIODS.indexOf(v) !== -1 ? v : PERIODS[0];
+}
+
+async function refreshConsumption() {
+  try {
+    const resp = await fetch("/consumption?period=" + encodeURIComponent(selectedPeriod()));
+    renderConsumption(await resp.json());
+  } catch (e) { console.error("consumption error", e); }
 }
 
 // fmtFbTime renders a feedback timestamp in local time, tolerating both the
@@ -796,7 +858,8 @@ async function refresh() {
   try {
     const sResp = await fetch("/api/dashboard/state");
     const s = await sResp.json();
-    renderStatus(s);
+    renderSlackRelease(s);
+    renderSnapshotLine(s);
     // Slack zones come from the server (state.slack_profiles), which
     // reports the exact boundaries the headroom gates evaluate — either
     // config.yaml's session_profile/weekly_profile or the defaults
@@ -815,15 +878,21 @@ async function refresh() {
     });
     renderVolumeLegend(presentFamilies([s.session, s.weekly]));
   } catch (e) { console.error("state error", e); }
-  try {
-    const dResp = await fetch("/consumption?period=24h");
-    const d = await dResp.json();
-    renderConsumption(d);
-  } catch (e) { console.error("consumption error", e); }
+  await refreshConsumption();
   // Keep the feedback badge live so the user can tell at a glance whether
   // the collapsed panel is worth expanding.
   refreshFeedback();
 }
+
+// Changing the period re-fetches straight away rather than waiting out the
+// remainder of the 10-second poll — the whole point of the control is that
+// the numbers under it move when you touch it.
+const periodSel = document.getElementById("period");
+periodSel.value = loadPeriod();
+periodSel.addEventListener("change", () => {
+  savePeriod(selectedPeriod());
+  refreshConsumption();
+});
 
 refresh();
 setInterval(refresh, 10000);

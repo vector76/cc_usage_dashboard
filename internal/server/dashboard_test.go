@@ -41,6 +41,11 @@ func TestDashboardIndexHTML(t *testing.T) {
 				}
 				t.Errorf("response body does not look like HTML: %q", snippet)
 			}
+			// The dashboard is the only link into the range report — nothing
+			// else advertises /report, so losing this link strands the page.
+			if !strings.Contains(body, `href="/report"`) {
+				t.Error("dashboard does not link to /report")
+			}
 		})
 	}
 }
@@ -91,6 +96,32 @@ func TestGroupingJSServesFamilyColors(t *testing.T) {
 	for _, want := range []string{"VOLUME_FAMILY_COLORS", "VOLUME_FAMILY_ORDER"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("grouping.js does not define %q", want)
+		}
+	}
+}
+
+// summary.js holds the pure rules behind the dashboard's text readout — the
+// allowance extrapolation, the slack-release verdict, the snapshot age. Like
+// grouping.js it lives in its own file so the Node tests can require() the
+// same source the page runs, so it has to be reachable as a standalone script.
+func TestSummaryJSServesReadoutRules(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	req := httptest.NewRequest("GET", "/summary.js", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/javascript") {
+		t.Errorf("expected javascript content type, got %q", ct)
+	}
+	body := w.Body.String()
+	for _, want := range []string{"extrapolateAllowance", "slackReleaseState", "fmtAge"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("summary.js does not define %q", want)
 		}
 	}
 }
