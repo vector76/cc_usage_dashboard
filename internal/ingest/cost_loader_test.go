@@ -32,6 +32,7 @@ func TestLoadPriceTableExampleFile(t *testing.T) {
 		{"claude-fable-5-1", 10.00, 50.00, 12.50, 0.25},
 		{"claude-mythos-5-1", 10.00, 50.00, 12.50, 0.25},
 		{"claude-fable-5", 10.00, 50.00, 12.50, 1.00},
+		{"claude-opus-5-5", 4.00, 20.00, 5.00, 0.20},     // cache reads 0.05x input
 		{"claude-opus-4-7", 5.00, 25.00, 6.25, 0.50},     // repriced from $15/$75
 		{"claude-sonnet-4-6", 3.00, 15.00, 3.75, 0.30},
 		{"claude-haiku-4-5", 1.00, 5.00, 1.25, 0.10},

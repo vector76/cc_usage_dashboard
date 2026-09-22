@@ -42,6 +42,16 @@ models:
     cache_creation_rate_usd_per_m: 12.50
     cache_read_rate_usd_per_m: 1.00
 
+  # ---- Opus 5.5: successor to Opus 5, launched below it at $4/$20. Cache
+  # reads are billed at 0.05x input ($0.20/MTok) rather than the standard
+  # 0.1x, less than half of Opus 5's $0.50. Fast mode bills at $8/$40 (2x),
+  # with the same undercount caveat as Opus 5 below. ----
+  claude-opus-5-5:
+    input_rate_usd_per_m: 4.00
+    output_rate_usd_per_m: 20.00
+    cache_creation_rate_usd_per_m: 5.00
+    cache_read_rate_usd_per_m: 0.20
+
   # ---- Opus 4.5+ family: repriced down to Sonnet-class rates ----
   # Earlier Opus 4 / 4.1 stayed at the original $15/$75 tier; only 4.5+
   # moved. Opus 4.7 also uses a new tokenizer that may use up to 35%

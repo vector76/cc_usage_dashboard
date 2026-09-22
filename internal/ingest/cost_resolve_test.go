@@ -48,6 +48,7 @@ func TestEmbeddedPriceTableParses(t *testing.T) {
 		input  float64
 		output float64
 	}{
+		{"claude-opus-5-5", 4.00, 20.00},
 		{"claude-opus-4-8", 5.00, 25.00},
 		{"claude-sonnet-4-6", 3.00, 15.00},
 		{"claude-haiku-4-5", 1.00, 5.00},
