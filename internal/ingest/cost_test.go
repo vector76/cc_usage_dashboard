@@ -6,7 +6,7 @@ import (
 
 func TestResolveCostReported(t *testing.T) {
 	reportedCost := 0.05
-	cost, source := ResolveCost(&reportedCost, "claude-3-5-sonnet-20241022", 1000, 500, 0, 0, nil)
+	cost, source := ResolveCost(&reportedCost, "claude-3-5-sonnet-20241022", 1000, 500, 0, 0, 0, nil)
 
 	if cost == nil || *cost != 0.05 {
 		t.Errorf("expected cost 0.05, got %v", cost)
@@ -28,7 +28,7 @@ func TestResolveCostComputed(t *testing.T) {
 		"claude-3-5-sonnet": prices,
 	}
 
-	cost, source := ResolveCost(nil, "claude-3-5-sonnet", 1000, 1000, 0, 0, priceTable)
+	cost, source := ResolveCost(nil, "claude-3-5-sonnet", 1000, 1000, 0, 0, 0, priceTable)
 
 	if cost == nil {
 		t.Fatal("expected cost to be computed")
@@ -51,7 +51,7 @@ func TestResolveCostUnknownModel(t *testing.T) {
 	// Empty price table
 	priceTable := PriceTable{}
 
-	cost, source := ResolveCost(nil, "unknown-model", 1000, 500, 0, 0, priceTable)
+	cost, source := ResolveCost(nil, "unknown-model", 1000, 500, 0, 0, 0, priceTable)
 
 	if cost != nil {
 		t.Errorf("expected nil cost for unknown model, got %v", cost)
@@ -62,7 +62,7 @@ func TestResolveCostUnknownModel(t *testing.T) {
 }
 
 func TestResolveCostNoPriceTable(t *testing.T) {
-	cost, source := ResolveCost(nil, "claude-3-5-sonnet", 1000, 500, 0, 0, nil)
+	cost, source := ResolveCost(nil, "claude-3-5-sonnet", 1000, 500, 0, 0, 0, nil)
 
 	if cost != nil {
 		t.Errorf("expected nil cost without price table, got %v", cost)
@@ -89,6 +89,7 @@ func TestResolveCostWithCacheTokens(t *testing.T) {
 		1000,  // input
 		500,   // output
 		1000,  // cache creation
+		0,     // of which 1h
 		100,   // cache read
 		priceTable,
 	)
@@ -122,7 +123,7 @@ func TestResolveCostReportedTakesPrecedence(t *testing.T) {
 		"claude-3-5-sonnet": prices,
 	}
 
-	cost, source := ResolveCost(&reportedCost, "claude-3-5-sonnet", 1000, 500, 0, 0, priceTable)
+	cost, source := ResolveCost(&reportedCost, "claude-3-5-sonnet", 1000, 500, 0, 0, 0, priceTable)
 
 	if cost == nil || *cost != 0.10 {
 		t.Errorf("expected reported cost 0.10, got %v", cost)

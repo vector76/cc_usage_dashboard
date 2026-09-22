@@ -117,6 +117,13 @@ func processHookInput(stdin io.Reader, hostURL string) {
 		if cacheRead, ok := usage["cache_read_input_tokens"].(float64); ok {
 			eventPayload["cache_read_tokens"] = int(cacheRead)
 		}
+		// The 1-hour-TTL share of the cache writes, which bills at 2x input
+		// rather than the 5-minute TTL's 1.25x.
+		if split, ok := usage["cache_creation"].(map[string]interface{}); ok {
+			if oneH, ok := split["ephemeral_1h_input_tokens"].(float64); ok {
+				eventPayload["cache_creation_1h_tokens"] = int(oneH)
+			}
+		}
 
 		// Add project path if we can infer it
 		if projectPath := inferProjectPath(payload.TranscriptPath); projectPath != "" {

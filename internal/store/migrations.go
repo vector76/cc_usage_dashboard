@@ -178,6 +178,39 @@ CREATE TABLE IF NOT EXISTS uplink_cursor (
 );
 `,
 	},
+	{
+		Version: 9,
+		Name:    "add_usage_events_cache_creation_1h_tokens",
+		// The 1-hour-TTL share of cache_creation_tokens, which stays the total
+		// of all cache writes. 1h writes bill at 2x input against the 5m TTL's
+		// 1.25x, and Claude Code writes almost entirely with the 1h TTL, so
+		// pricing the whole total at the 5m rate undercounted cache writes by
+		// 37.5%. NULL means the split is unknown and the row is priced as all
+		// 5m, the pre-migration behavior.
+		//
+		// Existing rows recover the split from raw_json where it was kept (the
+		// tailer stores the whole transcript line; the hook and uplink don't
+		// send one). Rows that gained a split and carry a computed or ceiling
+		// cost have that cost cleared, so ingest.BackfillCosts re-prices them
+		// with the 1h rate at startup. Reported costs are measurements and are
+		// left alone. The LIKE prefilter keeps json_valid/json_extract off the
+		// rows that can't match, and json_valid keeps one malformed line from
+		// aborting the migration.
+		SQL: `
+ALTER TABLE usage_events ADD COLUMN cache_creation_1h_tokens INTEGER;
+
+UPDATE usage_events
+SET cache_creation_1h_tokens = CAST(json_extract(raw_json, '$.message.usage.cache_creation.ephemeral_1h_input_tokens') AS INTEGER)
+WHERE raw_json LIKE '%ephemeral_1h_input_tokens%'
+  AND json_valid(raw_json)
+  AND json_extract(raw_json, '$.message.usage.cache_creation.ephemeral_1h_input_tokens') IS NOT NULL;
+
+UPDATE usage_events
+SET cost_usd_equivalent = NULL, cost_source = ''
+WHERE cache_creation_1h_tokens > 0
+  AND cost_source IN ('computed', 'ceiling');
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.

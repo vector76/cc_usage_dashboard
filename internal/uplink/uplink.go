@@ -182,31 +182,33 @@ func (f *Forwarder) forwardOnce() (int, error) {
 // rather than imported so the sender is not coupled to the server package's
 // internals; the wire contract is the JSON, which /log's own tests pin.
 type logPayload struct {
-	OccurredAt          time.Time `json:"occurred_at"`
-	InputTokens         int       `json:"input_tokens"`
-	OutputTokens        int       `json:"output_tokens"`
-	CacheCreationTokens int       `json:"cache_creation_tokens,omitempty"`
-	CacheReadTokens     int       `json:"cache_read_tokens,omitempty"`
-	SessionID           string    `json:"session_id"`
-	MessageID           string    `json:"message_id"`
-	Model               string    `json:"model,omitempty"`
-	ProjectPath         string    `json:"project_path,omitempty"`
-	Source              string    `json:"source"`
+	OccurredAt            time.Time `json:"occurred_at"`
+	InputTokens           int       `json:"input_tokens"`
+	OutputTokens          int       `json:"output_tokens"`
+	CacheCreationTokens   int       `json:"cache_creation_tokens,omitempty"`
+	CacheCreation1hTokens int       `json:"cache_creation_1h_tokens,omitempty"`
+	CacheReadTokens       int       `json:"cache_read_tokens,omitempty"`
+	SessionID             string    `json:"session_id"`
+	MessageID             string    `json:"message_id"`
+	Model                 string    `json:"model,omitempty"`
+	ProjectPath           string    `json:"project_path,omitempty"`
+	Source                string    `json:"source"`
 }
 
 // post delivers one event. The returned error wraps errPermanent when the
 // peer's answer means "never", and is bare when it means "later".
 func (f *Forwarder) post(e store.ForwardableEvent) error {
 	body, err := json.Marshal(logPayload{
-		OccurredAt:          e.OccurredAt,
-		InputTokens:         e.InputTokens,
-		OutputTokens:        e.OutputTokens,
-		CacheCreationTokens: e.CacheCreationTokens,
-		CacheReadTokens:     e.CacheReadTokens,
-		SessionID:           e.SessionID,
-		MessageID:           e.MessageID,
-		Model:               e.Model,
-		ProjectPath:         e.ProjectPath,
+		OccurredAt:            e.OccurredAt,
+		InputTokens:           e.InputTokens,
+		OutputTokens:          e.OutputTokens,
+		CacheCreationTokens:   e.CacheCreationTokens,
+		CacheCreation1hTokens: e.CacheCreation1hTokens,
+		CacheReadTokens:       e.CacheReadTokens,
+		SessionID:             e.SessionID,
+		MessageID:             e.MessageID,
+		Model:                 e.Model,
+		ProjectPath:           e.ProjectPath,
 		// Fills the receiver's existing provenance column so its
 		// events_ingested metric separates forwarded traffic from local.
 		Source: "uplink",

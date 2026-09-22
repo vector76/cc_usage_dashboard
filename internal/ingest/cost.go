@@ -16,14 +16,24 @@ type PriceTable map[string]*ModelPrices
 
 // ModelPrices holds pricing for a single model.
 type ModelPrices struct {
-	InputRate         float64
-	OutputRate        float64
-	CacheCreationRate float64
-	CacheReadRate     float64
+	InputRate  float64
+	OutputRate float64
+	// CacheCreationRate prices 5-minute-TTL cache writes (1.25x input);
+	// CacheCreation1hRate prices 1-hour-TTL writes (2x input). Claude Code
+	// writes almost exclusively with the 1-hour TTL.
+	CacheCreationRate   float64
+	CacheCreation1hRate float64
+	CacheReadRate       float64
 }
 
 // ResolveCost computes the cost of a usage event based on token counts and pricing.
 // Returns the cost in USD and the source of the cost (reported, computed, or empty if unknown).
+//
+// cacheCreationTokens is the total of all cache writes, matching the usage
+// block's cache_creation_input_tokens; cacheCreation1hTokens is the 1-hour-TTL
+// subset of it (cache_creation.ephemeral_1h_input_tokens). The remainder is
+// priced as 5-minute writes, so a caller that doesn't know the split passes 0
+// and gets the old all-5-minute pricing.
 //
 // Model lookup tries an exact price-table match first; failing that, a dated
 // snapshot id like "claude-haiku-4-5-20251001" falls back to its undated
@@ -34,7 +44,7 @@ type ModelPrices struct {
 func ResolveCost(
 	reportedCost *float64,
 	model string,
-	inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int,
+	inputTokens, outputTokens, cacheCreationTokens, cacheCreation1hTokens, cacheReadTokens int,
 	priceTable PriceTable,
 ) (*float64, string) {
 	// If cost was reported, use it
@@ -51,7 +61,7 @@ func ResolveCost(
 			}
 		}
 		if ok && prices != nil {
-			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, prices)
+			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheCreation1hTokens, cacheReadTokens, prices)
 			return &cost, "computed"
 		}
 
@@ -64,7 +74,7 @@ func ResolveCost(
 		// ceiling-priced events in the gray "other" family so the number is
 		// visibly a guess rather than a measurement.
 		if ceiling := CeilingPrices(priceTable); ceiling != nil {
-			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, ceiling)
+			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheCreation1hTokens, cacheReadTokens, ceiling)
 			return &cost, "ceiling"
 		}
 	}
@@ -96,6 +106,7 @@ func CeilingPrices(t PriceTable) *ModelPrices {
 		ceiling.InputRate = max(ceiling.InputRate, p.InputRate)
 		ceiling.OutputRate = max(ceiling.OutputRate, p.OutputRate)
 		ceiling.CacheCreationRate = max(ceiling.CacheCreationRate, p.CacheCreationRate)
+		ceiling.CacheCreation1hRate = max(ceiling.CacheCreation1hRate, p.CacheCreation1hRate)
 		ceiling.CacheReadRate = max(ceiling.CacheReadRate, p.CacheReadRate)
 	}
 	if !found {
@@ -119,7 +130,7 @@ func undatedModelName(model string) string {
 }
 
 // computeCost computes the cost from tokens and pricing.
-func computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens int, prices *ModelPrices) float64 {
+func computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheCreation1hTokens, cacheReadTokens int, prices *ModelPrices) float64 {
 	const millionTokens = 1_000_000.0
 
 	cost := 0.0
@@ -129,8 +140,13 @@ func computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens
 	if outputTokens > 0 {
 		cost += float64(outputTokens) * prices.OutputRate / millionTokens
 	}
-	if cacheCreationTokens > 0 {
-		cost += float64(cacheCreationTokens) * prices.CacheCreationRate / millionTokens
+	// The 1h count is a subset of the total. Clamp the 5m remainder at zero
+	// so a malformed split can't subtract dollars.
+	if cache5m := cacheCreationTokens - cacheCreation1hTokens; cache5m > 0 {
+		cost += float64(cache5m) * prices.CacheCreationRate / millionTokens
+	}
+	if cacheCreation1hTokens > 0 {
+		cost += float64(cacheCreation1hTokens) * prices.CacheCreation1hRate / millionTokens
 	}
 	if cacheReadTokens > 0 {
 		cost += float64(cacheReadTokens) * prices.CacheReadRate / millionTokens
@@ -170,10 +186,11 @@ func LoadPriceTable(path string) (PriceTable, error) {
 func ParsePriceTable(data []byte, source string) (PriceTable, error) {
 	type priceConfig struct {
 		Models map[string]struct {
-			InputRatePerM         float64 `yaml:"input_rate_usd_per_m"`
-			OutputRatePerM        float64 `yaml:"output_rate_usd_per_m"`
-			CacheCreationRatePerM float64 `yaml:"cache_creation_rate_usd_per_m"`
-			CacheReadRatePerM     float64 `yaml:"cache_read_rate_usd_per_m"`
+			InputRatePerM           float64 `yaml:"input_rate_usd_per_m"`
+			OutputRatePerM          float64 `yaml:"output_rate_usd_per_m"`
+			CacheCreationRatePerM   float64 `yaml:"cache_creation_rate_usd_per_m"`
+			CacheCreation1hRatePerM float64 `yaml:"cache_creation_1h_rate_usd_per_m"`
+			CacheReadRatePerM       float64 `yaml:"cache_read_rate_usd_per_m"`
 		} `yaml:"models"`
 	}
 
@@ -184,11 +201,19 @@ func ParsePriceTable(data []byte, source string) (PriceTable, error) {
 
 	table := make(PriceTable, len(cfg.Models))
 	for modelName, rates := range cfg.Models {
+		// An override file written before the 1h key existed would otherwise
+		// price every 1-hour cache write at $0. Anthropic's published rule is
+		// 2x base input, so that is the default.
+		rate1h := rates.CacheCreation1hRatePerM
+		if rate1h == 0 {
+			rate1h = 2 * rates.InputRatePerM
+		}
 		table[modelName] = &ModelPrices{
-			InputRate:         rates.InputRatePerM,
-			OutputRate:        rates.OutputRatePerM,
-			CacheCreationRate: rates.CacheCreationRatePerM,
-			CacheReadRate:     rates.CacheReadRatePerM,
+			InputRate:           rates.InputRatePerM,
+			OutputRate:          rates.OutputRatePerM,
+			CacheCreationRate:   rates.CacheCreationRatePerM,
+			CacheCreation1hRate: rate1h,
+			CacheReadRate:       rates.CacheReadRatePerM,
 		}
 	}
 

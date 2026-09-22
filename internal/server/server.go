@@ -394,14 +394,17 @@ type LogPostRequest struct {
 	InputTokens         int        `json:"input_tokens"`
 	OutputTokens        int        `json:"output_tokens"`
 	CacheCreationTokens int        `json:"cache_creation_tokens,omitempty"`
-	CacheReadTokens     int        `json:"cache_read_tokens,omitempty"`
-	CostUSD             *float64   `json:"cost_usd,omitempty"`
-	SessionID           string     `json:"session_id,omitempty"`
-	MessageID           string     `json:"message_id,omitempty"`
-	Model               string     `json:"model,omitempty"`
-	ProjectPath         string     `json:"project_path,omitempty"`
-	Source              string     `json:"source,omitempty"`
-	RawJSON             string     `json:"raw_json,omitempty"`
+	// CacheCreation1hTokens is the 1-hour-TTL subset of CacheCreationTokens,
+	// billed at 2x input rather than 1.25x. Omitted means no split is known.
+	CacheCreation1hTokens int      `json:"cache_creation_1h_tokens,omitempty"`
+	CacheReadTokens       int      `json:"cache_read_tokens,omitempty"`
+	CostUSD               *float64 `json:"cost_usd,omitempty"`
+	SessionID             string   `json:"session_id,omitempty"`
+	MessageID             string   `json:"message_id,omitempty"`
+	Model                 string   `json:"model,omitempty"`
+	ProjectPath           string   `json:"project_path,omitempty"`
+	Source                string   `json:"source,omitempty"`
+	RawJSON               string   `json:"raw_json,omitempty"`
 }
 
 // Bounds on an inbound event's occurred_at. The asymmetry is deliberate.
@@ -463,6 +466,7 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		req.InputTokens,
 		req.OutputTokens,
 		req.CacheCreationTokens,
+		req.CacheCreation1hTokens,
 		req.CacheReadTokens,
 		s.priceTable,
 	)
@@ -497,21 +501,22 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Insert into database
-	id, err := s.store.InsertUsageEvent(
-		occurredAt,
-		req.Source,
-		req.SessionID,
-		req.MessageID,
-		req.ProjectPath,
-		req.Model,
-		req.InputTokens,
-		req.OutputTokens,
-		req.CacheCreationTokens,
-		req.CacheReadTokens,
-		cost,
-		costSource,
-		req.RawJSON,
-	)
+	id, err := s.store.InsertUsageEventRecord(store.UsageEventRecord{
+		OccurredAt:            occurredAt,
+		Source:                req.Source,
+		SessionID:             req.SessionID,
+		MessageID:             req.MessageID,
+		ProjectPath:           req.ProjectPath,
+		Model:                 req.Model,
+		InputTokens:           req.InputTokens,
+		OutputTokens:          req.OutputTokens,
+		CacheCreationTokens:   req.CacheCreationTokens,
+		CacheCreation1hTokens: req.CacheCreation1hTokens,
+		CacheReadTokens:       req.CacheReadTokens,
+		CostUSD:               cost,
+		CostSource:            costSource,
+		RawJSON:               req.RawJSON,
+	})
 
 	if err != nil {
 		// UNIQUE-constraint violations are the expected steady state when

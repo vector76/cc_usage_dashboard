@@ -8,12 +8,13 @@ import "fmt"
 // Cache token columns are nullable in the schema; they are coalesced to 0 here
 // so cost math can treat them uniformly.
 type NullCostEvent struct {
-	ID                  int64
-	Model               string
-	InputTokens         int
-	OutputTokens        int
-	CacheCreationTokens int
-	CacheReadTokens     int
+	ID                    int64
+	Model                 string
+	InputTokens           int
+	OutputTokens          int
+	CacheCreationTokens   int
+	CacheCreation1hTokens int
+	CacheReadTokens       int
 }
 
 // NullCostEvents returns every usage event with a non-empty model whose cost is
@@ -29,7 +30,8 @@ type NullCostEvent struct {
 func (s *Store) NullCostEvents() ([]NullCostEvent, error) {
 	rows, err := s.db.Query(`
 		SELECT id, model, input_tokens, output_tokens,
-		       COALESCE(cache_creation_tokens, 0), COALESCE(cache_read_tokens, 0)
+		       COALESCE(cache_creation_tokens, 0), COALESCE(cache_creation_1h_tokens, 0),
+		       COALESCE(cache_read_tokens, 0)
 		FROM usage_events
 		WHERE (cost_usd_equivalent IS NULL OR cost_source = 'ceiling')
 		  AND model IS NOT NULL AND model != ''
@@ -44,7 +46,7 @@ func (s *Store) NullCostEvents() ([]NullCostEvent, error) {
 	for rows.Next() {
 		var e NullCostEvent
 		if err := rows.Scan(&e.ID, &e.Model, &e.InputTokens, &e.OutputTokens,
-			&e.CacheCreationTokens, &e.CacheReadTokens); err != nil {
+			&e.CacheCreationTokens, &e.CacheCreation1hTokens, &e.CacheReadTokens); err != nil {
 			return nil, fmt.Errorf("failed to scan null-cost event: %w", err)
 		}
 		out = append(out, e)

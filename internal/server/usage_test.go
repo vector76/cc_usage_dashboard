@@ -94,7 +94,8 @@ func TestHandleUsageBreakdown_ResponseShape(t *testing.T) {
 	}
 	for _, k := range []string{
 		"family", "events", "events_without_cost",
-		"input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens",
+		"input_tokens", "output_tokens", "cache_creation_tokens",
+		"cache_creation_5m_tokens", "cache_creation_1h_tokens", "cache_read_tokens",
 		"cost_usd", "cost_source", "estimated",
 	} {
 		if _, ok := first[k]; !ok {

@@ -44,7 +44,7 @@ func BackfillCosts(db *store.Store, priceTable PriceTable) (int, error) {
 	ceilingModels := make(map[string]int)
 	for _, e := range events {
 		cost, source := ResolveCost(nil, e.Model,
-			e.InputTokens, e.OutputTokens, e.CacheCreationTokens, e.CacheReadTokens,
+			e.InputTokens, e.OutputTokens, e.CacheCreationTokens, e.CacheCreation1hTokens, e.CacheReadTokens,
 			priceTable)
 		if cost == nil || source == "" {
 			continue // nothing to price against (no model name)

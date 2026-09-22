@@ -21,7 +21,11 @@ source granularity).
 | project_path          | TEXT         | Decoded path the session ran in, if known.     |
 | input_tokens          | INTEGER      | Required.                                      |
 | output_tokens         | INTEGER      | Required.                                      |
-| cache_creation_tokens | INTEGER      | Nullable.                                      |
+| cache_creation_tokens | INTEGER      | Nullable. All cache writes, both TTLs.         |
+| cache_creation_1h_tokens | INTEGER   | Nullable. The 1-hour-TTL subset of             |
+|                       |              | `cache_creation_tokens`; the rest are 5-minute |
+|                       |              | writes. NULL means the split is unknown and    |
+|                       |              | the row is priced as all 5-minute. Added in v9.|
 | cache_read_tokens     | INTEGER      | Nullable.                                      |
 | cost_usd_equivalent   | REAL         | Dollar-equivalent quota cost. Nullable if      |
 |                       |              | neither the source nor the price-table         |
@@ -280,7 +284,7 @@ in the source UI to anchor against.
 `cost_usd_equivalent` is not always present in the JSONL — Claude Code computes it from
 the model + token counts, and depending on version may or may not serialize it. The
 trayapp therefore needs a small **price table** keyed by model name (input / output /
-cache-read / cache-creation per million tokens), and computes cost on ingest if the raw
+cache-read / 5-minute and 1-hour cache-creation per million tokens), and computes cost on ingest if the raw
 field is absent. Both the raw and computed values are stored; the dashboard prefers the
 raw value when present and labels computed values explicitly so the user knows when
 they're seeing our estimate vs. Anthropic's.
@@ -327,6 +331,36 @@ inflated forever. The guards on that update are narrow: `reported` and
 `computed` costs are immovable, and one ceiling estimate never replaces another
 (otherwise the same rows would be rewritten on every startup for as long as the
 model stays unlisted).
+
+### Cache writes: 5-minute vs 1-hour TTL
+
+Anthropic bills a cache write by its TTL: 1.25x base input for the 5-minute
+TTL, 2x for the 1-hour TTL. Claude Code writes almost entirely with the
+1-hour TTL (in one sample of recent transcripts, 10.4M tokens against 2.9K
+at 5 minutes), so pricing every write at the 5-minute rate understated cache
+writes by 37.5%.
+
+The transcript's `usage.cache_creation_input_tokens` is the total, and
+`usage.cache_creation.ephemeral_1h_input_tokens` gives the 1-hour share. The
+schema mirrors that: `cache_creation_tokens` stays the total, so every existing
+sum of it is still right, and `cache_creation_1h_tokens` holds the subset. Cost
+is `(total − 1h) × cache_creation_rate + 1h × cache_creation_1h_rate`, the 5m
+remainder clamped at zero. `prices.yaml` lists the 1-hour rate per model as
+`cache_creation_1h_rate_usd_per_m`; an entry without it defaults to 2x its
+input rate, so an older override file doesn't price 1-hour writes at $0.
+
+Migration v9 recovers the split for existing rows from `raw_json`, which only
+the tailer populates with the full transcript line. Rows that gain a split and
+carry a `computed` or `ceiling` cost have that cost cleared, and
+`ingest.BackfillCosts` re-prices them at startup, the same path that makes a
+newly added model retroactive. `reported` costs are left alone. Hook- and
+uplink-delivered rows from before v9 carry no `raw_json`, so they stay NULL and
+keep their all-5-minute pricing. From v9 on, both paths send
+`cache_creation_1h_tokens` on `POST /log`.
+
+The range report (`GET /api/usage/breakdown`) returns
+`cache_creation_5m_tokens` and `cache_creation_1h_tokens` alongside the total,
+and the report page shows them as separate columns.
 
 ## Retention
 

@@ -16,16 +16,17 @@ import (
 // transcript line (the /log body cap is 1 MiB for exactly that reason) and the
 // sender retains its own copy for forensics.
 type ForwardableEvent struct {
-	ID                  int64
-	OccurredAt          time.Time
-	SessionID           string
-	MessageID           string
-	ProjectPath         string
-	Model               string
-	InputTokens         int
-	OutputTokens        int
-	CacheCreationTokens int
-	CacheReadTokens     int
+	ID                    int64
+	OccurredAt            time.Time
+	SessionID             string
+	MessageID             string
+	ProjectPath           string
+	Model                 string
+	InputTokens           int
+	OutputTokens          int
+	CacheCreationTokens   int
+	CacheCreation1hTokens int
+	CacheReadTokens       int
 }
 
 // GetUplinkCursor returns the highest usage_events.id already forwarded to
@@ -77,7 +78,8 @@ func (s *Store) ForwardableEventsAfter(afterID int64, limit int) ([]ForwardableE
 		SELECT id, occurred_at, session_id, message_id,
 		       COALESCE(project_path, ''), COALESCE(model, ''),
 		       input_tokens, output_tokens,
-		       COALESCE(cache_creation_tokens, 0), COALESCE(cache_read_tokens, 0)
+		       COALESCE(cache_creation_tokens, 0), COALESCE(cache_creation_1h_tokens, 0),
+		       COALESCE(cache_read_tokens, 0)
 		FROM usage_events
 		WHERE id > ?
 		  AND session_id IS NOT NULL AND session_id != ''
@@ -98,7 +100,7 @@ func (s *Store) ForwardableEventsAfter(afterID int64, limit int) ([]ForwardableE
 			&e.ID, &occurredAt, &e.SessionID, &e.MessageID,
 			&e.ProjectPath, &e.Model,
 			&e.InputTokens, &e.OutputTokens,
-			&e.CacheCreationTokens, &e.CacheReadTokens,
+			&e.CacheCreationTokens, &e.CacheCreation1hTokens, &e.CacheReadTokens,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan forwardable event: %w", err)
 		}

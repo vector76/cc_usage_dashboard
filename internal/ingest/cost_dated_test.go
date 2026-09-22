@@ -20,7 +20,7 @@ func datedTestTable() PriceTable {
 
 func TestResolveCostDatedIDFallsBackToUndatedEntry(t *testing.T) {
 	cost, source := ResolveCost(nil, "claude-haiku-4-5-20251001",
-		1000, 1000, 0, 0, datedTestTable())
+		1000, 1000, 0, 0, 0, datedTestTable())
 
 	if cost == nil {
 		t.Fatal("expected cost computed via undated fallback, got nil")
@@ -41,7 +41,7 @@ func TestResolveCostExactDatedEntryWinsOverFallback(t *testing.T) {
 	}
 
 	cost, source := ResolveCost(nil, "claude-haiku-4-5-20251001",
-		1000, 1000, 0, 0, table)
+		1000, 1000, 0, 0, 0, table)
 
 	if cost == nil || source != "computed" {
 		t.Fatalf("cost=%v source=%q, want computed", cost, source)
@@ -58,7 +58,7 @@ func TestResolveCostExactDatedEntryWinsOverFallback(t *testing.T) {
 // had happened.
 func TestResolveCostDatedIDWithoutBaseEntryIsNotComputed(t *testing.T) {
 	cost, source := ResolveCost(nil, "claude-mystery-9-20260101",
-		1000, 1000, 0, 0, datedTestTable())
+		1000, 1000, 0, 0, 0, datedTestTable())
 
 	if source != "ceiling" {
 		t.Errorf("cost=%v source=%q, want ceiling for an unknown base", cost, source)
@@ -72,7 +72,7 @@ func TestResolveCostNonDateSuffixIsNotStripped(t *testing.T) {
 		"claude-haiku-4-5-202510012", // too many digits
 		"-20251001",                  // empty base
 	} {
-		cost, source := ResolveCost(nil, model, 1000, 1000, 0, 0, datedTestTable())
+		cost, source := ResolveCost(nil, model, 1000, 1000, 0, 0, 0, datedTestTable())
 		// The point is that no undated match is fabricated: these must not be
 		// priced at haiku's rates. Landing on the ceiling instead is correct.
 		if source != "ceiling" {

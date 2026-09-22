@@ -147,7 +147,7 @@ func TestResolveCostFromLoadedTable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cost, source := ResolveCost(nil, model,
-				tc.inputTokens, tc.outputTokens, tc.cacheCreation, tc.cacheRead, pt)
+				tc.inputTokens, tc.outputTokens, tc.cacheCreation, 0, tc.cacheRead, pt)
 
 			if source != "computed" {
 				t.Fatalf("source: want %q, got %q", "computed", source)

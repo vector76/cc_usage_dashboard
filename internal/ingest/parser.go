@@ -17,7 +17,8 @@ type ParsedEvent struct {
 	Model                  string
 	InputTokens            int
 	OutputTokens           int
-	CacheCreationTokens    int
+	CacheCreationTokens    int // total of all cache writes
+	CacheCreation1hTokens  int // 1-hour-TTL subset of CacheCreationTokens
 	CacheReadTokens        int
 	ReportedCost           *float64
 	ProjectPath            string
@@ -168,6 +169,8 @@ func (p *Parser) parseLine(line []byte) (*ParsedEvent, error) {
 		event.CacheReadTokens = int(cacheRead)
 	}
 
+	event.CacheCreation1hTokens = CacheCreation1hTokens(usage)
+
 	// Try to extract timestamp
 	if timestamp, ok := msg["timestamp"].(string); ok {
 		t, err := time.Parse(time.RFC3339, timestamp)
@@ -182,6 +185,19 @@ func (p *Parser) parseLine(line []byte) (*ParsedEvent, error) {
 	}
 
 	return event, nil
+}
+
+// CacheCreation1hTokens returns the 1-hour-TTL share of a usage block's cache
+// writes (cache_creation.ephemeral_1h_input_tokens), or 0 when the block
+// doesn't report the split. The 1h TTL bills at 2x input against the 5-minute
+// TTL's 1.25x, and cache_creation_input_tokens alone doesn't say which was used.
+func CacheCreation1hTokens(usage map[string]interface{}) int {
+	split, ok := usage["cache_creation"].(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	n, _ := split["ephemeral_1h_input_tokens"].(float64)
+	return int(n)
 }
 
 // extractTokens extracts the required token counts from a usage block.

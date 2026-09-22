@@ -62,7 +62,7 @@ func TestCeilingPricesEmptyTable(t *testing.T) {
 
 func TestResolveCostUnknownModelUsesCeiling(t *testing.T) {
 	cost, source := ResolveCost(nil, "claude-brandnew-6",
-		1000, 1000, 1000, 1000, ceilingTestTable())
+		1000, 1000, 1000, 0, 1000, ceilingTestTable())
 
 	if cost == nil {
 		t.Fatal("expected an unknown model to be priced at the ceiling, got nil")
@@ -83,7 +83,7 @@ func TestResolveCostCeilingIsLastResort(t *testing.T) {
 	table["claude-haiku-4-5"] = &ModelPrices{InputRate: 1.0, OutputRate: 5.0}
 
 	t.Run("exact entry wins", func(t *testing.T) {
-		cost, source := ResolveCost(nil, "claude-haiku-4-5", 1000, 1000, 0, 0, table)
+		cost, source := ResolveCost(nil, "claude-haiku-4-5", 1000, 1000, 0, 0, 0, table)
 		if source != "computed" {
 			t.Fatalf("source = %q, want computed", source)
 		}
@@ -93,7 +93,7 @@ func TestResolveCostCeilingIsLastResort(t *testing.T) {
 	})
 
 	t.Run("undated fallback wins", func(t *testing.T) {
-		cost, source := ResolveCost(nil, "claude-haiku-4-5-20251001", 1000, 1000, 0, 0, table)
+		cost, source := ResolveCost(nil, "claude-haiku-4-5-20251001", 1000, 1000, 0, 0, 0, table)
 		if source != "computed" {
 			t.Fatalf("source = %q, want computed", source)
 		}
@@ -104,7 +104,7 @@ func TestResolveCostCeilingIsLastResort(t *testing.T) {
 
 	t.Run("reported wins", func(t *testing.T) {
 		reported := 0.05
-		cost, source := ResolveCost(&reported, "claude-brandnew-6", 1000, 1000, 0, 0, table)
+		cost, source := ResolveCost(&reported, "claude-brandnew-6", 1000, 1000, 0, 0, 0, table)
 		if source != "reported" || *cost != 0.05 {
 			t.Errorf("cost=%v source=%q, want the reported 0.05", cost, source)
 		}
@@ -126,7 +126,7 @@ func TestResolveCostNoCeilingAvailable(t *testing.T) {
 		{"empty model", "", ceilingTestTable()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cost, source := ResolveCost(nil, tc.model, 1000, 1000, 0, 0, tc.table)
+			cost, source := ResolveCost(nil, tc.model, 1000, 1000, 0, 0, 0, tc.table)
 			if cost != nil || source != "" {
 				t.Errorf("cost=%v source=%q, want nil/empty", cost, source)
 			}

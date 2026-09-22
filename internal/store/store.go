@@ -113,7 +113,32 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
-// InsertUsageEvent inserts a usage event and returns its ID.
+// UsageEventRecord is the full set of fields written to usage_events. Like
+// QuotaSnapshotRecord it exists because the positional InsertUsageEvent has
+// outgrown a readable signature; new columns (starting with
+// CacheCreation1hTokens) are reachable only through this struct.
+//
+// CacheCreationTokens is the total of all cache writes and
+// CacheCreation1hTokens the 1-hour-TTL subset of it.
+type UsageEventRecord struct {
+	OccurredAt            time.Time
+	Source                string
+	SessionID             string
+	MessageID             string
+	ProjectPath           string
+	Model                 string
+	InputTokens           int
+	OutputTokens          int
+	CacheCreationTokens   int
+	CacheCreation1hTokens int
+	CacheReadTokens       int
+	CostUSD               *float64
+	CostSource            string
+	RawJSON               string
+}
+
+// InsertUsageEvent inserts a usage event and returns its ID. It records no
+// 1h cache-write split; use InsertUsageEventRecord when one is known.
 func (s *Store) InsertUsageEvent(
 	occurredAt time.Time,
 	source string,
@@ -122,15 +147,34 @@ func (s *Store) InsertUsageEvent(
 	costUSD *float64,
 	costSource, rawJSON string,
 ) (int64, error) {
+	return s.InsertUsageEventRecord(UsageEventRecord{
+		OccurredAt:          occurredAt,
+		Source:              source,
+		SessionID:           sessionID,
+		MessageID:           messageID,
+		ProjectPath:         projectPath,
+		Model:               model,
+		InputTokens:         inputTokens,
+		OutputTokens:        outputTokens,
+		CacheCreationTokens: cacheCreationTokens,
+		CacheReadTokens:     cacheReadTokens,
+		CostUSD:             costUSD,
+		CostSource:          costSource,
+		RawJSON:             rawJSON,
+	})
+}
+
+// InsertUsageEventRecord inserts a usage event and returns its ID.
+func (s *Store) InsertUsageEventRecord(r UsageEventRecord) (int64, error) {
 	result, err := s.db.Exec(`
 		INSERT INTO usage_events (
 			occurred_at, source, session_id, message_id, project_path,
-			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-			cost_usd_equivalent, cost_source, model, raw_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, FormatTime(occurredAt), source, sessionID, messageID, projectPath,
-		inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens,
-		costUSD, costSource, model, rawJSON)
+			input_tokens, output_tokens, cache_creation_tokens, cache_creation_1h_tokens,
+			cache_read_tokens, cost_usd_equivalent, cost_source, model, raw_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, FormatTime(r.OccurredAt), r.Source, r.SessionID, r.MessageID, r.ProjectPath,
+		r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheCreation1hTokens,
+		r.CacheReadTokens, r.CostUSD, r.CostSource, r.Model, r.RawJSON)
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert usage event: %w", err)

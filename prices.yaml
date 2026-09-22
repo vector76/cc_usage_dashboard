@@ -5,13 +5,13 @@
 # user-visible /cost output of a real Claude Code session: Haiku 4.5 and
 # Opus 4.7 reconciled to within $0.05 of /cost using these numbers.
 #
-# Cache write rate convention: 5-minute (1.25x input). Anthropic also
-# bills a 1-hour cache write at 2x input. usage_events stores a single
-# cache_creation_tokens column that mixes both kinds, so we pick the
-# lower (5m) rate as the default since that's what Claude Code uses by
-# default. A session leaning heavily on explicit 1h caching will be
-# slightly under-counted; splitting 5m vs 1h cleanly would require a
-# schema migration and is deferred until it bites.
+# Cache writes come in two TTLs, billed differently:
+#   cache_creation_rate_usd_per_m     5-minute TTL, 1.25x input
+#   cache_creation_1h_rate_usd_per_m  1-hour TTL, 2x input
+# Claude Code writes almost entirely with the 1-hour TTL. The transcript's
+# usage.cache_creation.ephemeral_1h_input_tokens says how much of each
+# write was 1h; the remainder is priced at the 5-minute rate. An entry
+# that omits the 1h key defaults it to 2x its input rate.
 
 models:
   # ---- Fable 5.1 / Mythos 5.1: same $10/$50 tier as Fable 5, but cache reads
@@ -21,12 +21,14 @@ models:
     input_rate_usd_per_m: 10.00
     output_rate_usd_per_m: 50.00
     cache_creation_rate_usd_per_m: 12.50
+    cache_creation_1h_rate_usd_per_m: 20.00
     cache_read_rate_usd_per_m: 0.25
 
   claude-mythos-5-1:
     input_rate_usd_per_m: 10.00
     output_rate_usd_per_m: 50.00
     cache_creation_rate_usd_per_m: 12.50
+    cache_creation_1h_rate_usd_per_m: 20.00
     cache_read_rate_usd_per_m: 0.25
 
   # ---- Fable 5 / Mythos 5: priced above Opus, standard 0.1x cache reads ----
@@ -34,12 +36,14 @@ models:
     input_rate_usd_per_m: 10.00
     output_rate_usd_per_m: 50.00
     cache_creation_rate_usd_per_m: 12.50
+    cache_creation_1h_rate_usd_per_m: 20.00
     cache_read_rate_usd_per_m: 1.00
 
   claude-mythos-5:
     input_rate_usd_per_m: 10.00
     output_rate_usd_per_m: 50.00
     cache_creation_rate_usd_per_m: 12.50
+    cache_creation_1h_rate_usd_per_m: 20.00
     cache_read_rate_usd_per_m: 1.00
 
   # ---- Opus 5.5: successor to Opus 5, launched below it at $4/$20. Cache
@@ -50,6 +54,7 @@ models:
     input_rate_usd_per_m: 4.00
     output_rate_usd_per_m: 20.00
     cache_creation_rate_usd_per_m: 5.00
+    cache_creation_1h_rate_usd_per_m: 8.00
     cache_read_rate_usd_per_m: 0.20
 
   # ---- Opus 4.5+ family: repriced down to Sonnet-class rates ----
@@ -68,30 +73,35 @@ models:
     input_rate_usd_per_m: 5.00
     output_rate_usd_per_m: 25.00
     cache_creation_rate_usd_per_m: 6.25
+    cache_creation_1h_rate_usd_per_m: 10.00
     cache_read_rate_usd_per_m: 0.50
 
   claude-opus-4-8:
     input_rate_usd_per_m: 5.00
     output_rate_usd_per_m: 25.00
     cache_creation_rate_usd_per_m: 6.25
+    cache_creation_1h_rate_usd_per_m: 10.00
     cache_read_rate_usd_per_m: 0.50
 
   claude-opus-4-7:
     input_rate_usd_per_m: 5.00
     output_rate_usd_per_m: 25.00
     cache_creation_rate_usd_per_m: 6.25
+    cache_creation_1h_rate_usd_per_m: 10.00
     cache_read_rate_usd_per_m: 0.50
 
   claude-opus-4-6:
     input_rate_usd_per_m: 5.00
     output_rate_usd_per_m: 25.00
     cache_creation_rate_usd_per_m: 6.25
+    cache_creation_1h_rate_usd_per_m: 10.00
     cache_read_rate_usd_per_m: 0.50
 
   claude-opus-4-5:
     input_rate_usd_per_m: 5.00
     output_rate_usd_per_m: 25.00
     cache_creation_rate_usd_per_m: 6.25
+    cache_creation_1h_rate_usd_per_m: 10.00
     cache_read_rate_usd_per_m: 0.50
 
   # ---- Opus 4.0 / 4.1: original premium pricing ----
@@ -99,12 +109,14 @@ models:
     input_rate_usd_per_m: 15.00
     output_rate_usd_per_m: 75.00
     cache_creation_rate_usd_per_m: 18.75
+    cache_creation_1h_rate_usd_per_m: 30.00
     cache_read_rate_usd_per_m: 1.50
 
   claude-opus-4-0:
     input_rate_usd_per_m: 15.00
     output_rate_usd_per_m: 75.00
     cache_creation_rate_usd_per_m: 18.75
+    cache_creation_1h_rate_usd_per_m: 30.00
     cache_read_rate_usd_per_m: 1.50
 
   # ---- Sonnet 5 ----
@@ -115,6 +127,7 @@ models:
     input_rate_usd_per_m: 2.00
     output_rate_usd_per_m: 10.00
     cache_creation_rate_usd_per_m: 2.50
+    cache_creation_1h_rate_usd_per_m: 4.00
     cache_read_rate_usd_per_m: 0.20
 
   # ---- Sonnet 4.x ----
@@ -122,18 +135,21 @@ models:
     input_rate_usd_per_m: 3.00
     output_rate_usd_per_m: 15.00
     cache_creation_rate_usd_per_m: 3.75
+    cache_creation_1h_rate_usd_per_m: 6.00
     cache_read_rate_usd_per_m: 0.30
 
   claude-sonnet-4-5:
     input_rate_usd_per_m: 3.00
     output_rate_usd_per_m: 15.00
     cache_creation_rate_usd_per_m: 3.75
+    cache_creation_1h_rate_usd_per_m: 6.00
     cache_read_rate_usd_per_m: 0.30
 
   claude-sonnet-4-0:
     input_rate_usd_per_m: 3.00
     output_rate_usd_per_m: 15.00
     cache_creation_rate_usd_per_m: 3.75
+    cache_creation_1h_rate_usd_per_m: 6.00
     cache_read_rate_usd_per_m: 0.30
 
   # ---- Haiku 4.5 ----
@@ -141,6 +157,7 @@ models:
     input_rate_usd_per_m: 1.00
     output_rate_usd_per_m: 5.00
     cache_creation_rate_usd_per_m: 1.25
+    cache_creation_1h_rate_usd_per_m: 2.00
     cache_read_rate_usd_per_m: 0.10
 
   # ---- Older 3.x models (deprecated but pricing still published) ----
@@ -148,28 +165,33 @@ models:
     input_rate_usd_per_m: 3.00
     output_rate_usd_per_m: 15.00
     cache_creation_rate_usd_per_m: 3.75
+    cache_creation_1h_rate_usd_per_m: 6.00
     cache_read_rate_usd_per_m: 0.30
 
   claude-3-5-sonnet-20241022:
     input_rate_usd_per_m: 3.00
     output_rate_usd_per_m: 15.00
     cache_creation_rate_usd_per_m: 3.75
+    cache_creation_1h_rate_usd_per_m: 6.00
     cache_read_rate_usd_per_m: 0.30
 
   claude-3-5-haiku-20241022:
     input_rate_usd_per_m: 0.80
     output_rate_usd_per_m: 4.00
     cache_creation_rate_usd_per_m: 1.00
+    cache_creation_1h_rate_usd_per_m: 1.60
     cache_read_rate_usd_per_m: 0.08
 
   claude-3-opus-20240229:
     input_rate_usd_per_m: 15.00
     output_rate_usd_per_m: 75.00
     cache_creation_rate_usd_per_m: 18.75
+    cache_creation_1h_rate_usd_per_m: 30.00
     cache_read_rate_usd_per_m: 1.50
 
   claude-3-haiku-20240307:
     input_rate_usd_per_m: 0.25
     output_rate_usd_per_m: 1.25
     cache_creation_rate_usd_per_m: 0.30
+    cache_creation_1h_rate_usd_per_m: 0.50
     cache_read_rate_usd_per_m: 0.03

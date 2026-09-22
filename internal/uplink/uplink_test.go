@@ -267,3 +267,22 @@ func TestStartStopIsClean(t *testing.T) {
 		t.Error("expected the loop to forward at least once")
 	}
 }
+
+// The receiver prices from tokens, so it needs the 1h split to apply the 2x
+// cache-write rate.
+func TestForwardOnceSendsCacheCreation1hTokens(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.InsertUsageEventRecord(store.UsageEventRecord{
+		OccurredAt: time.Now(), Source: "tailer", SessionID: "sess-1", MessageID: "m1",
+		InputTokens: 1, CacheCreationTokens: 100, CacheCreation1hTokens: 80,
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	rec := newReceiver(t, nil)
+	if _, err := New(rec.srv.URL, s).forwardOnce(); err != nil {
+		t.Fatalf("forwardOnce: %v", err)
+	}
+	if got := rec.bodies[0]["cache_creation_1h_tokens"]; got != float64(80) {
+		t.Errorf("cache_creation_1h_tokens = %v, want 80", got)
+	}
+}

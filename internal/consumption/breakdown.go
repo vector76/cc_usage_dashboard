@@ -54,14 +54,19 @@ type ModelBreakdown struct {
 	Family string `json:"family"`
 	Events int64  `json:"events"`
 	// EventsWithoutCost is this model's share of Breakdown.EventsWithoutCost.
-	EventsWithoutCost   int64   `json:"events_without_cost"`
-	InputTokens         int64   `json:"input_tokens"`
-	OutputTokens        int64   `json:"output_tokens"`
-	CacheCreationTokens int64   `json:"cache_creation_tokens"`
-	CacheReadTokens     int64   `json:"cache_read_tokens"`
-	CostUSD             float64 `json:"cost_usd"`
-	CostSource          string  `json:"cost_source"`
-	Estimated           bool    `json:"estimated"`
+	EventsWithoutCost int64 `json:"events_without_cost"`
+	InputTokens       int64 `json:"input_tokens"`
+	OutputTokens      int64 `json:"output_tokens"`
+	// CacheCreationTokens is all cache writes; the 5m and 1h fields split it
+	// by TTL, which bill at 1.25x and 2x input respectively. A row with no
+	// recorded split counts as 5m, matching how it was priced.
+	CacheCreationTokens   int64   `json:"cache_creation_tokens"`
+	CacheCreation5mTokens int64   `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int64   `json:"cache_creation_1h_tokens"`
+	CacheReadTokens       int64   `json:"cache_read_tokens"`
+	CostUSD               float64 `json:"cost_usd"`
+	CostSource            string  `json:"cost_source"`
+	Estimated             bool    `json:"estimated"`
 }
 
 // ModelFamily classifies a usage_events.model value into a coarse family. It is
@@ -191,6 +196,7 @@ func (c *Calculator) Breakdown(start, end time.Time) (*Breakdown, error) {
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(cache_creation_tokens), 0),
+			COALESCE(SUM(cache_creation_1h_tokens), 0),
 			COALESCE(SUM(cache_read_tokens), 0),
 			COALESCE(SUM(cost_usd_equivalent), 0)
 		FROM usage_events
@@ -211,13 +217,13 @@ func (c *Calculator) Breakdown(start, end time.Time) (*Breakdown, error) {
 
 	for rows.Next() {
 		var (
-			model, costSource                       sql.NullString
-			count, nullCost                         int64
-			inTok, outTok, cacheWriteTok, cacheRead int64
-			cost                                    float64
+			model, costSource                                     sql.NullString
+			count, nullCost                                       int64
+			inTok, outTok, cacheWriteTok, cacheWrite1h, cacheRead int64
+			cost                                                  float64
 		)
 		if err := rows.Scan(&model, &costSource, &count, &nullCost,
-			&inTok, &outTok, &cacheWriteTok, &cacheRead, &cost); err != nil {
+			&inTok, &outTok, &cacheWriteTok, &cacheWrite1h, &cacheRead, &cost); err != nil {
 			return nil, fmt.Errorf("failed to scan model breakdown row: %w", err)
 		}
 
@@ -238,6 +244,8 @@ func (c *Calculator) Breakdown(start, end time.Time) (*Breakdown, error) {
 		m.InputTokens += inTok
 		m.OutputTokens += outTok
 		m.CacheCreationTokens += cacheWriteTok
+		m.CacheCreation1hTokens += cacheWrite1h
+		m.CacheCreation5mTokens += max(cacheWriteTok-cacheWrite1h, 0)
 		m.CacheReadTokens += cacheRead
 		m.CostUSD += cost
 

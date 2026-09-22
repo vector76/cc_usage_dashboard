@@ -153,7 +153,10 @@ function toLocalInputValue(d) {
 const TOKEN_COLUMNS = [
   ["Input", "input_tokens"],
   ["Output", "output_tokens"],
-  ["Cache write", "cache_creation_tokens"],
+  // Cache writes split by TTL: 5-minute writes bill at 1.25x input, 1-hour
+  // writes at 2x.
+  ["Cache write 5m", "cache_creation_5m_tokens"],
+  ["Cache write 1h", "cache_creation_1h_tokens"],
   ["Cache read", "cache_read_tokens"],
 ];
 

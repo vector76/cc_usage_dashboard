@@ -327,6 +327,7 @@ func (t *Tailer) processFile(filePath string) {
 			event.InputTokens,
 			event.OutputTokens,
 			event.CacheCreationTokens,
+			event.CacheCreation1hTokens,
 			event.CacheReadTokens,
 			t.priceTable,
 		)
@@ -343,12 +344,12 @@ func (t *Tailer) processFile(filePath string) {
 		if _, err := tx.Exec(`
 			INSERT INTO usage_events (
 				occurred_at, source, session_id, message_id, project_path,
-				input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-				cost_usd_equivalent, cost_source, model, raw_json
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				input_tokens, output_tokens, cache_creation_tokens, cache_creation_1h_tokens,
+				cache_read_tokens, cost_usd_equivalent, cost_source, model, raw_json
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, store.FormatTime(event.OccurredAt), "tailer", event.SessionID, event.MessageID, event.ProjectPath,
-			event.InputTokens, event.OutputTokens, event.CacheCreationTokens, event.CacheReadTokens,
-			cost, costSource, event.Model, event.RawJSON); err != nil {
+			event.InputTokens, event.OutputTokens, event.CacheCreationTokens, event.CacheCreation1hTokens,
+			event.CacheReadTokens, cost, costSource, event.Model, event.RawJSON); err != nil {
 			// A UNIQUE-constraint violation on (session_id, message_id) is
 			// the expected steady state, not a failure: the hook (or the
 			// other tailer root) already recorded this exact message. See
