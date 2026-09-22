@@ -229,6 +229,44 @@ or profile — "session window absent entirely" — which short-circuits to
 true when there is no active session window. See
 `docs/no-active-session.md` for the wiring.
 
+## OAuth usage polling
+
+`oauth_usage` reads the account's quota percentages straight from Anthropic's
+API using the access token Claude Code already stores, instead of waiting for
+the userscript to see the claude.ai usage page.
+
+```yaml
+oauth_usage:
+  enabled: false
+  poll_interval_seconds: 180
+  credentials_path: ""
+```
+
+**Off by default.** It makes scheduled requests to Anthropic's API, which is
+not behavior an existing install should acquire merely by upgrading.
+
+Enabling it does **not** disable the userscript. Both may run; their snapshots
+are tagged with different sources (`oauth` vs `userscript`) so the two can be
+compared rather than silently merged.
+
+`poll_interval_seconds` is floored at 30, and the floor is enforced only when
+`enabled` — a stale value left behind in a disabled block should not block
+startup, since nothing polls. A value below the floor fails at load with the
+key named, rather than becoming a stream of requests at an undocumented
+endpoint. The 180-second default is deliberately unhurried: the figures move
+in whole percentage points.
+
+`credentials_path` empty means "resolve the standard location", which honors
+`CLAUDE_CONFIG_DIR` and otherwise uses `~/.claude/.credentials.json`. A literal
+default here would shadow that environment variable. The file is re-read on
+every poll, because Claude Code rewrites it when it rotates the token.
+
+The access token lives about 8 hours and is refreshed only when Claude Code
+itself runs, so a machine idle overnight sees this source report *temporarily
+unavailable* until the next session — not a parse error, and no restart needed
+to recover. See `docs/data-sources.md` "Tier 2b" for why the poller does not
+refresh the token itself.
+
 ## Uplink
 
 `uplink.url` turns this trayapp into a *sending* instance: it forwards the

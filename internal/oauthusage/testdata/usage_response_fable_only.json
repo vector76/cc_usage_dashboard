@@ -1,0 +1,13 @@
+{
+  "_comment": "Only the optional Fable sub-row parsed. Mirrors the userscript rule that the Fable row alone is never sufficient to consider a read successful -- treating it as sufficient would suppress the error that fires when the rows we actually depend on go missing.",
+  "limits": [
+    {
+      "kind": "weekly_scoped",
+      "group": "weekly",
+      "percent": 1,
+      "resets_at": "2026-09-23T15:00:00.855692+00:00",
+      "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null },
+      "is_active": false
+    }
+  ]
+}

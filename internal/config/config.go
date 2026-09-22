@@ -89,8 +89,38 @@ type Config struct {
 		URL string `yaml:"url"`
 	} `yaml:"uplink"`
 
+	// OAuthUsage polls Claude Code's OAuth usage endpoint for the same
+	// account-scoped quota figures the userscript scrapes from the DOM,
+	// as structured JSON and without a browser tab open. See
+	// internal/oauthusage and docs/data-sources.md.
+	//
+	// Off by default: it makes scheduled requests to Anthropic's API,
+	// which is not a behavior an existing install should acquire merely
+	// by upgrading. Turning it on does not disable the userscript —
+	// both may run, and their snapshots are tagged with distinct
+	// sources so the two can be compared rather than silently merged.
+	OAuthUsage struct {
+		Enabled bool `yaml:"enabled"`
+		// PollIntervalSeconds is deliberately unhurried. The endpoint is
+		// undocumented and its rate limits are unpublished, and the
+		// figures it reports move in whole percentage points, so there
+		// is nothing to gain from a tight loop. Validated against
+		// minOAuthPollIntervalSeconds, but only when Enabled.
+		PollIntervalSeconds int `yaml:"poll_interval_seconds"`
+		// CredentialsPath overrides the location of Claude Code's
+		// .credentials.json. Empty means "resolve the standard
+		// location", which honors CLAUDE_CONFIG_DIR — a literal default
+		// here would shadow that env var.
+		CredentialsPath string `yaml:"credentials_path"`
+	} `yaml:"oauth_usage"`
+
 	EnableSlackSampling bool `yaml:"enable_slack_sampling"`
 }
+
+// minOAuthPollIntervalSeconds is a floor, not a recommendation. It exists
+// to turn a typo (a value meant as minutes, say) into a startup error
+// rather than a stream of requests at an undocumented endpoint.
+const minOAuthPollIntervalSeconds = 30
 
 // Load loads configuration from a YAML file, applying defaults.
 func Load(path string) (*Config, error) {
@@ -123,6 +153,10 @@ func Load(path string) (*Config, error) {
 	cfg.Retention.SlackSamplesDays = 90
 	// Empty means "do not forward" — see the Uplink field comment.
 	cfg.Uplink.URL = ""
+	// Opt-in; three minutes when enabled. See the OAuthUsage field comment.
+	cfg.OAuthUsage.Enabled = false
+	cfg.OAuthUsage.PollIntervalSeconds = 180
+	cfg.OAuthUsage.CredentialsPath = ""
 	cfg.EnableSlackSampling = false
 
 	// If no path provided, return defaults
@@ -145,6 +179,7 @@ func Load(path string) (*Config, error) {
 	cfg.Claude.ProjectsDir = expandPlaceholders(cfg.Claude.ProjectsDir)
 	cfg.Claude.CoworkSessionsDir = expandPlaceholders(cfg.Claude.CoworkSessionsDir)
 	cfg.Pricing.TablePath = expandPlaceholders(cfg.Pricing.TablePath)
+	cfg.OAuthUsage.CredentialsPath = expandPlaceholders(cfg.OAuthUsage.CredentialsPath)
 
 	// Reject malformed slack profiles at startup with the offending key in
 	// the message, rather than letting the gate misbehave silently later.
@@ -164,6 +199,15 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config uplink.url: %w", err)
 	}
 	cfg.Uplink.URL = normalized
+
+	// Only meaningful when something will actually poll: a stale or
+	// nonsense interval left behind in a disabled block should not block
+	// startup, since nothing is at risk.
+	if cfg.OAuthUsage.Enabled && cfg.OAuthUsage.PollIntervalSeconds < minOAuthPollIntervalSeconds {
+		return nil, fmt.Errorf(
+			"config oauth_usage.poll_interval_seconds: %d is below the %d second minimum",
+			cfg.OAuthUsage.PollIntervalSeconds, minOAuthPollIntervalSeconds)
+	}
 
 	return &cfg, nil
 }

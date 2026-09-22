@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -62,16 +63,46 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := validateSnapshotTimestamps(&req, s.now()); err != nil {
-		slog.Warn("rejecting snapshot with out-of-range timestamp", "err", err, "source", req.Source)
-		writeJSONError(w, http.StatusBadRequest, err.Error())
+	id, err := s.RecordSnapshot(req)
+	if err != nil {
+		if errors.Is(err, ErrInvalidSnapshot) {
+			slog.Warn("rejecting snapshot with out-of-range timestamp", "err", err, "source", req.Source)
+			writeJSONError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		slog.Error("failed to insert quota snapshot", "err", err)
+		writeJSONError(w, http.StatusInternalServerError, "database error")
 		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"id": id,
+	})
+}
+
+// ErrInvalidSnapshot marks a snapshot rejected on its own contents rather
+// than on a storage failure, so an HTTP caller can map it to 400 and an
+// in-process caller can tell a bad reading from a broken database.
+var ErrInvalidSnapshot = errors.New("invalid snapshot")
+
+// RecordSnapshot validates, stores, and derives windows for one snapshot.
+//
+// This is the single path every quota source takes. The userscript reaches
+// it through POST /snapshot; the OAuth usage poller calls it directly,
+// in-process. Routing both through here is what keeps timestamp
+// validation, raw-JSON retention, metrics and window derivation from
+// drifting apart between the two — and what makes their rows directly
+// comparable, since they differ only in Source.
+func (s *Server) RecordSnapshot(req SnapshotRequest) (int64, error) {
+	if err := validateSnapshotTimestamps(&req, s.now()); err != nil {
+		return 0, fmt.Errorf("%w: %s", ErrInvalidSnapshot, err)
 	}
 
 	// Store the raw JSON for forensic recovery
 	rawJSON, _ := json.Marshal(req)
 
-	// Insert snapshot
 	id, err := s.store.InsertQuotaSnapshotRecord(store.QuotaSnapshotRecord{
 		ObservedAt:         req.ObservedAt,
 		ReceivedAt:         time.Now(),
@@ -86,25 +117,14 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		ContinuousWithPrev: req.ContinuousWithPrev,
 		RawJSON:            string(rawJSON),
 	})
-
 	if err != nil {
-		slog.Error("failed to insert quota snapshot", "err", err)
-		writeJSONError(w, http.StatusInternalServerError, "database error")
-		return
+		return 0, err
 	}
 
 	s.metrics.SnapshotsReceived.Add(1)
-
-	// Trigger windows derivation
-	// In production, this would happen in a background task
-	// For now, we'll do it synchronously
 	s.deriveWindows()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"id": id,
-	})
+	return id, nil
 }
 
 // deriveWindows maintains the windows table based on events and snapshots.

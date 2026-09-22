@@ -186,6 +186,101 @@ have no information" from "we know there is no active window." Both
 fields are independent. See `docs/no-active-session.md` for what the
 trayapp does with each signal.
 
+## Tier 2b — OAuth usage endpoint
+
+**Status: implemented, opt-in (`oauth_usage.enabled`, default false).**
+
+`GET https://api.anthropic.com/api/oauth/usage`, authenticated with the access
+token Claude Code already stores in `~/.claude/.credentials.json`. Returns the
+same account-scoped quota Anthropic renders on the usage page, as structured
+JSON. See `internal/oauthusage`.
+
+It shares Tier 2's job — anchoring baselines — but not its dependency on a
+browser tab being open, which is why it sits beside rather than above it.
+
+### Why this is not Tier 0
+
+The rejection of `clusage` polling turns on perturbation: invoking Claude Code
+to read the figures **starts a 5-hour window** if none is active. This endpoint
+*reports* usage rather than consuming it. Six consecutive reads left session
+utilization unchanged at 3% with no window opened. Nothing is inferred, no
+tokens are spent, and no window is created — so unlike Tier 0 it is admissible
+on a schedule.
+
+### What it gives that the DOM cannot
+
+- **`limits[]` is self-describing.** Each entry carries its own `kind`
+  (`session`, `weekly_all`, `weekly_scoped`) and, for scoped rows,
+  `scope.model.display_name`. This replaces the userscript's entire
+  heading-prefix / row-label / positional-fallback apparatus. A newly-scoped
+  model arrives as another `weekly_scoped` entry instead of breaking the parse.
+- **Exact reset boundaries.** `resets_at` is RFC3339, so none of
+  `userscript/lib/resets.js` is needed — no weekday-name parsing, no
+  nearest-occurrence heuristic, no relative-form arithmetic.
+- **No staleness.** Figures are current at request time, so there is no
+  "Last updated: N minutes ago" delta to back-date by.
+- **Usage credits in dollars.** `extra_usage` / `spend` report real spend. The
+  per-window `limit_dollars` / `used_dollars` are null on the observed plan, so
+  the dollar-per-percent exchange rate remains unpublished and the
+  reconciliation problem below is unchanged.
+
+### Caveats
+
+- **The token expires in about 8 hours** and is refreshed only when Claude Code
+  itself runs. A host idle overnight holds an expired one, and this source goes
+  quiet until the next session. The poller detects that locally from `expiresAt`
+  and skips the request rather than sending one that will 401.
+
+  It deliberately does **not** refresh the token itself. If refresh tokens
+  rotate single-use, losing a race against Claude Code's own refresh would log
+  the user out of their primary tool — a poor trade for filling a mostly-idle
+  gap. `claude setup-token` is the escalation if uninterrupted coverage is ever
+  needed; `claude auth status` is not, as it reads local state and never
+  refreshes.
+
+- **A 401 is not a broken source.** Both observed conditions ("token has
+  expired", "token is invalid") return 401 with
+  `error.type == "authentication_error"`. The poller reports these as
+  *temporarily unavailable* and never routes them to the parse-error health
+  signal, which must keep meaning "the scraper broke, go fix it". Classification
+  keys off status and `error.type`, never the prose message.
+
+- **`resets_at` carries jittery sub-second precision.** The server recomputes it
+  per request: across two reads of the same window the whole seconds are stable
+  but the microseconds differ, and they differ between entries within a single
+  response. Values are truncated to the second on ingest; comparing raw values
+  would report a changed window on every poll.
+
+- **`is_active` does not mean "this window is open."** It read `false` on the
+  session row while session utilization climbed 3% → 7%, and only the
+  highest-utilization row was `true`. Its meaning is unconfirmed, so it is **not**
+  mapped to `session_active` / `weekly_active`. Those stay absent — "unknown"
+  under the tri-state convention — and the userscript remains the only authority
+  on limbo. Running both sources side by side is what will settle this.
+
+- **Undocumented endpoint.** The top-level response carries a couple of dozen
+  keys under internal codenames (`tangelo`, `iguana_necktie`, `nimbus_quill`, …)
+  that churn as features ship. Only `limits[]` is decoded; unknown kinds are
+  skipped rather than guessed at. Rate limits are unpublished, hence the
+  deliberately unhurried 3-minute default and the 30-second floor.
+
+- **Only `Authorization` is required.** A User-Agent and `anthropic-beta` were
+  both verified unnecessary — five header variants sent back to back with the
+  same token, including one with no User-Agent at all, returned identical
+  payloads. The client sends its own honest User-Agent and does not impersonate
+  Claude Code.
+
+### Relationship to Tier 2
+
+Enabling this does **not** disable the userscript. Both may run; their rows carry
+different `source` values (`oauth` vs `userscript`) and reach the database
+through the same `Server.RecordSnapshot` path, so validation, raw-JSON
+retention, metrics and window derivation cannot drift between them. They are
+never averaged — see "Cross-source reconciliation" below.
+
+`TestLiveEndpoint` in `internal/oauthusage` is the schema-drift canary; it is
+skipped unless `OAUTH_USAGE_LIVE=1`.
+
 ## Tier 3 — Headless browser scrape (deferred)
 
 **Status: not built. Escalation only.**

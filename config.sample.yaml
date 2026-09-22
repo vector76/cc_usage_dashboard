@@ -92,6 +92,38 @@ slack:
 #   projects_dir: "~/.claude/projects"
 #   cowork_sessions_dir: "%APPDATA%\\Claude\\local-agent-mode-sessions"
 
+# ---------------------------------------------------------------------------
+# OAuth usage polling. Reads the same account-scoped quota percentages the
+# userscript scrapes from claude.ai, but as structured JSON straight from
+# Anthropic's API, using the access token Claude Code already stores. No
+# browser tab needs to be open, and the reset boundaries arrive as exact
+# timestamps instead of hints like "Resets Thu 3:50 AM".
+#
+# Reading usage does not consume it: repeated polls were observed not to
+# open a 5-hour window. That is what separates this from invoking Claude
+# Code to read the figures, which does.
+#
+# Off by default. Enabling it does NOT disable the userscript — run both
+# and their snapshots are recorded under different sources, so the two can
+# be compared rather than silently merged.
+#
+# Known gap: the access token lives about 8 hours and is refreshed only
+# when Claude Code itself runs, so a machine idle overnight will see this
+# source go quiet until the next session. That is reported as "temporarily
+# unavailable", not as a broken scraper.
+#
+# poll_interval_seconds is floored at 30. The default of 180 is deliberate:
+# the endpoint is undocumented, its rate limits are unpublished, and the
+# figures move in whole percentage points.
+#
+# credentials_path empty means the standard location, honoring
+# CLAUDE_CONFIG_DIR.
+# ---------------------------------------------------------------------------
+# oauth_usage:
+#   enabled: false
+#   poll_interval_seconds: 180
+#   credentials_path: ""
+
 # Price table override; empty means "use a prices.yaml found next to the
 # exe (or in the other search dirs), else the table embedded in the binary".
 # pricing:

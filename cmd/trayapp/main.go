@@ -22,6 +22,7 @@ import (
 	"github.com/vector76/cc_usage_dashboard/internal/server"
 	"github.com/vector76/cc_usage_dashboard/internal/slack"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/oauthusage"
 	"github.com/vector76/cc_usage_dashboard/internal/uplink"
 )
 
@@ -194,6 +195,28 @@ func main() {
 		forwarder.Start()
 	}
 
+	// Optional OAuth usage polling: read the account's quota percentages
+	// straight from Anthropic's API using the token Claude Code already
+	// stores, instead of waiting for the userscript to see the claude.ai
+	// page. Off by default. Enabling it does not disable the userscript —
+	// both may run, and their rows carry different sources so the two can
+	// be compared rather than merged.
+	//
+	// Reading usage does not consume it, so unlike invoking Claude Code to
+	// fetch the same numbers this never opens a 5-hour window.
+	// config.Load has already rejected an out-of-range interval.
+	var usagePoller *oauthusage.Poller
+	if cfg.OAuthUsage.Enabled {
+		usagePoller = oauthusage.NewPoller(oauthusage.PollerConfig{
+			Interval:        time.Duration(cfg.OAuthUsage.PollIntervalSeconds) * time.Second,
+			CredentialsPath: cfg.OAuthUsage.CredentialsPath,
+			Sink:            srv.OAuthSink(),
+		})
+		usagePoller.Start()
+		slog.Info("oauth usage polling enabled",
+			"interval_seconds", cfg.OAuthUsage.PollIntervalSeconds)
+	}
+
 	// stop signals every background loop (retention pruner, windows ticker)
 	// to exit; wg lets shutdown wait for them. Each tailer has its own
 	// stopChan + doneChan and is stopped via tailers.Stop() so we don't
@@ -303,6 +326,12 @@ waitLoop:
 		// the client timeout on top of everything else.
 		if forwarder != nil {
 			forwarder.Stop()
+		}
+		// Same reasoning as the uplink: a poll blocked on an unreachable
+		// api.anthropic.com would otherwise hold up exit for the client
+		// timeout on top of everything else.
+		if usagePoller != nil {
+			usagePoller.Stop()
 		}
 		wg.Wait()
 		close(bgDone)

@@ -1,0 +1,40 @@
+{
+  "_comment": "A second real read of the SAME windows ~47 minutes later. The whole seconds of every resets_at are identical to usage_response.json; only the sub-second fractions differ (and they differ from each other within this one response, in serialization order). Percentages moved. Pins the truncate-to-second rule.",
+  "five_hour": {
+    "utilization": 7.0,
+    "resets_at": "2026-09-22T20:00:00.855416+00:00"
+  },
+  "seven_day": {
+    "utilization": 30.0,
+    "resets_at": "2026-09-23T15:00:00.855447+00:00"
+  },
+  "limits": [
+    {
+      "kind": "session",
+      "group": "session",
+      "percent": 7,
+      "severity": "normal",
+      "resets_at": "2026-09-22T20:00:00.855416+00:00",
+      "scope": null,
+      "is_active": false
+    },
+    {
+      "kind": "weekly_all",
+      "group": "weekly",
+      "percent": 30,
+      "severity": "normal",
+      "resets_at": "2026-09-23T15:00:00.855447+00:00",
+      "scope": null,
+      "is_active": true
+    },
+    {
+      "kind": "weekly_scoped",
+      "group": "weekly",
+      "percent": 1,
+      "severity": "normal",
+      "resets_at": "2026-09-23T15:00:00.855692+00:00",
+      "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null },
+      "is_active": false
+    }
+  ]
+}
