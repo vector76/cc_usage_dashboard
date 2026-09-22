@@ -65,6 +65,29 @@ slack:
 #   bind:
 #     - 127.0.0.1
 
+# ---------------------------------------------------------------------------
+# Uplink (optional)
+#
+# Forward this machine's usage events to another trayapp, so a VM's or a
+# secondary machine's token spend lands in the primary host's database
+# alongside its own. Set this on the SENDING machine only; the receiving
+# host leaves it empty and just needs http.bind above extended to an
+# interface the sender can reach.
+#
+# The value is the receiver's base URL with no path — the forwarder appends
+# the endpoint itself. Events are forwarded raw (tokens and model, not
+# cost), so the receiver prices and derives everything from its own tables.
+# Forwarding is idempotent: re-sent events collide on the receiver's
+# UNIQUE(session_id, message_id) and are discarded.
+#
+# Empty (the default) disables forwarding entirely.
+#
+#   uplink:
+#     url: "http://192.168.56.1:27812"
+# ---------------------------------------------------------------------------
+# uplink:
+#   url: ""
+
 # claude:
 #   projects_dir: "~/.claude/projects"
 #   cowork_sessions_dir: "%APPDATA%\\Claude\\local-agent-mode-sessions"

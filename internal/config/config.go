@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,6 +78,17 @@ type Config struct {
 		SlackSamplesDays int `yaml:"slack_samples_days"`
 	} `yaml:"retention"`
 
+	// Uplink forwards this machine's usage events to another trayapp, so a
+	// VM or secondary machine's token spend lands in the primary host's
+	// database alongside its own. URL is the peer's base URL
+	// (scheme://host[:port]) — the forwarder appends endpoint paths itself,
+	// which keeps /healthz reachable for a future clock-skew check and
+	// leaves room for an https tunnel. Empty disables forwarding entirely
+	// and is the default: a host-role trayapp never sets this.
+	Uplink struct {
+		URL string `yaml:"url"`
+	} `yaml:"uplink"`
+
 	EnableSlackSampling bool `yaml:"enable_slack_sampling"`
 }
 
@@ -109,6 +121,8 @@ func Load(path string) (*Config, error) {
 	cfg.Slack.WeeklyAbsoluteThreshold = 0.80
 	cfg.Retention.ParseErrorsDays = 30
 	cfg.Retention.SlackSamplesDays = 90
+	// Empty means "do not forward" — see the Uplink field comment.
+	cfg.Uplink.URL = ""
 	cfg.EnableSlackSampling = false
 
 	// If no path provided, return defaults
@@ -141,7 +155,50 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config slack.weekly_profile: %w", err)
 	}
 
+	// Reject a malformed uplink at startup for the same reason. A bad URL
+	// here would otherwise fail silently on every forward attempt, and the
+	// symptom (missing events on the receiving host) shows up far from the
+	// cause.
+	normalized, err := normalizeUplinkURL(cfg.Uplink.URL)
+	if err != nil {
+		return nil, fmt.Errorf("config uplink.url: %w", err)
+	}
+	cfg.Uplink.URL = normalized
+
 	return &cfg, nil
+}
+
+// normalizeUplinkURL validates an uplink address and returns it with any
+// trailing slash removed. An empty string is valid and means "disabled".
+//
+// The address must be a bare origin: the forwarder joins "/log" (and later
+// "/healthz") onto it, so a path, query, or fragment here would produce a
+// URL that silently misses the endpoint. Rejecting them is friendlier than
+// accepting a value that cannot work.
+func normalizeUplinkURL(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("not a valid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("missing host")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("must be a base URL with no path, got path %q", u.Path)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("must be a base URL with no query or fragment")
+	}
+
+	u.Path = ""
+	return u.String(), nil
 }
 
 // expandPlaceholders replaces Windows-style environment placeholders

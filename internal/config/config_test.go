@@ -437,3 +437,88 @@ func TestExpandHomeShortStringDoesNotPanic(t *testing.T) {
 		})
 	}
 }
+
+// An absent uplink section means "do not forward". The zero value is the
+// disabled state, so a host-role trayapp needs no uplink config at all.
+func TestUplinkDisabledByDefault(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Uplink.URL != "" {
+		t.Errorf("expected uplink.url empty by default, got %q", cfg.Uplink.URL)
+	}
+}
+
+func TestLoadUplinkURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "uplink:\n  url: \"http://192.168.56.1:27812\"\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Uplink.URL != "http://192.168.56.1:27812" {
+		t.Errorf("expected uplink URL to round-trip, got %q", cfg.Uplink.URL)
+	}
+}
+
+// A trailing slash is the one cosmetic variation worth absorbing rather than
+// rejecting — users will type it, and the forwarder joins paths itself.
+func TestLoadUplinkURLTrimsTrailingSlash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("uplink:\n  url: \"http://host:27812/\"\n"), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Uplink.URL != "http://host:27812" {
+		t.Errorf("expected trailing slash trimmed, got %q", cfg.Uplink.URL)
+	}
+}
+
+// A misconfigured uplink must fail at startup. Silently never forwarding is
+// the worst outcome: the symptom surfaces days later as missing data on the
+// receiving host, long after the typo is out of mind.
+func TestLoadRejectsBadUplinkURL(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+	}{
+		{"no scheme", "192.168.56.1:27812"},
+		{"wrong scheme", "ftp://192.168.56.1:27812"},
+		{"no host", "http://"},
+		{"endpoint path included", "http://192.168.56.1:27812/log"},
+		{"query string", "http://192.168.56.1:27812?x=1"},
+		{"not a url", "://"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+			content := "uplink:\n  url: \"" + tc.url + "\"\n"
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected Load to reject %q", tc.url)
+			}
+			// The message must name the key, matching how the slack
+			// profiles report their own validation failures.
+			if !strings.Contains(err.Error(), "uplink.url") {
+				t.Errorf("error should name the offending key, got: %v", err)
+			}
+		})
+	}
+}
