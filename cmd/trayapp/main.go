@@ -22,6 +22,7 @@ import (
 	"github.com/vector76/cc_usage_dashboard/internal/server"
 	"github.com/vector76/cc_usage_dashboard/internal/slack"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
+	"github.com/vector76/cc_usage_dashboard/internal/uplink"
 )
 
 // pauseToggle adapts a *slack.Calculator into the tiny `interface{ Toggle() }`
@@ -182,6 +183,17 @@ func main() {
 	srv.SetTailer(tailers)
 	srv.SetReimporter(tailers)
 
+	// Optional uplink: forward this machine's events to a peer trayapp so a
+	// VM's spend lands in the primary host's database. Empty (the default)
+	// means this is a standalone or receiving instance and nothing starts.
+	// config.Load has already validated the URL, so a bad value never
+	// reaches here — it fails the process at startup instead.
+	var forwarder *uplink.Forwarder
+	if cfg.Uplink.URL != "" {
+		forwarder = uplink.New(cfg.Uplink.URL, db)
+		forwarder.Start()
+	}
+
 	// stop signals every background loop (retention pruner, windows ticker)
 	// to exit; wg lets shutdown wait for them. Each tailer has its own
 	// stopChan + doneChan and is stopped via tailers.Stop() so we don't
@@ -286,6 +298,12 @@ waitLoop:
 	bgDone := make(chan struct{})
 	go func() {
 		tailers.Stop()
+		// Inside the same bounded goroutine as the tailers: an uplink tick
+		// blocked on an unreachable peer would otherwise hold up exit for
+		// the client timeout on top of everything else.
+		if forwarder != nil {
+			forwarder.Stop()
+		}
 		wg.Wait()
 		close(bgDone)
 	}()

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"mime"
 	"net"
@@ -403,6 +404,41 @@ type LogPostRequest struct {
 	RawJSON             string     `json:"raw_json,omitempty"`
 }
 
+// Bounds on an inbound event's occurred_at. The asymmetry is deliberate.
+//
+// Ahead of us is the dangerous direction: the windows engine anchors a new
+// session window directly on the newest event's timestamp (windows.go,
+// findEventEvidenceForOpen sets startTime = eventTime and endsAt =
+// eventTime+5h), and a future-dated event stays MAX(occurred_at) until real
+// time catches up — so it can mint a window that outlives the mistake. One
+// hour matches the snapshot path's maxObservedFuture.
+//
+// Behind us is mostly harmless: an old event cannot be the maximum unless
+// the table is otherwise empty, and a window minted in the past closes
+// immediately. The bound therefore only needs to catch a clock that has
+// collapsed entirely (an epoch reset, a VM restored from an old image),
+// and must stay well clear of legitimate backfills — the Stop hook re-walks
+// whole transcripts and re-posts events that are genuinely weeks old.
+//
+// This is a filter, not a repair. Skew inside the bounds is recorded as
+// sent; see docs/design-decisions.md.
+const (
+	maxLogOccurredFuture = 1 * time.Hour
+	maxLogOccurredPast   = 365 * 24 * time.Hour
+)
+
+// validateLogOccurredAt rejects an event timestamp far enough from the
+// receiving host's clock that it cannot be a real observation.
+func validateLogOccurredAt(occurredAt, now time.Time) error {
+	if occurredAt.After(now.Add(maxLogOccurredFuture)) {
+		return fmt.Errorf("occurred_at is in the future")
+	}
+	if occurredAt.Before(now.Add(-maxLogOccurredPast)) {
+		return fmt.Errorf("occurred_at is too far in the past")
+	}
+	return nil
+}
+
 // handleLog processes POST /log requests.
 func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	if !requireJSONPOST(w, r, maxBodyLog) {
@@ -450,6 +486,13 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	// Falls back to time.Now() for manual /log callers that don't set it.
 	occurredAt := time.Now()
 	if req.OccurredAt != nil {
+		if err := validateLogOccurredAt(*req.OccurredAt, time.Now()); err != nil {
+			slog.Warn("rejected /log event with out-of-range occurred_at",
+				"err", err, "occurred_at", *req.OccurredAt,
+				"session_id", req.SessionID, "source", req.Source)
+			writeJSONError(w, http.StatusBadRequest, "occurred_at out of range")
+			return
+		}
 		occurredAt = *req.OccurredAt
 	}
 

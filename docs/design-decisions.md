@@ -92,3 +92,76 @@ Windows-specific dependencies. The trayapp UI is the canonical example:
 - `docs/development.md` ("Build tags for Windows-specific code") is the
   procedural reference; this document is the architectural rationale.
   Update both if the strategy changes.
+
+## Clock skew on forwarded events is filtered, not corrected
+
+**Context.** With an uplink configured (`docs/configuration.md`,
+"Uplink"), a second machine's `usage_events` are POSTed to a host
+trayapp's `/log`. Those events carry the *sender's* `occurred_at`, and a
+VM's clock drifts — badly and discontinuously, because suspend/resume
+moves it in jumps rather than at a steady rate.
+
+This matters more than a timestamp usually would. `usage_events` is
+otherwise decoupled from the quota machinery — `internal/slack` computes
+purely from `windows.baseline_percent_used`, which snapshots populate,
+and no dollar figure from an event reaches the slack signal. But there
+is one coupling: `windows.Engine.findEventEvidenceForOpen` anchors a new
+session window directly on `MAX(occurred_at)`, taking `startTime =
+eventTime` and `endsAt = eventTime + 5h`. A future-dated event therefore
+mints a window in the future, and stays the maximum until wall-clock time
+catches up to it.
+
+**Decision.** The receiver bounds an inbound `occurred_at` and rejects
+anything outside it with 400 (`validateLogOccurredAt`). Inside the
+bounds, the timestamp is stored exactly as sent. Nothing measures the
+offset between the two machines, and nothing rewrites a timestamp.
+
+The bounds are asymmetric — one hour ahead, a year behind:
+
+- Ahead is the dangerous direction, per the window-minting behavior
+  above. One hour matches `maxObservedFuture` on the snapshot path.
+- Behind is mostly harmless: an old event cannot be `MAX(occurred_at)`
+  unless the table is otherwise empty, and a window minted in the past
+  closes immediately. The bound only needs to catch a clock that has
+  collapsed entirely (an epoch reset, a VM restored from an old image),
+  and it must stay well clear of legitimate backfills — the Stop hook
+  re-walks whole transcripts and re-posts events that are genuinely
+  weeks old.
+
+**Why not correct the skew.** Measuring the offset is cheap — every HTTP
+response already carries a `Date` header, and an explicit round-trip
+against `/healthz` would bound the uncertainty too. Applying it is where
+it stops being cheap:
+
+- A static offset is the wrong model. Suspend/resume moves the clock in
+  jumps, so an offset sampled at forward time is not the one that was
+  true at ingest time, and a buffered backlog would be corrected with a
+  number that belongs to a different era than the events it is applied
+  to.
+- Silent timestamp rewriting is out of character for this project.
+  `cost_source` records whether a number was `reported`, `computed`, or
+  a `ceiling` estimate rather than hiding the approximation;
+  `quota_snapshots` uses tri-state NULLs rather than inferring a value
+  it did not observe. A corrected `occurred_at` with no marker would be
+  the first place the database asserts something it did not see.
+- The failure is rare and diagnosable. A clock far enough off to matter
+  produces rejected events and a visible warning; one close enough not
+  to trip the bound produces an error smaller than the 5-hour window it
+  would have to cross to change anything.
+
+**Implications.**
+
+- A 400 from this filter is *permanent* from the sender's point of view.
+  `internal/uplink` therefore steps its cursor past a rejected event
+  rather than retrying it, because holding the cursor there would wedge
+  every later event behind one row that can never land. The rejection is
+  logged on both sides: as a warning on the receiver, and as a warning
+  naming the session and message on the sender.
+- This means a badly-skewed sender loses data silently-ish — the events
+  are dropped, not queued. That is the intended trade: the alternative
+  is either a stalled uplink or fabricated timestamps.
+- If skew detection is wanted later, the natural shape is a periodic
+  `/healthz` round-trip on the sender that raises an alert (tray icon,
+  feedback panel) without touching the data. The feedback buffer already
+  tees `slog.Warn` into the dashboard panel, so the reporting half needs
+  no new plumbing.

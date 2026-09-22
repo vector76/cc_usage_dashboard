@@ -229,6 +229,65 @@ or profile — "session window absent entirely" — which short-circuits to
 true when there is no active session window. See
 `docs/no-active-session.md` for the wiring.
 
+## Uplink
+
+`uplink.url` turns this trayapp into a *sending* instance: it forwards the
+usage events it records to another trayapp's `POST /log`. The motivating
+case is a VM running Claude Code against the same Anthropic account as the
+host — without forwarding, the host's event stream under-counts relative to
+the quota percentages the userscript scrapes, because Anthropic bills both
+against one account while only one machine records the tokens.
+
+```yaml
+uplink:
+  url: "http://192.168.56.1:27812"
+```
+
+Empty (the default) disables forwarding. A host-role trayapp never sets it.
+
+The value is a **base URL** — scheme plus host plus optional port, with no
+path, query, or fragment. The forwarder appends endpoint paths itself. A
+malformed value is rejected at load rather than at first use: a typo that
+merely stopped forwarding would surface days later as a hole in the
+receiving host's data, long after the cause was out of mind.
+
+What crosses the wire:
+
+- Events only. Quota snapshots are not forwarded — a VM has no browser on
+  claude.ai, and percent-of-quota is the receiver's business anyway.
+- Tokens and model, **not** cost. The receiver prices events from its own
+  `prices.yaml`, so a stale price table on the sender cannot skew the
+  combined numbers.
+- Only events carrying both `session_id` and `message_id`. Those are the
+  columns the receiver's uniqueness constraint covers, so they are the only
+  ones where re-sending is provably safe.
+
+Delivery is at-least-once and idempotent. The sender keeps a per-URL cursor
+(`uplink_cursor`) over `usage_events.id` and re-sends from it after a
+restart or an outage; duplicates collide on the receiver's
+`UNIQUE(session_id, message_id)` and are discarded with a `duplicate` flag
+rather than an error. Keying the cursor by URL means retargeting the uplink
+re-sends the backlog to the new receiver, which is what you want — the new
+receiver has none of it.
+
+### On the receiving host
+
+The receiver needs no `uplink` config, but it does need `http.bind`
+extended to an interface the sender can reach. The `Host` header allow-list
+follows automatically from whatever gets bound.
+
+Prefer a host-only adapter. `/log` is unauthenticated by design (see
+`docs/architecture.md`, "Network and security"), so binding it to an
+interface that reaches a general-purpose LAN publishes an unauthenticated
+write endpoint to that LAN.
+
+The receiver clamps `occurred_at` on inbound events to a bounded window
+around its own clock and rejects anything outside it, mirroring the
+existing snapshot-timestamp validation. This is a backstop against a
+sender whose clock has jumped — a VM's clock after suspend/resume is the
+common case. Within the bound, skew is *not* corrected; see
+`docs/design-decisions.md`.
+
 ## Path placeholders
 
 `%APPDATA%`, `%LOCALAPPDATA%`, `%USERPROFILE%`, and `%HOME%` placeholders

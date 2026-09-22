@@ -50,6 +50,39 @@ and no cross-machine state.
 +----------------------------------------------------------------------------+
 ```
 
+### Optional: a second machine forwarding in
+
+The topology above describes one host. A second trayapp — typically in a VM
+running Claude Code against the *same* Anthropic account — can be configured
+with an uplink (`uplink.url`, see `docs/configuration.md`) so its
+`usage_events` are POSTed to the host's `/log`:
+
+```
+  +------------- VM -------------+              +--------- Windows host ---------+
+  |  trayapp (uplink.url set)    |  POST /log   |  trayapp (uplink.url empty)    |
+  |   tailer -> own SQLite  -----+------------->|   /log -> shared SQLite        |
+  |   own dashboard (partial)    |              |   dashboard (combined)         |
+  +------------------------------+              +--------------------------------+
+```
+
+This exists because the quota is shared server-side but the recording is
+not: Anthropic bills both machines against one account, so the host's
+scraped percentages already include the VM's spend while its event stream
+does not. Without forwarding, the host's tokens and its percentages
+disagree — and the gap grows with VM usage.
+
+Only events move. Snapshots stay put (a VM has no browser on claude.ai),
+costs are recomputed by the receiver from its own price table, and the
+receiver's windows engine derives from the combined stream as if the events
+had been local — which is correct precisely because the quota is shared.
+Delivery is at-least-once over a durable per-peer cursor; re-delivery
+collapses against `UNIQUE(session_id, message_id)`.
+
+The VM's own dashboard necessarily shows only its own slice. If anything on
+the VM consumes `GET /slack` to release work, point it at the host's
+endpoint — a sender's local slack signal does not know about the quota the
+host has already spent.
+
 ## Components
 
 ### Tray app (`cmd/trayapp`, Windows)
@@ -161,6 +194,20 @@ failure means that turn is lost. See the failure-modes table below.
      an explicit `http.bind` entry rather than open every interface at once.
 - No authentication. The trust boundary is the host. Anything able to reach the bound
   interface is already running on this machine or its containers.
+- **Uplink senders inherit this.** A second machine forwarding to `/log` needs
+  the receiver to bind an interface it can reach. A host-only or NAT'd VM
+  adapter keeps the posture above intact — it is the same shape as the Docker
+  and WSL adapters already bound. A *bridged* adapter does not: it publishes an
+  unauthenticated write endpoint to whatever LAN the VM sits on, where anyone
+  could POST junk into `/log` and skew both the combined totals and the slack
+  gate that releases real work. Prefer a host-only adapter; if the topology
+  forces a shared LAN, the roadmap's token gate on `/log` stops being optional.
+- Inbound `occurred_at` on `/log` is bounded (one hour ahead, a year behind)
+  and out-of-range events are rejected with 400. Until the uplink existed every
+  writer was local and shared the host's clock; a forwarding sender makes a
+  foreign clock a real input, and the windows engine anchors new session windows
+  on the newest event's timestamp. See `docs/design-decisions.md`, "Clock skew
+  on forwarded events is filtered, not corrected".
 - Browser-mounted CSRF defence: every POST handler requires
   `Content-Type: application/json` and caps the body at a per-endpoint limit. The
   Content-Type check rejects "simple" cross-origin form posts a malicious site could

@@ -107,8 +107,11 @@ Exit criteria: a fresh user can install in <10 minutes from the README alone.
 ## Deferred (v2+)
 
 - **Tier 3 headless scrape.** Only if Tier 1 + Tier 2 prove insufficient in real use.
-- **Multi-host / Cloudflare tunnel.** Add a token gate to `/log` and put trayapp behind
-  cloudflared. Schema unchanged.
+- **Multi-host / Cloudflare tunnel.** Partly landed: `uplink.url` forwards one
+  trayapp's events to another over a trusted local adapter (see
+  `docs/configuration.md`), which covers the same-account VM case. Still
+  deferred is the untrusted-network half — a token gate on `/log` plus
+  cloudflared — without which the uplink must not cross a general-purpose LAN.
 - **Forecasting.** Replace uniform `E(t)` with a learned curve from trailing windows.
 - **Job runner.** A built-in queue that consumes the slack signal directly. The current
   design intentionally exposes only the signal; a runner is a separate project.

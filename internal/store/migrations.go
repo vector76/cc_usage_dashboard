@@ -161,6 +161,23 @@ ALTER TABLE quota_snapshots ADD COLUMN weekly_active INTEGER;
 ALTER TABLE quota_snapshots ADD COLUMN fable_weekly_used REAL;
 `,
 	},
+	{
+		Version: 8,
+		Name:    "create_uplink_cursor",
+		// How far a sending trayapp has forwarded its usage_events to a
+		// peer's POST /log. Keyed by the peer's base URL, not a singleton
+		// row: retargeting the uplink then re-sends the backlog to the new
+		// receiver, which is what you want — the new receiver holds none of
+		// it, and the old one's UNIQUE(session_id, message_id) discards any
+		// re-delivery. The table stays empty on a host-role trayapp.
+		SQL: `
+CREATE TABLE IF NOT EXISTS uplink_cursor (
+	url TEXT PRIMARY KEY,
+	last_event_id INTEGER NOT NULL,
+	updated_at TIMESTAMP NOT NULL
+);
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.

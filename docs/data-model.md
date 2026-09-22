@@ -40,6 +40,34 @@ Constraints:
   POST coexist without double-counting.
 - Index on `occurred_at` for window queries.
 
+### `uplink_cursor`
+
+How far a *sending* trayapp has forwarded its `usage_events` to a peer's
+`POST /log`. Empty on a host-role trayapp, which never forwards. Added by
+migration v8 (`create_uplink_cursor`).
+
+| Column        | Type       | Notes                                        |
+|---------------|------------|----------------------------------------------|
+| url           | TEXT PK    | The peer's base URL, as configured.          |
+| last_event_id | INTEGER    | Highest `usage_events.id` already settled.   |
+| updated_at    | TIMESTAMP  | When the cursor last advanced.               |
+
+Keyed by peer rather than being a singleton row: retargeting the uplink
+re-sends the backlog to the new receiver, which is correct — the new
+receiver holds none of it, and any re-delivery to the old one collapses
+against `UNIQUE(session_id, message_id)`.
+
+"Settled" is deliberately broader than "delivered". The cursor advances
+over an event the peer *permanently rejected* (a 4xx, e.g. the
+`occurred_at` filter answering 400 for a skewed clock) as well as over
+one it accepted, because a rejection that retrying cannot fix would
+otherwise wedge every later event behind it forever. Transient failures
+(5xx, 429, connection refused) do not advance it.
+
+The cursor is an optimisation, not a correctness mechanism. Losing it
+re-sends history; the receiver's uniqueness constraint absorbs the
+duplicates, so the cost is bandwidth.
+
 ### `quota_snapshots`
 
 One row per authoritative read of the quota state from the dashboard (via userscript or,
