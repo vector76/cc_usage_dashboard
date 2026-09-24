@@ -62,6 +62,7 @@ type Server struct {
 	dashboardHandler *dashboard.Handler
 	tailerStatus TailerStatus
 	reimporter   Reimporter
+	oauthStatus  OAuthStatusSource
 
 	// reimportInFlight guards against a second /admin/reimport request
 	// piling on while one is already running — the operation is already
@@ -158,6 +159,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("GET /api/usage/breakdown", srv.handleUsageBreakdown)
 	srv.mux.HandleFunc("GET /metrics", srv.handleMetrics)
 	srv.mux.HandleFunc("GET /api/feedback", srv.handleFeedback)
+	srv.mux.HandleFunc("GET /api/oauth/status", srv.handleOAuthStatus)
 	srv.mux.HandleFunc("POST /admin/reimport", srv.handleAdminReimport)
 	if srv.dashboardHandler != nil {
 		srv.dashboardHandler.Register(srv.mux)

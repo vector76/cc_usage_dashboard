@@ -30,6 +30,7 @@ and no cross-machine state.
 |  |    GET  /api/dashboard/state  <- JSON state powering the dashboard     ||
 |  |    GET  /api/feedback         <- recent warnings, unknown models,      ||
 |  |                                  parse errors (dashboard feedback panel)||
+|  |    GET  /api/oauth/status     <- OAuth usage poller health             ||
 |  |    GET  /favicon.{png,ico}    <- favicon                               ||
 |  |                                                                        ||
 |  |  SQLite DB (single file, WAL mode)                                     ||

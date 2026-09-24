@@ -278,6 +278,30 @@ through the same `Server.RecordSnapshot` path, so validation, raw-JSON
 retention, metrics and window derivation cannot drift between them. They are
 never averaged — see "Cross-source reconciliation" below.
 
+### Checking it works
+
+`GET /api/oauth/status` reports the poller's own health, separately from the
+shared snapshot counters, which cannot tell the sources apart:
+
+```json
+{"enabled": true, "available": true, "credential_stale": false,
+ "last_attempt": "2026-09-24T14:00:00Z", "last_success": "2026-09-24T14:00:00Z",
+ "last_error": ""}
+```
+
+- `enabled: false` means `oauth_usage.enabled` is off. That is a normal
+  configuration, so the endpoint still answers 200.
+- `available` reflects the most recent attempt only.
+- `credential_stale: true` is the routine, self-healing case above: the token
+  is waiting for Claude Code to refresh it. `available: false` without it is
+  the case that needs attention, and `last_error` says why.
+- `last_attempt` and `last_success` are `null` until first set. `last_success`
+  is kept through later failures, so the gap between the two is how long the
+  source has been down.
+
+The poller polls once at startup, so a restart reports a result within
+seconds.
+
 `TestLiveEndpoint` in `internal/oauthusage` is the schema-drift canary; it is
 skipped unless `OAUTH_USAGE_LIVE=1`.
 

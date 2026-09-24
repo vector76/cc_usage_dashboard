@@ -71,6 +71,11 @@ Provide both via a small `install.ps1` script that the user runs once.
 - `GET /metrics` — minimal Prometheus-style counters (events ingested, snapshots received,
   parse errors, slack queries). Useful even without a Prometheus server: it's a quick
   status dump for debugging.
+- `GET /api/oauth/status` — the OAuth usage poller's own health (`enabled`,
+  `available`, `credential_stale`, `last_attempt`, `last_success`,
+  `last_error`). The snapshot counter and snapshot age mix every source, so
+  this is the only way to tell whether OAuth polling works while the
+  userscript is also posting. See docs/data-sources.md "Checking it works".
 - Logs go to a rotating `trayapp.log` in `%LOCALAPPDATA%\usage_dashboard\`,
   beside the database — but only when no console is attached, which is the
   case for any `-H=windowsgui` build. Run a console build from a terminal and

@@ -212,6 +212,7 @@ func main() {
 			CredentialsPath: cfg.OAuthUsage.CredentialsPath,
 			Sink:            srv.OAuthSink(),
 		})
+		srv.SetOAuthStatus(usagePoller)
 		usagePoller.Start()
 		slog.Info("oauth usage polling enabled",
 			"interval_seconds", cfg.OAuthUsage.PollIntervalSeconds)
