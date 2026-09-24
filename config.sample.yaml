@@ -123,6 +123,10 @@ slack:
 #   enabled: false
 #   poll_interval_seconds: 180
 #   credentials_path: ""
+#   # Run `claude -p /usage` once when the token goes stale (it refreshes
+#   # the token). Needs enabled: true. Empty claude_path = claude on PATH.
+#   refresh_with_claude: false
+#   claude_path: ""
 
 # Price table override; empty means "use a prices.yaml found next to the
 # exe (or in the other search dirs), else the table embedded in the binary".

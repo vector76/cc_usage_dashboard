@@ -127,3 +127,69 @@ oauth_usage:
 		t.Fatalf("Load should tolerate a bad interval while disabled: %v", err)
 	}
 }
+
+// TestOAuthRefreshOffByDefault keeps running Claude Code a deliberate
+// choice: it is a second program acting on the user's account, not a side
+// effect an upgrade should switch on.
+func TestOAuthRefreshOffByDefault(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.OAuthUsage.RefreshWithClaude {
+		t.Error("expected oauth_usage.refresh_with_claude false by default")
+	}
+	if cfg.OAuthUsage.ClaudePath != "" {
+		t.Errorf("expected empty claude_path by default, got %q", cfg.OAuthUsage.ClaudePath)
+	}
+}
+
+func TestLoadOAuthRefreshSettings(t *testing.T) {
+	path := writeConfig(t, `
+oauth_usage:
+  enabled: true
+  refresh_with_claude: true
+  claude_path: "%USERPROFILE%/.local/bin/claude.exe"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !cfg.OAuthUsage.RefreshWithClaude {
+		t.Error("expected oauth_usage.refresh_with_claude true")
+	}
+	if strings.Contains(cfg.OAuthUsage.ClaudePath, "%USERPROFILE%") {
+		t.Errorf("expected claude_path placeholders expanded, got %q", cfg.OAuthUsage.ClaudePath)
+	}
+}
+
+// TestOAuthRefreshCommand pins the rule that the refresh only takes effect
+// alongside polling: with polling off there is no stale credential to act
+// on, so refresh_with_claude alone must run nothing.
+func TestOAuthRefreshCommand(t *testing.T) {
+	cases := []struct {
+		name    string
+		enabled bool
+		refresh bool
+		path    string
+		want    string
+	}{
+		{name: "both off", want: ""},
+		{name: "refresh without polling", refresh: true, want: ""},
+		{name: "refresh with explicit path but no polling", refresh: true, path: `C:\bin\claude.exe`, want: ""},
+		{name: "polling without refresh", enabled: true, want: ""},
+		{name: "both on, default path", enabled: true, refresh: true, want: "claude"},
+		{name: "both on, explicit path", enabled: true, refresh: true, path: `C:\bin\claude.exe`, want: `C:\bin\claude.exe`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg Config
+			cfg.OAuthUsage.Enabled = tc.enabled
+			cfg.OAuthUsage.RefreshWithClaude = tc.refresh
+			cfg.OAuthUsage.ClaudePath = tc.path
+			if got := cfg.OAuthRefreshCommand(); got != tc.want {
+				t.Errorf("OAuthRefreshCommand() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

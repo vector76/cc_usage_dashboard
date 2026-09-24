@@ -240,6 +240,8 @@ oauth_usage:
   enabled: false
   poll_interval_seconds: 180
   credentials_path: ""
+  refresh_with_claude: false
+  claude_path: ""
 ```
 
 **Off by default.** It makes scheduled requests to Anthropic's API, which is
@@ -266,6 +268,30 @@ itself runs, so a machine idle overnight sees this source report *temporarily
 unavailable* until the next session — not a parse error, and no restart needed
 to recover. See `docs/data-sources.md` "Tier 2b" for why the poller does not
 refresh the token itself.
+
+`refresh_with_claude: true` closes that gap by running `claude -p /usage`
+when the token is found stale; launching Claude Code refreshes the token.
+It takes effect only when `enabled` is also true. `claude_path` names the
+executable; empty means `claude` on `PATH`. The rules:
+
+- **One attempt per stale episode.** The attempt disarms the refresh, and only
+  a successful poll re-arms it. A refresh that does not help (claude missing,
+  logged out, or it simply did not rotate the token) is therefore not repeated
+  at every interval. The source waits until the token recovers some other way,
+  typically the user's next Claude Code session, and the *next* time it goes
+  stale it gets one more try.
+- **Only a stale credential triggers it**: an expired token, a 401, or a
+  missing credentials file or token. A server error or network failure does
+  not, and does not spend the attempt.
+- **Bounded.** An attempt that runs past two minutes is killed. On success the
+  poll is retried straight away rather than an interval later.
+- It runs with the per-user data dir as its working directory, so the
+  transcript Claude Code writes lands in a project of its own. On Windows it
+  runs with no console window.
+- Restarting the trayapp re-arms it, so each start can spend one attempt.
+
+`GET /api/oauth/status` reports `refresh_enabled`, `refresh_armed`,
+`last_refresh_attempt` and `last_refresh_error`.
 
 ## Uplink
 

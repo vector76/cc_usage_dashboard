@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -207,10 +208,30 @@ func main() {
 	// config.Load has already rejected an out-of-range interval.
 	var usagePoller *oauthusage.Poller
 	if cfg.OAuthUsage.Enabled {
+		// Optional stale-token refresh by running Claude Code, which
+		// refreshes the token on launch. The poller allows one attempt per
+		// stale episode, so a missing or logged-out claude is tried once
+		// and then left alone until the token recovers some other way.
+		// It runs from the app's own data dir so its transcripts land in a
+		// project of their own rather than in one of the user's.
+		var refresh oauthusage.RefreshFunc
+		if claudePath := cfg.OAuthRefreshCommand(); claudePath != "" {
+			if _, err := exec.LookPath(claudePath); err != nil {
+				slog.Warn("oauth refresh_with_claude: claude executable not found; refresh will fail",
+					"claude_path", claudePath, "err", err)
+			}
+			refreshDir := config.UserDataDir()
+			if err := os.MkdirAll(refreshDir, 0755); err != nil {
+				slog.Warn("oauth refresh_with_claude: cannot create working dir", "dir", refreshDir, "err", err)
+			}
+			refresh = oauthusage.NewClaudeRefresher(claudePath, refreshDir)
+			slog.Info("oauth stale-token refresh enabled", "claude_path", claudePath, "dir", refreshDir)
+		}
 		usagePoller = oauthusage.NewPoller(oauthusage.PollerConfig{
 			Interval:        time.Duration(cfg.OAuthUsage.PollIntervalSeconds) * time.Second,
 			CredentialsPath: cfg.OAuthUsage.CredentialsPath,
 			Sink:            srv.OAuthSink(),
+			Refresh:         refresh,
 		})
 		srv.SetOAuthStatus(usagePoller)
 		usagePoller.Start()

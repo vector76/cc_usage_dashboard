@@ -112,6 +112,15 @@ type Config struct {
 		// location", which honors CLAUDE_CONFIG_DIR — a literal default
 		// here would shadow that env var.
 		CredentialsPath string `yaml:"credentials_path"`
+		// RefreshWithClaude runs `claude -p /usage` when the poller finds
+		// the token stale, since launching Claude Code refreshes it. One
+		// attempt per stale episode: a run that does not help is not
+		// repeated until a poll succeeds again. Takes effect only with
+		// Enabled; see OAuthRefreshCommand.
+		RefreshWithClaude bool `yaml:"refresh_with_claude"`
+		// ClaudePath is the Claude Code executable the refresh runs.
+		// Empty means "claude" found on PATH.
+		ClaudePath string `yaml:"claude_path"`
 	} `yaml:"oauth_usage"`
 
 	EnableSlackSampling bool `yaml:"enable_slack_sampling"`
@@ -157,6 +166,8 @@ func Load(path string) (*Config, error) {
 	cfg.OAuthUsage.Enabled = false
 	cfg.OAuthUsage.PollIntervalSeconds = 180
 	cfg.OAuthUsage.CredentialsPath = ""
+	cfg.OAuthUsage.RefreshWithClaude = false
+	cfg.OAuthUsage.ClaudePath = ""
 	cfg.EnableSlackSampling = false
 
 	// If no path provided, return defaults
@@ -180,6 +191,7 @@ func Load(path string) (*Config, error) {
 	cfg.Claude.CoworkSessionsDir = expandPlaceholders(cfg.Claude.CoworkSessionsDir)
 	cfg.Pricing.TablePath = expandPlaceholders(cfg.Pricing.TablePath)
 	cfg.OAuthUsage.CredentialsPath = expandPlaceholders(cfg.OAuthUsage.CredentialsPath)
+	cfg.OAuthUsage.ClaudePath = expandPlaceholders(cfg.OAuthUsage.ClaudePath)
 
 	// Reject malformed slack profiles at startup with the offending key in
 	// the message, rather than letting the gate misbehave silently later.
@@ -210,6 +222,20 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+// OAuthRefreshCommand returns the Claude Code executable the stale-token
+// refresh should run, or "" when no refresh should happen. The refresh
+// only takes effect alongside polling: with polling off there is no stale
+// credential to act on.
+func (c *Config) OAuthRefreshCommand() string {
+	if !c.OAuthUsage.Enabled || !c.OAuthUsage.RefreshWithClaude {
+		return ""
+	}
+	if c.OAuthUsage.ClaudePath != "" {
+		return c.OAuthUsage.ClaudePath
+	}
+	return "claude"
 }
 
 // normalizeUplinkURL validates an uplink address and returns it with any

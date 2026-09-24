@@ -157,6 +157,46 @@ func TestHandleOAuthStatus_StaleCredentialAfterSuccess(t *testing.T) {
 	}
 }
 
+// A refresh that did not help leaves the source disarmed until it
+// recovers; the endpoint is how anyone outside the process can see that.
+func TestHandleOAuthStatus_RefreshState(t *testing.T) {
+	srv := newOAuthStatusServer(t)
+	at := time.Date(2026, 9, 24, 13, 0, 0, 0, time.UTC)
+	srv.SetOAuthStatus(fakeOAuthStatus{oauthusage.Status{
+		CredentialStale:    true,
+		LastAttempt:        at,
+		RefreshEnabled:     true,
+		RefreshArmed:       false,
+		LastRefreshAttempt: at,
+		LastRefreshError:   "credential still stale after refresh",
+	}})
+
+	_, body := getOAuthStatus(t, srv)
+	if body["refresh_enabled"] != true || body["refresh_armed"] != false {
+		t.Errorf("refresh_enabled/refresh_armed = %v/%v, want true/false", body["refresh_enabled"], body["refresh_armed"])
+	}
+	if body["last_refresh_attempt"] != at.Format(time.RFC3339) {
+		t.Errorf("last_refresh_attempt = %v, want %s", body["last_refresh_attempt"], at.Format(time.RFC3339))
+	}
+	if body["last_refresh_error"] != "credential still stale after refresh" {
+		t.Errorf("last_refresh_error = %v", body["last_refresh_error"])
+	}
+}
+
+// Before any refresh the attempt time is null, like the other times.
+func TestHandleOAuthStatus_NoRefreshYet(t *testing.T) {
+	srv := newOAuthStatusServer(t)
+	srv.SetOAuthStatus(fakeOAuthStatus{oauthusage.Status{RefreshEnabled: true, RefreshArmed: true}})
+
+	_, body := getOAuthStatus(t, srv)
+	if body["refresh_enabled"] != true || body["refresh_armed"] != true {
+		t.Errorf("refresh_enabled/refresh_armed = %v/%v, want true/true", body["refresh_enabled"], body["refresh_armed"])
+	}
+	if v, ok := body["last_refresh_attempt"]; !ok || v != nil {
+		t.Errorf("last_refresh_attempt = %v (present=%v), want null", v, ok)
+	}
+}
+
 // The real poller satisfies the interface the server accepts, so the
 // trayapp wiring compiles against the concrete type.
 func TestPollerSatisfiesOAuthStatusSource(t *testing.T) {

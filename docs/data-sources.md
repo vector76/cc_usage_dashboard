@@ -234,9 +234,19 @@ on a schedule.
   It deliberately does **not** refresh the token itself. If refresh tokens
   rotate single-use, losing a race against Claude Code's own refresh would log
   the user out of their primary tool — a poor trade for filling a mostly-idle
-  gap. `claude setup-token` is the escalation if uninterrupted coverage is ever
-  needed; `claude auth status` is not, as it reads local state and never
-  refreshes.
+  gap. `claude auth status` does not help either, as it reads local state and
+  never refreshes.
+
+  What it can do, opt-in (`oauth_usage.refresh_with_claude`), is have Claude
+  Code do the refresh: running `claude -p /usage` refreshes the token as a side
+  effect, so Claude Code's own refresh logic stays the only writer. It is
+  attempted once per stale episode and re-armed only by a successful poll, so
+  a run that does not help is never repeated in a loop (see
+  docs/configuration.md). Early observation was that this run opened a 5-hour
+  window when none was active; later observation suggests it no longer does.
+  That is Claude Code's behavior, not this app's, so it may change again.
+  `claude setup-token` remains the escalation if uninterrupted coverage is
+  ever needed.
 
 - **A 401 is not a broken source.** Both observed conditions ("token has
   expired", "token is invalid") return 401 with
@@ -286,7 +296,9 @@ shared snapshot counters, which cannot tell the sources apart:
 ```json
 {"enabled": true, "available": true, "credential_stale": false,
  "last_attempt": "2026-09-24T14:00:00Z", "last_success": "2026-09-24T14:00:00Z",
- "last_error": ""}
+ "last_error": "",
+ "refresh_enabled": true, "refresh_armed": true,
+ "last_refresh_attempt": null, "last_refresh_error": ""}
 ```
 
 - `enabled: false` means `oauth_usage.enabled` is off. That is a normal
@@ -298,6 +310,9 @@ shared snapshot counters, which cannot tell the sources apart:
 - `last_attempt` and `last_success` are `null` until first set. `last_success`
   is kept through later failures, so the gap between the two is how long the
   source has been down.
+- `refresh_*` describe `oauth_usage.refresh_with_claude`. `refresh_armed:
+  false` while `refresh_enabled` is true means an attempt did not help and no
+  other will be made until a poll succeeds; `last_refresh_error` says why.
 
 The poller polls once at startup, so a restart reports a result within
 seconds.

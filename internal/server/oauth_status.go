@@ -31,6 +31,14 @@ type OAuthStatusResponse struct {
 	LastAttempt     *time.Time `json:"last_attempt"`
 	LastSuccess     *time.Time `json:"last_success"`
 	LastError       string     `json:"last_error"`
+
+	// The refresh_* fields describe oauth_usage.refresh_with_claude.
+	// refresh_armed false with refresh_enabled true means an attempt did
+	// not help and no other will be made until a poll succeeds.
+	RefreshEnabled     bool       `json:"refresh_enabled"`
+	RefreshArmed       bool       `json:"refresh_armed"`
+	LastRefreshAttempt *time.Time `json:"last_refresh_attempt"`
+	LastRefreshError   string     `json:"last_refresh_error"`
 }
 
 // SetOAuthStatus attaches the poller whose health GET /api/oauth/status
@@ -53,6 +61,11 @@ func (s *Server) handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 			LastAttempt:     timeOrNil(st.LastAttempt),
 			LastSuccess:     timeOrNil(st.LastSuccess),
 			LastError:       st.LastError,
+
+			RefreshEnabled:     st.RefreshEnabled,
+			RefreshArmed:       st.RefreshArmed,
+			LastRefreshAttempt: timeOrNil(st.LastRefreshAttempt),
+			LastRefreshError:   st.LastRefreshError,
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

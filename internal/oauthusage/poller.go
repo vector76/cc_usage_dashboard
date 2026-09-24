@@ -35,6 +35,17 @@ type Status struct {
 	LastAttempt     time.Time
 	LastSuccess     time.Time
 	LastError       string
+
+	// RefreshEnabled is true when a RefreshFunc is configured.
+	RefreshEnabled bool
+	// RefreshArmed is true when the next stale credential will trigger a
+	// refresh. An attempt disarms it and only a successful poll re-arms
+	// it, so each stale episode gets at most one try.
+	RefreshArmed bool
+	// LastRefreshAttempt and LastRefreshError describe the most recent
+	// refresh. LastRefreshError is empty when that attempt worked.
+	LastRefreshAttempt time.Time
+	LastRefreshError   string
 }
 
 // PollerConfig configures a Poller. Client and Sink are required.
@@ -43,6 +54,11 @@ type PollerConfig struct {
 	CredentialsPath string
 	Client          *Client
 	Sink            Sink
+	// Refresh, when set, is run once when a poll finds the credential
+	// stale, and the poll is retried straight after. Nil disables it.
+	Refresh RefreshFunc
+	// RefreshTimeout bounds one refresh. Zero means defaultRefreshTimeout.
+	RefreshTimeout time.Duration
 	// Now defaults to time.Now. Injected in tests.
 	Now func() time.Time
 }
@@ -61,6 +77,9 @@ type Poller struct {
 	sink     Sink
 	now      func() time.Time
 
+	refresh        RefreshFunc
+	refreshTimeout time.Duration
+
 	stopChan chan struct{}
 	doneChan chan struct{}
 	stopOnce sync.Once
@@ -74,6 +93,9 @@ type Poller struct {
 	// writing the same warning every interval. Set when the condition is
 	// first reported, cleared on recovery.
 	staleLogged bool
+	// refreshArmed is what stops a refresh that does not help from being
+	// run again at every interval: see Status.RefreshArmed.
+	refreshArmed bool
 }
 
 // NewPoller builds a Poller. Call Start to begin polling.
@@ -86,14 +108,21 @@ func NewPoller(cfg PollerConfig) *Poller {
 	if client == nil {
 		client = NewClient()
 	}
+	refreshTimeout := cfg.RefreshTimeout
+	if refreshTimeout <= 0 {
+		refreshTimeout = defaultRefreshTimeout
+	}
 	return &Poller{
-		interval: cfg.Interval,
-		credPath: ResolveCredentialsPath(cfg.CredentialsPath),
-		client:   client,
-		sink:     cfg.Sink,
-		now:      now,
-		stopChan: make(chan struct{}),
-		doneChan: make(chan struct{}),
+		interval:       cfg.Interval,
+		credPath:       ResolveCredentialsPath(cfg.CredentialsPath),
+		client:         client,
+		sink:           cfg.Sink,
+		now:            now,
+		refresh:        cfg.Refresh,
+		refreshTimeout: refreshTimeout,
+		refreshArmed:   true,
+		stopChan:       make(chan struct{}),
+		doneChan:       make(chan struct{}),
 	}
 }
 
@@ -116,7 +145,10 @@ func (p *Poller) Stop() {
 func (p *Poller) Status() Status {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.status
+	st := p.status
+	st.RefreshEnabled = p.refresh != nil
+	st.RefreshArmed = p.refresh != nil && p.refreshArmed
+	return st
 }
 
 func (p *Poller) run() {
@@ -152,9 +184,66 @@ func (p *Poller) tick() {
 		}
 	}()
 
-	if err := p.PollOnce(ctx); err != nil {
+	if err := p.poll(ctx); err != nil {
 		p.logPollError(err)
 	}
+}
+
+// poll is PollOnce plus the stale-credential refresh: when the credential
+// is stale and the refresh is armed, it disarms, runs the refresh once, and
+// retries the poll straight away.
+//
+// Disarming before the attempt is what keeps a refresh that does not help
+// -- the command is missing, the user is logged out -- from being run again
+// at every interval. Only a successful poll re-arms it (see PollOnce),
+// whether this refresh or Claude Code running on its own brought the
+// credential back, so the next stale episode gets its own single attempt.
+func (p *Poller) poll(ctx context.Context) error {
+	err := p.PollOnce(ctx)
+	if err == nil || p.refresh == nil || !errors.Is(err, ErrCredentialStale) {
+		return err
+	}
+
+	p.mu.Lock()
+	if !p.refreshArmed {
+		p.mu.Unlock()
+		return err
+	}
+	p.refreshArmed = false
+	p.status.LastRefreshAttempt = p.now()
+	p.mu.Unlock()
+
+	slog.Info("oauth credential stale; running refresh command", "err", err)
+	rctx, cancel := context.WithTimeout(ctx, p.refreshTimeout)
+	rerr := p.refresh(rctx)
+	cancel()
+	if rerr != nil {
+		p.setRefreshError(rerr.Error())
+		slog.Warn("oauth credential refresh failed; not retrying until the credential recovers",
+			"err", rerr)
+		return err
+	}
+
+	err = p.PollOnce(ctx)
+	if err == nil {
+		p.setRefreshError("")
+		slog.Info("oauth credential refreshed")
+		return nil
+	}
+	msg := err.Error()
+	if errors.Is(err, ErrCredentialStale) {
+		msg = "credential still stale after refresh: " + msg
+	}
+	p.setRefreshError(msg)
+	slog.Warn("oauth credential refresh did not help; not retrying until the credential recovers",
+		"err", err)
+	return err
+}
+
+func (p *Poller) setRefreshError(msg string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.status.LastRefreshError = msg
 }
 
 // logPollError keeps a routine, self-healing condition from being shouted
@@ -239,6 +328,7 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 	p.status.LastError = ""
 	wasStale := p.staleLogged
 	p.staleLogged = false
+	p.refreshArmed = true
 	p.mu.Unlock()
 
 	if wasStale {
