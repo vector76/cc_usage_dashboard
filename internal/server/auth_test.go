@@ -184,3 +184,61 @@ func TestNoAuthConfiguredAllowsAll(t *testing.T) {
 		t.Errorf("expected 200 with no auth configured, got %d", w.Code)
 	}
 }
+
+// A token-bearing caller may name the host however it likes — by machine
+// name, mDNS name, or an address the allow-list never heard of. The Host
+// check exists for DNS rebinding, and a rebound page cannot present a
+// token it does not know.
+func TestAuthenticatedRemoteSkipsHostCheck(t *testing.T) {
+	srv, _ := authServer(t, "s3cret")
+	srv.SetAllowedHosts([]string{"127.0.0.1"}, 27812)
+
+	req := getFrom("192.168.56.10:50000", "Bearer s3cret")
+	req.Host = "jamie-pc:27812"
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for an authenticated caller using a hostname, got %d", w.Code)
+	}
+}
+
+// Without a token, a remote caller is refused whatever Host it sends.
+func TestUnauthenticatedRemoteRefusedWhateverHost(t *testing.T) {
+	srv, _ := authServer(t, "s3cret")
+	srv.SetAllowedHosts([]string{"127.0.0.1"}, 27812)
+
+	for _, host := range []string{"127.0.0.1:27812", "jamie-pc:27812", "attacker.example"} {
+		req := getFrom("192.168.56.10:50000", "")
+		req.Host = host
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		if w.Code == http.StatusOK {
+			t.Errorf("Host=%q: unauthenticated remote request was accepted", host)
+		}
+	}
+}
+
+// Loopback is where the Host check still does its job: the token gate
+// exempts loopback, so a page rebound to 127.0.0.1 is stopped only here.
+func TestLoopbackStillEnforcesHostCheck(t *testing.T) {
+	srv, _ := authServer(t, "s3cret")
+	srv.SetAllowedHosts([]string{"127.0.0.1"}, 27812)
+
+	req := getFrom("127.0.0.1:50000", "")
+	req.Host = "attacker.example"
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for a rebound loopback request, got %d", w.Code)
+	}
+
+	// Presenting the token does not buy a loopback caller out of the
+	// check: the rebinding defence must not hinge on a header.
+	req = getFrom("127.0.0.1:50000", "Bearer s3cret")
+	req.Host = "attacker.example"
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for a loopback request with a foreign Host even with a token, got %d", w.Code)
+	}
+}

@@ -43,12 +43,11 @@ database:
 http:
   port: 27812
   bind:
-    - 127.0.0.1
-    # Docker/WSL adapter IPs are auto-detected at startup; add explicit
-    # entries here only when the auto-detect misses your topology.
-    # 0.0.0.0 binds every interface and replaces the rest of the list.
-    # Either way, callers not on loopback must present the access token —
-    # see docs/architecture.md "Network and security".
+    - 0.0.0.0
+    # Every interface by default; callers not on loopback must present the
+    # access token — see docs/architecture.md "Network and security".
+    # Listing specific addresses instead narrows the listener to them plus
+    # 127.0.0.1 and any auto-detected Docker/WSL adapter IPs.
 
 claude:
   projects_dir: "~/.claude/projects"   # %USERPROFILE%\.claude\projects on Windows
@@ -351,11 +350,11 @@ receiver has none of it.
 
 ### On the receiving host
 
-The receiver needs no `uplink` config, but it does need `http.bind`
-extended to an interface the sender can reach — the host's address on the
-VM's adapter (e.g. `192.168.56.1`), or `0.0.0.0` for every interface. The
-`Host` header allow-list follows automatically from whatever gets bound, so
-the sender's `uplink.url` must use an IP address, not the host's name.
+The receiver needs no config at all: it binds every interface by default,
+and the sender's `uplink.url` may name it by IP address or by machine name
+(the `Host` check applies only to loopback callers). A receiver whose
+`http.bind` lists specific addresses must include one the sender can reach,
+such as the host's address on the VM's adapter (e.g. `192.168.56.1`).
 
 The access token lives in `auth_token` in the per-user data dir
 (`%LOCALAPPDATA%\usage_dashboard\` on Windows), generated on first start.

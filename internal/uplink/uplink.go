@@ -262,8 +262,9 @@ func (f *Forwarder) post(e store.ForwardableEvent) error {
 		return fmt.Errorf("peer rejected the access token (401); set uplink.token to the receiver's current token")
 
 	case resp.StatusCode == http.StatusForbidden:
-		// The receiver's Host allow-list refused the address we dialed —
-		// likewise a configuration problem, not a bad event.
+		// A receiver predating the loopback-only Host check refused the
+		// address we dialed — likewise a configuration problem, not a bad
+		// event.
 		return fmt.Errorf("peer refused the request (403); check that uplink.url names an address the receiver binds")
 
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:

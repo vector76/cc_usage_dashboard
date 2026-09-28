@@ -60,15 +60,16 @@ slack:
 # database:
 #   path: ""
 
-# Docker/WSL adapters are detected and bound automatically. Add an address
-# here to reach the trayapp from elsewhere (e.g. the host's IP on a VM's
-# host-only adapter), or 0.0.0.0 for every interface. Callers not on
-# loopback must present the access token from the tray menu ("Copy access
-# token") — see docs/architecture.md "Network and security".
+# The trayapp listens on every interface by default, so VMs and containers
+# can reach it with no config change here. Callers not on loopback must
+# present the access token from the tray menu ("Copy access token") — see
+# docs/architecture.md "Network and security". To narrow the listener, list
+# specific addresses instead; 127.0.0.1 and any detected Docker/WSL adapters
+# are then bound alongside them.
 # http:
 #   port: 27812
 #   bind:
-#     - 127.0.0.1
+#     - 0.0.0.0
 
 # ---------------------------------------------------------------------------
 # Uplink (optional)
@@ -76,8 +77,7 @@ slack:
 # Forward this machine's usage events to another trayapp, so a VM's or a
 # secondary machine's token spend lands in the primary host's database
 # alongside its own. Set this on the SENDING machine only; the receiving
-# host leaves it empty and just needs http.bind above extended to an
-# interface the sender can reach.
+# host leaves it empty; with its default bind it needs no config at all.
 #
 # token is the receiving host's access token, from its tray menu ("Copy
 # access token"). A receiver not on this machine's loopback refuses every

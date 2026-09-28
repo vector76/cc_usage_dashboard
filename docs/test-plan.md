@@ -203,12 +203,17 @@ click instead of taking action.
 
 ### Network binding
 
-- [ ] `netstat -an | findstr :27812` shows a listener on `127.0.0.1` and
-      one on the auto-detected Docker/WSL adapter IP (the IP that
-      `host.docker.internal` resolves to from inside containers).
+- [ ] With no `http.bind` configured, `netstat -an | findstr :27812` shows
+      a single `0.0.0.0:27812` listener.
+- [ ] `curl http://127.0.0.1:27812/healthz` succeeds with no token.
+- [ ] From another machine or a VM, `curl http://<host>:27812/healthz`
+      answers `401` without a token and `200` with
+      `-H "Authorization: Bearer <token>"`, whether `<host>` is an IP or
+      the machine name.
 - [ ] A Linux container started with `--add-host=host.docker.internal:host-gateway`
-      can `curl http://host.docker.internal:27812/healthz` and get `ok`.
-- [ ] No `0.0.0.0:27812` or public-IP listener is present.
+      and `CLUSAGE_TOKEN` set can run `clusage-cli ping` and get `OK`.
+- [ ] With `http.bind: [127.0.0.1]`, the listeners are `127.0.0.1` plus
+      the auto-detected Docker/WSL adapter IPs, and no `0.0.0.0` listener.
 
 ### Userscript end-to-end
 

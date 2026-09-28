@@ -183,7 +183,7 @@ not loopback:
 - Loopback is exempt, so the userscript, the dashboard, and host-side
   `curl` keep working with no setup, and the host keeps its old trust.
 - Docker/WSL containers are *not* exempt, even though they were trusted
-  before. Once `0.0.0.0` is an option, "came in on a Docker adapter" is not
+  before. Once `0.0.0.0` is the default, "came in on a Docker adapter" is not
   a boundary worth defending separately, and one rule — loopback or token —
   is easier to reason about than a list of trusted subnets. The cost is
   that every container's `CLUSAGE_TOKEN` must be set.
@@ -195,6 +195,21 @@ not loopback:
   `config.yaml`, which may sit in a checkout and is read only at start.
   Rotation from the tray swaps it in memory and on disk at once.
 - A failure to load the token fails closed.
+
+**Why bind every interface by default.** With the token in place, the
+remaining cost of a narrow default was a config edit on the host for every
+new client, and needing to know which adapter the client would arrive on.
+So the default is `0.0.0.0`, and a client needs only the token. The price
+is that the listener is on every network the host joins, where the token is
+the only thing in the way; anyone who wants the old shape lists specific
+addresses in `http.bind`.
+
+For the same reason the `Host` check applies only to loopback. It defends
+against DNS rebinding, which is a threat to callers that need no
+credential; a rebound page cannot present a token it does not know. Kept
+for token-bearing callers, it would only refuse a VM that names the host by
+its machine name. A loopback request is checked even when it carries a
+token, so the rebinding defence never depends on a header.
 
 **Why a rotation must not drop data.** The uplink skips events the receiver
 answers with a 4xx, because a 4xx usually means "this event will never be

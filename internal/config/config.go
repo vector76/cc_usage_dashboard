@@ -147,7 +147,11 @@ func Load(path string) (*Config, error) {
 	// process working directory.
 	cfg.Database.Path = ""
 	cfg.HTTP.Port = 27812
-	cfg.HTTP.Bind = []string{"127.0.0.1"}
+	// Every interface, so a VM or container reaches the trayapp with no
+	// config edits. Callers not on loopback must present the access token
+	// (see internal/server/auth.go). An explicit http.bind list replaces
+	// this with specific addresses.
+	cfg.HTTP.Bind = []string{"0.0.0.0"}
 	cfg.Claude.ProjectsDir = expandHome("~/.claude/projects")
 	cfg.Claude.CoworkSessionsDir = defaultCoworkSessionsDir()
 	// Empty means "use the resolution chain" (executable dir / app config

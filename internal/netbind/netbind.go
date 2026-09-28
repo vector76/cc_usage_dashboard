@@ -40,13 +40,13 @@ var ifaceAddrs = func(iface net.Interface) ([]net.Addr, error) {
 // falls inside a well-known Docker/WSL range is appended, followed by entries
 // from cfg.UserOverrides. Duplicates are removed while preserving order.
 //
-// 0.0.0.0 is never chosen automatically — only an explicit override binds
-// every interface, and it then stands alone: it already covers loopback and
-// each adapter, and binding it beside a specific address on the same port
-// fails with "address in use". Non-loopback callers must present the access
-// token either way (see docs/architecture.md "Network and security"), but an
-// explicit bind list still keeps the listener off networks it has no
-// business on.
+// An unspecified override (0.0.0.0 or ::) stands alone instead: it already
+// covers loopback and each adapter, and binding it beside a specific address
+// on the same port fails with "address in use". 0.0.0.0 is the configured
+// default (config.Load); the per-interface list above is what an explicit
+// http.bind of specific addresses produces. Non-loopback callers must present
+// the access token either way — see docs/architecture.md "Network and
+// security".
 func SelectBindAddrs(ifaces []net.Interface, cfg BindConfig) ([]string, error) {
 	for _, ov := range cfg.UserOverrides {
 		if ip := net.ParseIP(ov); ip != nil && ip.IsUnspecified() {

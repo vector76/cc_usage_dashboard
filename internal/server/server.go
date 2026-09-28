@@ -86,7 +86,8 @@ type Server struct {
 	httpServers []*http.Server
 
 	// allowedHosts is the set of acceptable Host header values for any
-	// inbound request. Set via SetAllowedHosts; nil means "no host check
+	// inbound request the token gate does not cover (see ServeHTTP). Set
+	// via SetAllowedHosts; nil means "no host check
 	// applied" (the in-process httptest path used by unit tests). The
 	// production wiring in cmd/trayapp must call SetAllowedHosts so DNS
 	// rebinding cannot smuggle requests in via a forged Host header.
@@ -183,11 +184,20 @@ func (s *Server) SetPriceTable(pt ingest.PriceTable) {
 	s.priceTable = pt
 }
 
-// ServeHTTP implements http.Handler. Every request first passes the Host
-// header allow-list (DNS rebinding defence), then the token gate for
-// non-loopback peers, before reaching the mux.
+// ServeHTTP implements http.Handler. A request must pass the token gate
+// (non-loopback peers) and the Host header allow-list (DNS rebinding
+// defence) before reaching the mux.
+//
+// The Host check is skipped for a peer the token gate covers. It exists to
+// stop a page rebound onto this machine's address from riding the trust of
+// a caller that needs no credential; a rebound page cannot present a token
+// it does not know, so for token-bearing callers the check adds nothing
+// and would only refuse a VM that names the host by its machine name.
+// Loopback, which the gate exempts, keeps the check. With no gate
+// configured (unit tests) every request is checked.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !s.hostAllowed(r.Host) {
+	tokenGated := s.auth != nil && !isLoopbackPeer(r.RemoteAddr)
+	if !tokenGated && !s.hostAllowed(r.Host) {
 		slog.Warn("rejected request with disallowed Host",
 			"host", r.Host, "remote", r.RemoteAddr, "path", r.URL.Path)
 		http.Error(w, "forbidden host", http.StatusForbidden)

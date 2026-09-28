@@ -184,18 +184,23 @@ failure means that turn is lost. See the failure-modes table below.
   Docker uses a `172.17.0.1`-style bridge instead. The exact interface is environment-
   dependent, so the trayapp resolves it at startup rather than hardcoding.
 - Binding strategy:
-  1. Always bind `127.0.0.1` for local-only callers (the userscript via the host
-     browser, manual `curl` from the host).
-  2. Enumerate the host's network interfaces and additionally bind any that match
-     well-known Docker / WSL ranges (Docker Desktop's vEthernet adapter, WSL adapter,
-     `172.16.0.0/12`, `192.168.65.0/24`). The user can append explicit addresses
-     via `http.bind` for topologies the auto-detect misses.
-  3. `0.0.0.0` is never chosen automatically. An explicit `http.bind: [0.0.0.0]`
-     entry binds every interface, and then stands alone — it already covers (1)
-     and (2), and binding it beside a specific address on the same port fails.
-     The token gate below is what makes this safe to offer; an explicit address
-     is still preferable, since it keeps the listener off networks it has no
-     business on (the hotel Wi-Fi a laptop joins next week).
+  - **Default: `0.0.0.0`, every interface.** A VM, a container, or another
+    machine can connect with no config change on the host; the token gate below
+    is what makes that safe. The cost is that the listener is on every network
+    the host joins, including ones it has no business on (the hotel Wi-Fi a
+    laptop joins next week) — there the token is the only thing in the way.
+    Windows Firewall prompts once for the new listener.
+  - **Narrowed: an explicit `http.bind` list of specific addresses** replaces
+    the default. Then:
+    1. `127.0.0.1` is always bound, for local-only callers (the userscript via
+       the host browser, manual `curl` from the host).
+    2. The host's interfaces are enumerated and any matching well-known Docker /
+       WSL ranges (Docker Desktop's vEthernet adapter, WSL adapter,
+       `172.16.0.0/12`, `192.168.65.0/24`) are bound too.
+    3. The listed addresses are appended.
+  - An unspecified address in the list (`0.0.0.0` or `::`) stands alone — it
+    already covers everything above, and binding it beside a specific address
+    on the same port fails.
 - **Access token for every non-loopback caller.** A request whose peer address
   is loopback (`127.0.0.0/8`, `::1`) is exempt. Every other request — a VM's
   uplink, a LAN host, and Docker/WSL containers alike — must carry
@@ -225,8 +230,9 @@ failure means that turn is lost. See the failure-modes table below.
     network; it does not stop someone who can read traffic on the wire. Remote
     access beyond a trusted local network still belongs behind TLS (see the
     Cloudflare tunnel note below).
-- **Uplink senders.** A second machine forwarding to `/log` needs the receiver to
-  bind an interface it can reach, and `uplink.token` set to the receiver's token.
+- **Uplink senders.** A second machine forwarding to `/log` needs only
+  `uplink.token` set to the receiver's token; the receiver's default bind already
+  reaches it.
   A `401` or `403` holds the sender's cursor rather than skipping the event —
   both mean "this sender is not allowed in", which no later event would fix — so
   a rotation costs latency, not data. A host-only adapter is still the better
@@ -243,13 +249,15 @@ failure means that turn is lost. See the failure-modes table below.
   Content-Type check rejects "simple" cross-origin form posts a malicious site could
   mount against `http://localhost:27812/...` from the user's browser; the body cap
   prevents a hostile caller from exhausting RAM or filling the DB with junk.
-- DNS-rebinding defence: every request's `Host` header must match the configured
+- DNS-rebinding defence: a loopback request's `Host` header must match the
   allow-list (`localhost`, `127.0.0.1`, `host.docker.internal`, plus each bound
   interface IP — or, under a `0.0.0.0` bind, every interface's IP). Without this,
-  a malicious site could rebind its hostname to 127.0.0.1 and bypass the
-  same-origin policy. This matters most for loopback, which the token gate
-  exempts. Callers must dial an IP or one of the well-known names; a machine
-  hostname is not in the list.
+  a malicious site could rebind its hostname to 127.0.0.1 and ride the token
+  gate's loopback exemption. Token-bearing (non-loopback) requests skip the
+  check: a rebound page cannot present a token it does not know, so the check
+  would add nothing there except refusing a VM that names the host by its
+  machine name. A loopback request is checked even if it carries a token, so the
+  rebinding defence never hinges on a header.
 - If the user later wants remote access beyond a trusted local network, route via
   Cloudflare tunnel + cloudflared Access policy. The token gate is sized for a
   VM or container next to the host, not for the internet.

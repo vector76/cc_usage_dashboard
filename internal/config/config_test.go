@@ -21,8 +21,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTP.Port != 27812 {
 		t.Errorf("expected port 27812, got %d", cfg.HTTP.Port)
 	}
-	if len(cfg.HTTP.Bind) != 1 || cfg.HTTP.Bind[0] != "127.0.0.1" {
-		t.Errorf("expected default bind [127.0.0.1], got %v", cfg.HTTP.Bind)
+	// Every interface by default, so a VM or container can connect without
+	// config edits; the access token gates everyone but loopback. An
+	// explicit http.bind list replaces this (see TestLoadFromFile).
+	if len(cfg.HTTP.Bind) != 1 || cfg.HTTP.Bind[0] != "0.0.0.0" {
+		t.Errorf("expected default bind [0.0.0.0], got %v", cfg.HTTP.Bind)
 	}
 	if cfg.Logging.Level != "info" {
 		t.Errorf("expected logging level 'info', got %q", cfg.Logging.Level)

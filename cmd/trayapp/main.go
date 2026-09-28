@@ -284,7 +284,8 @@ func main() {
 		close(trayDone)
 	}()
 
-	// Resolve bind addresses (loopback + detected Docker/WSL adapters + overrides).
+	// Resolve bind addresses: 0.0.0.0 by default, or loopback + detected
+	// Docker/WSL adapters + overrides when http.bind lists specific ones.
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		slog.Warn("failed to enumerate network interfaces", "err", err)
