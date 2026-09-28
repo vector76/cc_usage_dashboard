@@ -18,6 +18,10 @@ var (
 	host      = getenv("CLUSAGE_HOST", "host.docker.internal")
 	port      = getenv("CLUSAGE_PORT", "27812")
 	timeoutMs = getenv("CLUSAGE_TIMEOUT_MS", "2000")
+	// token is the trayapp's access token. The trayapp demands it from every
+	// caller not on loopback, which includes containers reaching it through
+	// host.docker.internal.
+	token = os.Getenv("CLUSAGE_TOKEN")
 )
 
 func main() {
@@ -67,7 +71,7 @@ func cmdPing() {
 	timeout := parseTimeout()
 	client := &http.Client{Timeout: timeout}
 
-	resp, err := client.Get(fmt.Sprintf("http://%s:%s/healthz", host, port))
+	resp, err := httpGet(client, fmt.Sprintf("http://%s:%s/healthz", host, port))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "connection refused\n")
 		os.Exit(3) // Exit code 3: host unreachable
@@ -75,7 +79,7 @@ func cmdPing() {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "health check failed: %d\n", resp.StatusCode)
+		fmt.Fprintf(os.Stderr, "health check failed: %s\n", statusText(resp.StatusCode))
 		os.Exit(5) // Exit code 5: host returned 5xx (or non-OK)
 	}
 
@@ -145,7 +149,7 @@ func cmdSlack() {
 	timeout := parseTimeout()
 	client := &http.Client{Timeout: timeout}
 
-	resp, err := client.Get(fmt.Sprintf("http://%s:%s/slack", host, port))
+	resp, err := httpGet(client, fmt.Sprintf("http://%s:%s/slack", host, port))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: connection refused\n")
 		os.Exit(3)
@@ -153,7 +157,7 @@ func cmdSlack() {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
+		fmt.Fprintf(os.Stderr, "error: %s\n", statusText(resp.StatusCode))
 		os.Exit(5)
 	}
 
@@ -189,11 +193,7 @@ func postEvent(payload map[string]interface{}) {
 	timeout := parseTimeout()
 	client := &http.Client{Timeout: timeout}
 
-	resp, err := client.Post(
-		fmt.Sprintf("http://%s:%s/log", host, port),
-		"application/json",
-		bytes.NewReader(body),
-	)
+	resp, err := httpPost(client, fmt.Sprintf("http://%s:%s/log", host, port), body)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: connection refused\n")
@@ -212,7 +212,7 @@ func postEvent(payload map[string]interface{}) {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		os.Exit(0) // Success
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
-		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
+		fmt.Fprintf(os.Stderr, "error: %s\n", statusText(resp.StatusCode))
 		os.Exit(4) // Exit code 4: 4xx error
 	default:
 		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
@@ -239,7 +239,7 @@ func cmdConsumption() {
 	// URL the server then can't parse.
 	q := url.Values{}
 	q.Set("period", *period)
-	resp, err := client.Get(fmt.Sprintf("%s/consumption?%s", hostURL(), q.Encode()))
+	resp, err := httpGet(client, fmt.Sprintf("%s/consumption?%s", hostURL(), q.Encode()))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: connection refused\n")
 		os.Exit(3)
@@ -247,7 +247,7 @@ func cmdConsumption() {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(os.Stderr, "error: %d\n", resp.StatusCode)
+		fmt.Fprintf(os.Stderr, "error: %s\n", statusText(resp.StatusCode))
 		os.Exit(5)
 	}
 
@@ -310,11 +310,7 @@ func cmdRelease() {
 	timeout := parseTimeout()
 	client := &http.Client{Timeout: timeout}
 
-	resp, err := client.Post(
-		fmt.Sprintf("%s/slack/release", hostURL()),
-		"application/json",
-		bytes.NewReader(body),
-	)
+	resp, err := httpPost(client, fmt.Sprintf("%s/slack/release", hostURL()), body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: connection refused\n")
 		os.Exit(3)
@@ -354,7 +350,7 @@ func cmdReimport() {
 	fs.Parse(os.Args[2:])
 
 	client := &http.Client{Timeout: parseTimeout()}
-	resp, err := client.Post(fmt.Sprintf("%s/admin/reimport", hostURL()), "application/json", bytes.NewReader(nil))
+	resp, err := httpPost(client, fmt.Sprintf("%s/admin/reimport", hostURL()), nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: connection refused\n")
 		os.Exit(3)
@@ -385,7 +381,7 @@ func cmdReimport() {
 	pollClient := &http.Client{Timeout: 5 * time.Second}
 	for time.Now().Before(deadline) {
 		time.Sleep(2 * time.Second)
-		hresp, err := pollClient.Get(fmt.Sprintf("%s/healthz", hostURL()))
+		hresp, err := httpGet(pollClient, fmt.Sprintf("%s/healthz", hostURL()))
 		if err != nil {
 			continue // transient; keep polling until the deadline
 		}
@@ -404,6 +400,42 @@ func cmdReimport() {
 	}
 	fmt.Fprintf(os.Stderr, "error: still not caught up after %s\n", *waitTimeout)
 	os.Exit(5)
+}
+
+// httpGet and httpPost attach the access token, when one is configured, to
+// every request the CLI makes.
+func httpGet(client *http.Client, url string) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	authorize(req)
+	return client.Do(req)
+}
+
+func httpPost(client *http.Client, url string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	authorize(req)
+	return client.Do(req)
+}
+
+func authorize(req *http.Request) {
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+// statusText renders an HTTP status for an error message, naming the fix
+// for the one failure whose cause is not obvious from the number.
+func statusText(code int) string {
+	if code == http.StatusUnauthorized {
+		return "401 (set CLUSAGE_TOKEN to the trayapp's access token)"
+	}
+	return fmt.Sprintf("%d", code)
 }
 
 func parseTimeout() time.Duration {

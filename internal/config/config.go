@@ -87,6 +87,10 @@ type Config struct {
 	// and is the default: a host-role trayapp never sets this.
 	Uplink struct {
 		URL string `yaml:"url"`
+		// Token is the receiver's access token, sent as a bearer token on
+		// every forwarded request. Any receiver not on loopback demands it;
+		// copy it from the receiver's tray menu ("Copy access token").
+		Token string `yaml:"token"`
 	} `yaml:"uplink"`
 
 	// OAuthUsage polls Claude Code's OAuth usage endpoint for the same
@@ -162,6 +166,7 @@ func Load(path string) (*Config, error) {
 	cfg.Retention.SlackSamplesDays = 90
 	// Empty means "do not forward" — see the Uplink field comment.
 	cfg.Uplink.URL = ""
+	cfg.Uplink.Token = ""
 	// Opt-in; three minutes when enabled. See the OAuthUsage field comment.
 	cfg.OAuthUsage.Enabled = false
 	cfg.OAuthUsage.PollIntervalSeconds = 180
@@ -211,6 +216,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config uplink.url: %w", err)
 	}
 	cfg.Uplink.URL = normalized
+	cfg.Uplink.Token = strings.TrimSpace(cfg.Uplink.Token)
 
 	// Only meaningful when something will actually poll: a stale or
 	// nonsense interval left behind in a disabled block should not block

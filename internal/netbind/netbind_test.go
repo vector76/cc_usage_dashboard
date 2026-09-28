@@ -204,3 +204,84 @@ func TestSelectBindAddrsRealInterfaces(t *testing.T) {
 		t.Fatalf("expected 127.0.0.1 first, got %v", got)
 	}
 }
+
+// withSyntheticIfaces installs fake per-interface addresses for one test and
+// returns matching up (non-loopback) interfaces.
+func withSyntheticIfaces(t *testing.T, byName map[string][]net.Addr) []net.Interface {
+	t.Helper()
+	old := ifaceAddrs
+	t.Cleanup(func() { ifaceAddrs = old })
+	ifaceAddrs = func(iface net.Interface) ([]net.Addr, error) {
+		return byName[iface.Name], nil
+	}
+	var ifaces []net.Interface
+	i := 1
+	for name := range byName {
+		ifaces = append(ifaces, net.Interface{Index: i, Name: name, Flags: net.FlagUp})
+		i++
+	}
+	return ifaces
+}
+
+// 0.0.0.0 already covers loopback and every adapter, and binding it
+// alongside a specific address on the same port fails with "address in use",
+// so a wildcard override replaces the list instead of joining it.
+func TestSelectBindAddrsWildcardReplacesList(t *testing.T) {
+	ifaces := withSyntheticIfaces(t, map[string][]net.Addr{
+		"docker0": {&net.IPNet{IP: net.ParseIP("172.17.0.1"), Mask: net.CIDRMask(16, 32)}},
+	})
+	for _, wildcard := range []string{"0.0.0.0", "::"} {
+		t.Run(wildcard, func(t *testing.T) {
+			got, err := SelectBindAddrs(ifaces, BindConfig{UserOverrides: []string{"192.168.56.1", wildcard}})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, []string{wildcard}) {
+				t.Errorf("got %v, want only %q", got, wildcard)
+			}
+		})
+	}
+}
+
+func TestIsWildcard(t *testing.T) {
+	if !IsWildcard([]string{"0.0.0.0"}) || !IsWildcard([]string{"::"}) {
+		t.Error("unspecified addresses must count as wildcard")
+	}
+	if IsWildcard([]string{"127.0.0.1", "172.17.0.1"}) {
+		t.Error("specific addresses are not a wildcard")
+	}
+}
+
+// Under a wildcard bind the Host allow-list cannot be derived from the bound
+// address itself, so it must name every address a client could have dialed.
+func TestHostAddrsForWildcardListsEveryInterface(t *testing.T) {
+	ifaces := withSyntheticIfaces(t, map[string][]net.Addr{
+		"eth0":  {&net.IPNet{IP: net.ParseIP("192.168.1.20"), Mask: net.CIDRMask(24, 32)}},
+		"vmnet": {&net.IPNet{IP: net.ParseIP("192.168.56.1"), Mask: net.CIDRMask(24, 32)}},
+	})
+	got := HostAddrs(ifaces, []string{"0.0.0.0"})
+	want := map[string]bool{"127.0.0.1": true, "192.168.1.20": true, "192.168.56.1": true}
+	gotSet := map[string]bool{}
+	for _, a := range got {
+		gotSet[a] = true
+		if a == "0.0.0.0" {
+			t.Error("0.0.0.0 is never a valid Host header value")
+		}
+	}
+	for a := range want {
+		if !gotSet[a] {
+			t.Errorf("missing %s in %v", a, got)
+		}
+	}
+}
+
+// Without a wildcard the bound addresses are the allow-list, as before.
+func TestHostAddrsForSpecificBindsIsTheBindList(t *testing.T) {
+	ifaces := withSyntheticIfaces(t, map[string][]net.Addr{
+		"eth0": {&net.IPNet{IP: net.ParseIP("192.168.1.20"), Mask: net.CIDRMask(24, 32)}},
+	})
+	bound := []string{"127.0.0.1", "172.17.0.1"}
+	if got := HostAddrs(ifaces, bound); !reflect.DeepEqual(got, bound) {
+		t.Errorf("got %v, want %v", got, bound)
+	}
+}

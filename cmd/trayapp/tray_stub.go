@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/vector76/cc_usage_dashboard/internal/authtoken"
 	"github.com/vector76/cc_usage_dashboard/internal/server"
 )
 
@@ -13,8 +14,11 @@ import (
 // trayapp still runs as a headless HTTP server on Linux/macOS; this stub
 // satisfies the build-tag pattern documented in docs/development.md and
 // blocks until the supplied context is cancelled so the calling goroutine
-// has a stable lifetime regardless of platform.
-func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle() }, dashboardURL string) {
-	slog.Info("tray UI not available on this platform; running headless", "dashboard", dashboardURL)
+// has a stable lifetime regardless of platform. Without a tray menu the
+// access token is read from its file, and rotated by deleting the file and
+// restarting.
+func StartTray(ctx context.Context, srv *server.Server, paused interface{ Toggle() }, tokens *authtoken.Store, dashboardURL string) {
+	slog.Info("tray UI not available on this platform; running headless",
+		"dashboard", dashboardURL, "access_token_file", tokens.Path())
 	<-ctx.Done()
 }

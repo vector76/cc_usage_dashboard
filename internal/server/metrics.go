@@ -15,6 +15,7 @@ type Metrics struct {
 	ParseErrors       atomic.Int64
 	SlackQueries      atomic.Int64
 	SlackReleases     atomic.Int64
+	AuthRejected      atomic.Int64
 
 	mu             sync.RWMutex
 	eventsIngested map[string]*atomic.Int64
@@ -90,4 +91,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintln(w, "# HELP slack_releases_total Total slack releases recorded.")
 	fmt.Fprintln(w, "# TYPE slack_releases_total counter")
 	fmt.Fprintf(w, "slack_releases_total %d\n", s.metrics.SlackReleases.Load())
+
+	fmt.Fprintln(w, "# HELP auth_rejected_total Total non-loopback requests rejected for a missing or invalid access token.")
+	fmt.Fprintln(w, "# TYPE auth_rejected_total counter")
+	fmt.Fprintf(w, "auth_rejected_total %d\n", s.metrics.AuthRejected.Load())
 }

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/vector76/cc_usage_dashboard/internal/authtoken"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 	"github.com/vector76/cc_usage_dashboard/internal/uplink"
 )
@@ -241,4 +244,90 @@ func TestE2E_UplinkSetsContentTypeAcceptedByReceiver(t *testing.T) {
 	if w.Code == http.StatusOK {
 		t.Error("expected the receiver to refuse a POST with no Content-Type")
 	}
+}
+
+// remoteReceiver serves the receiver's real handler with the token gate on,
+// and presents every connection as coming from a VM address. The httptest
+// listener itself is on loopback, which the gate exempts, so without the
+// rewrite this would never exercise the gate at all.
+func remoteReceiver(t *testing.T) (*testEnv, *authtoken.Store, string) {
+	t.Helper()
+	env := newTestEnv(t, pricesExampleYAML)
+	tokens, err := authtoken.Load(filepath.Join(t.TempDir(), authtoken.FileName))
+	if err != nil {
+		t.Fatalf("authtoken.Load: %v", err)
+	}
+	env.srv.SetAuth(tokens)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = "192.168.56.10:50000"
+		env.srv.ServeHTTP(w, r)
+	}))
+	t.Cleanup(ts.Close)
+	return env, tokens, ts.URL
+}
+
+func authRejections(t *testing.T, env *testEnv) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.RemoteAddr = "127.0.0.1:1" // loopback, so /metrics itself needs no token
+	w := httptest.NewRecorder()
+	env.srv.ServeHTTP(w, req)
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if strings.HasPrefix(line, "auth_rejected_total ") {
+			return strings.TrimPrefix(line, "auth_rejected_total ")
+		}
+	}
+	return ""
+}
+
+func TestE2E_UplinkWithTokenPassesReceiverGate(t *testing.T) {
+	sender := senderStore(t)
+	env, tokens, peerURL := remoteReceiver(t)
+	addSenderEvent(t, sender, "vm-msg-1", time.Now().Add(-time.Minute).UTC())
+
+	f := uplink.New(peerURL, sender)
+	f.SetToken(tokens.Token())
+	f.Start()
+	t.Cleanup(f.Stop)
+
+	waitForEventCount(t, env, 1)
+}
+
+// The rotation story end to end: after the receiver rotates, a sender still
+// holding the old token lands nothing but loses nothing either — once it is
+// given the new token, the whole backlog arrives.
+func TestE2E_UplinkBacklogSurvivesTokenRotation(t *testing.T) {
+	sender := senderStore(t)
+	env, tokens, peerURL := remoteReceiver(t)
+	addSenderEvent(t, sender, "vm-msg-1", time.Now().Add(-2*time.Minute).UTC())
+	addSenderEvent(t, sender, "vm-msg-2", time.Now().Add(-time.Minute).UTC())
+
+	stale := tokens.Token()
+	if _, err := tokens.Rotate(); err != nil {
+		t.Fatalf("Rotate: %v", err)
+	}
+
+	f := uplink.New(peerURL, sender)
+	f.SetToken(stale)
+	f.Start()
+	deadline := time.Now().Add(5 * time.Second)
+	for authRejections(t, env) == "0" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	f.Stop()
+	if authRejections(t, env) == "0" {
+		t.Fatal("the stale-token forwarder never reached the receiver")
+	}
+	if n := countEvents(t, env); n != 0 {
+		t.Fatalf("a stale token must not land events, receiver has %d", n)
+	}
+	if cursor, _ := sender.GetUplinkCursor(peerURL); cursor != 0 {
+		t.Fatalf("a rejected token must not consume the backlog, cursor at %d", cursor)
+	}
+
+	fixed := uplink.New(peerURL, sender)
+	fixed.SetToken(tokens.Token())
+	fixed.Start()
+	t.Cleanup(fixed.Stop)
+	waitForEventCount(t, env, 2)
 }

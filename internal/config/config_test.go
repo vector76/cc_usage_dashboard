@@ -522,3 +522,23 @@ func TestLoadRejectsBadUplinkURL(t *testing.T) {
 		})
 	}
 }
+
+// The sender presents uplink.token to the receiver's access gate. It is
+// pasted from the receiver's tray menu, so stray whitespace from the paste
+// is trimmed rather than sent as part of the token.
+func TestLoadUplinkToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "uplink:\n  url: \"http://192.168.56.1:27812\"\n  token: \"  abc123 \"\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.Uplink.Token != "abc123" {
+		t.Errorf("expected trimmed token %q, got %q", "abc123", cfg.Uplink.Token)
+	}
+}

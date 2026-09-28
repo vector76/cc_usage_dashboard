@@ -165,3 +165,49 @@ it stops being cheap:
   feedback panel) without touching the data. The feedback buffer already
   tees `slog.Warn` into the dashboard panel, so the reporting half needs
   no new plumbing.
+
+## Non-loopback callers need a token; loopback does not
+
+**Context.** The HTTP server originally had no authentication. The trust
+boundary was the host: it bound only loopback and auto-detected Docker/WSL
+adapters, so anything that could connect was already on this machine or
+its containers, and `docs/architecture.md` said outright not to add bespoke
+auth. The uplink broke that assumption. A VM on a bridged adapter, or a
+receiver bound to `0.0.0.0`, publishes an unauthenticated write endpoint
+to the LAN, where a stray or hostile POST to `/log` skews both the totals
+and the slack gate that releases real work.
+
+**Decision.** A per-install bearer token, demanded from every peer that is
+not loopback:
+
+- Loopback is exempt, so the userscript, the dashboard, and host-side
+  `curl` keep working with no setup, and the host keeps its old trust.
+- Docker/WSL containers are *not* exempt, even though they were trusted
+  before. Once `0.0.0.0` is an option, "came in on a Docker adapter" is not
+  a boundary worth defending separately, and one rule — loopback or token —
+  is easier to reason about than a list of trusted subnets. The cost is
+  that every container's `CLUSAGE_TOKEN` must be set.
+- The decision uses the TCP peer address, never a header such as
+  `X-Forwarded-For`, which any caller can forge.
+- Reads are gated as well as writes: `/slack` and `/consumption` disclose
+  usage, and a gate on `/log` alone would leave the dashboard on the LAN.
+- The token lives in its own file in the per-user data dir, not in
+  `config.yaml`, which may sit in a checkout and is read only at start.
+  Rotation from the tray swaps it in memory and on disk at once.
+- A failure to load the token fails closed.
+
+**Why a rotation must not drop data.** The uplink skips events the receiver
+answers with a 4xx, because a 4xx usually means "this event will never be
+accepted" (a skewed `occurred_at`). A `401` or `403` means the opposite —
+"this sender is not allowed in" — and would reject every later event the
+same way, so treating it as permanent would silently drain the whole
+backlog after a rotation. Both hold the cursor instead.
+
+**Why not TLS, HMAC request signing, or per-client tokens.** The threat is
+accidental or casual writes from a local network, and a 256-bit bearer
+token stops those. Signing would hide the token from a passive sniffer but
+not the usage data beside it; hiding both needs TLS, which is the
+Cloudflare tunnel's job for anything beyond a trusted network. Per-client
+tokens would allow revoking one VM without touching the others, at the cost
+of a token registry and a management UI; with one or two clients, rotating
+the single token and re-pasting it is cheaper.

@@ -142,6 +142,10 @@ the CLI in the container so its Stop hook POSTs per-message usage to the host:
 ```bash
 go install github.com/vector76/cc_usage_dashboard/cmd/clusage-cli@latest
 
+# The host refuses callers not on its loopback without its access token.
+# Copy it from the tray menu ("Copy access token") into the container's env:
+export CLUSAGE_TOKEN=<token>
+
 # Wire it into ~/.claude/settings.json:
 #   "Stop": [{ "hooks": [{ "type": "command", "command": "clusage-cli log --from-hook || true" }] }]
 ```

@@ -151,11 +151,7 @@ func postEventPayloadTo(hostURL string, eventPayload map[string]interface{}) boo
 	timeout := parseTimeout()
 	client := &http.Client{Timeout: timeout}
 
-	resp, err := client.Post(
-		hostURL+"/log",
-		"application/json",
-		bytes.NewReader(body),
-	)
+	resp, err := httpPost(client, hostURL+"/log", body)
 
 	if err != nil {
 		return false

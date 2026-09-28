@@ -45,9 +45,10 @@ http:
   bind:
     - 127.0.0.1
     # Docker/WSL adapter IPs are auto-detected at startup; add explicit
-    # entries here only when the auto-detect misses your topology. There
-    # is no 0.0.0.0 fallback — see docs/architecture.md "Network and
-    # security" for the rationale.
+    # entries here only when the auto-detect misses your topology.
+    # 0.0.0.0 binds every interface and replaces the rest of the list.
+    # Either way, callers not on loopback must present the access token —
+    # see docs/architecture.md "Network and security".
 
 claude:
   projects_dir: "~/.claude/projects"   # %USERPROFILE%\.claude\projects on Windows
@@ -305,9 +306,23 @@ against one account while only one machine records the tokens.
 ```yaml
 uplink:
   url: "http://192.168.56.1:27812"
+  token: "<paste from the receiver's tray menu>"
 ```
 
-Empty (the default) disables forwarding. A host-role trayapp never sets it.
+Empty `url` (the default) disables forwarding. A host-role trayapp never
+sets it.
+
+`token` is the receiver's access token, sent as a bearer token on every
+forwarded request. The receiver refuses any caller not on its loopback
+without it, so in practice every uplink needs it. Copy it on the receiving
+host from the tray menu, "Copy access token". Surrounding whitespace is
+trimmed. An empty token with a non-empty `url` is a startup warning, not
+an error.
+
+When the receiver answers `401` — typically because its token was rotated —
+the sender holds its cursor and logs `peer rejected the access token` on
+each tick. Nothing is skipped: once `token` is updated and the sender
+restarted, the backlog drains.
 
 The value is a **base URL** — scheme plus host plus optional port, with no
 path, query, or fragment. The forwarder appends endpoint paths itself. A
@@ -337,13 +352,20 @@ receiver has none of it.
 ### On the receiving host
 
 The receiver needs no `uplink` config, but it does need `http.bind`
-extended to an interface the sender can reach. The `Host` header allow-list
-follows automatically from whatever gets bound.
+extended to an interface the sender can reach — the host's address on the
+VM's adapter (e.g. `192.168.56.1`), or `0.0.0.0` for every interface. The
+`Host` header allow-list follows automatically from whatever gets bound, so
+the sender's `uplink.url` must use an IP address, not the host's name.
 
-Prefer a host-only adapter. `/log` is unauthenticated by design (see
-`docs/architecture.md`, "Network and security"), so binding it to an
-interface that reaches a general-purpose LAN publishes an unauthenticated
-write endpoint to that LAN.
+The access token lives in `auth_token` in the per-user data dir
+(`%LOCALAPPDATA%\usage_dashboard\` on Windows), generated on first start.
+The tray menu copies it or rotates it; rotation refuses the old token from
+the next request on, without a restart. See `docs/architecture.md`,
+"Network and security".
+
+Prefer a host-only adapter to a bridged one. The token keeps other machines
+on a shared LAN from writing to `/log`, but the traffic is plain HTTP, so a
+bridged adapter still exposes it to anyone watching that network.
 
 The receiver clamps `occurred_at` on inbound events to a bounded window
 around its own clock and rejects anything outside it, mirroring the

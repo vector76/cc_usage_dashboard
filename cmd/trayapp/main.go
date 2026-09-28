@@ -16,6 +16,7 @@ import (
 	"time"
 
 	ccusage "github.com/vector76/cc_usage_dashboard"
+	"github.com/vector76/cc_usage_dashboard/internal/authtoken"
 	"github.com/vector76/cc_usage_dashboard/internal/config"
 	"github.com/vector76/cc_usage_dashboard/internal/feedback"
 	"github.com/vector76/cc_usage_dashboard/internal/ingest"
@@ -148,6 +149,18 @@ func main() {
 
 	srv := server.New(db, cfg)
 
+	// Every caller not on loopback must present this token. It is kept in
+	// the per-user data dir, never in config.yaml (which may sit in a
+	// checkout), and the tray menu copies or rotates it. A load failure fails closed:
+	// the empty store rejects every token, so loopback keeps working and
+	// nothing else gets in.
+	tokens, err := authtoken.Load(filepath.Join(config.UserDataDir(), authtoken.FileName))
+	if err != nil {
+		slog.Error("failed to load access token; non-loopback callers will be refused", "err", err)
+		tokens = &authtoken.Store{}
+	}
+	srv.SetAuth(tokens)
+
 	// Resolve the price table once (explicit config path -> local prices.yaml
 	// override -> embedded default) and share it between the server's cost
 	// handlers and the tailer, so a single table drives all cost computation.
@@ -193,6 +206,11 @@ func main() {
 	var forwarder *uplink.Forwarder
 	if cfg.Uplink.URL != "" {
 		forwarder = uplink.New(cfg.Uplink.URL, db)
+		forwarder.SetToken(cfg.Uplink.Token)
+		if cfg.Uplink.Token == "" {
+			slog.Warn("uplink.token is empty; a receiver that is not on this machine's loopback will refuse every event",
+				"peer", cfg.Uplink.URL)
+		}
 		forwarder.Start()
 	}
 
@@ -262,7 +280,7 @@ func main() {
 	dashboardURL := fmt.Sprintf("http://127.0.0.1:%d", cfg.HTTP.Port)
 	trayDone := make(chan struct{})
 	go func() {
-		StartTray(trayCtx, srv, pauseToggle{c: srv.SlackCalculator()}, dashboardURL)
+		StartTray(trayCtx, srv, pauseToggle{c: srv.SlackCalculator()}, tokens, dashboardURL)
 		close(trayDone)
 	}()
 
@@ -280,17 +298,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	if netbind.IsWildcard(bindAddrs) {
+		slog.Info("listening on every interface; callers not on loopback must present the access token",
+			"bind", bindAddrs[0])
+	}
+
 	// Configure the Host header allow-list before any goroutine starts
 	// accepting traffic, so DNS-rebinding requests cannot slip in during
-	// startup. The list combines every interface we bind to with the
-	// well-known names (localhost, 127.0.0.1, host.docker.internal) that
-	// the userscript and containers actually use.
-	srv.SetAllowedHosts(bindAddrs, cfg.HTTP.Port)
+	// startup. The list combines every address a client could have dialed
+	// (the bound interfaces, or under a wildcard bind every interface's
+	// address) with the well-known names (localhost, 127.0.0.1,
+	// host.docker.internal) that the userscript and containers actually use.
+	srv.SetAllowedHosts(netbind.HostAddrs(ifaces, bindAddrs), cfg.HTTP.Port)
 
 	serverErr := make(chan error, len(bindAddrs))
 
 	for _, host := range bindAddrs {
-		addr := fmt.Sprintf("%s:%d", host, cfg.HTTP.Port)
+		// JoinHostPort brackets IPv6 addresses ("[::]:27812"); Sprintf
+		// would produce an unparseable ":::27812".
+		addr := net.JoinHostPort(host, fmt.Sprint(cfg.HTTP.Port))
 		// srv.ListenAndServe logs "starting HTTP server" itself; don't log
 		// again here or every address shows up twice in the log.
 		go func(a string) {

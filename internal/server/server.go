@@ -92,6 +92,11 @@ type Server struct {
 	// rebinding cannot smuggle requests in via a forged Host header.
 	allowedHosts map[string]struct{}
 
+	// auth gates non-loopback callers on a bearer token. nil disables the
+	// gate (unit tests); cmd/trayapp always sets it. See auth.go.
+	auth         TokenChecker
+	lastAuthWarn atomic.Int64
+
 	// now returns the wall clock used by request handlers that need to
 	// validate timestamps relative to "now" (currently the snapshot
 	// handler's *_window_ends bounds check). Defaults to time.Now;
@@ -179,12 +184,17 @@ func (s *Server) SetPriceTable(pt ingest.PriceTable) {
 }
 
 // ServeHTTP implements http.Handler. Every request first passes the Host
-// header allow-list (DNS rebinding defence) before reaching the mux.
+// header allow-list (DNS rebinding defence), then the token gate for
+// non-loopback peers, before reaching the mux.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !s.hostAllowed(r.Host) {
 		slog.Warn("rejected request with disallowed Host",
 			"host", r.Host, "remote", r.RemoteAddr, "path", r.URL.Path)
 		http.Error(w, "forbidden host", http.StatusForbidden)
+		return
+	}
+	if !s.authorized(r) {
+		s.rejectUnauthorized(w, r)
 		return
 	}
 	s.mux.ServeHTTP(w, r)

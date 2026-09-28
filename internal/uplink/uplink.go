@@ -51,6 +51,7 @@ var errPermanent = errors.New("permanently rejected by peer")
 // Forwarder drains usage_events to a peer trayapp's POST /log.
 type Forwarder struct {
 	baseURL  string
+	token    string
 	store    *store.Store
 	client   *http.Client
 	interval time.Duration
@@ -72,6 +73,13 @@ func New(baseURL string, s *store.Store) *Forwarder {
 		stopChan: make(chan struct{}),
 		doneChan: make(chan struct{}),
 	}
+}
+
+// SetToken sets the receiver's access token, sent as a bearer token on every
+// request. Empty sends no Authorization header, which only a receiver on
+// loopback accepts. Call before Start.
+func (f *Forwarder) SetToken(tok string) {
+	f.token = tok
 }
 
 // Start begins draining in a goroutine.
@@ -224,6 +232,9 @@ func (f *Forwarder) post(e store.ForwardableEvent) error {
 	// The receiver rejects any POST without this — it is the CSRF guard
 	// that stops a browser mounting a simple cross-origin form post.
 	req.Header.Set("Content-Type", "application/json")
+	if f.token != "" {
+		req.Header.Set("Authorization", "Bearer "+f.token)
+	}
 
 	resp, err := f.client.Do(req)
 	if err != nil {
@@ -243,6 +254,17 @@ func (f *Forwarder) post(e store.ForwardableEvent) error {
 		resp.StatusCode == http.StatusTooManyRequests:
 		// 4xx by number, "later" by meaning.
 		return fmt.Errorf("peer answered %d", resp.StatusCode)
+
+	case resp.StatusCode == http.StatusUnauthorized:
+		// About this sender, not this event: every later event would be
+		// refused the same way, so skipping would discard the backlog.
+		// Hold the cursor until the token is fixed.
+		return fmt.Errorf("peer rejected the access token (401); set uplink.token to the receiver's current token")
+
+	case resp.StatusCode == http.StatusForbidden:
+		// The receiver's Host allow-list refused the address we dialed —
+		// likewise a configuration problem, not a bad event.
+		return fmt.Errorf("peer refused the request (403); check that uplink.url names an address the receiver binds")
 
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		return fmt.Errorf("%w: peer answered %d", errPermanent, resp.StatusCode)

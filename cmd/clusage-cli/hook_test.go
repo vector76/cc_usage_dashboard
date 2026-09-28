@@ -195,3 +195,44 @@ func TestProcessHookInputFlow(t *testing.T) {
 		}
 	}
 }
+
+// Containers reach the host over a non-loopback adapter, so the trayapp
+// demands its access token. CLUSAGE_TOKEN feeds the token variable; every
+// hook POST must carry it.
+func TestHookPostSendsBearerToken(t *testing.T) {
+	old := token
+	t.Cleanup(func() { token = old })
+	token = "s3cret"
+
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	if !postEventPayloadTo(srv.URL, map[string]interface{}{"input_tokens": 1, "output_tokens": 1}) {
+		t.Fatal("post failed")
+	}
+	if got != "Bearer s3cret" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer s3cret")
+	}
+}
+
+func TestHookPostOmitsAuthorizationWithoutToken(t *testing.T) {
+	old := token
+	t.Cleanup(func() { token = old })
+	token = ""
+
+	sent := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sent = r.Header["Authorization"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	postEventPayloadTo(srv.URL, map[string]interface{}{"input_tokens": 1, "output_tokens": 1})
+	if sent {
+		t.Error("no token configured, so no Authorization header should be sent")
+	}
+}

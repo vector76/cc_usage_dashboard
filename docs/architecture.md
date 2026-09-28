@@ -14,7 +14,8 @@ and no cross-machine state.
 |     v                                                                      |
 |  +----------------------------- trayapp.exe ------------------------------+|
 |  |                                                                        ||
-|  |  HTTP server (binds 127.0.0.1 + detected Docker/WSL adapters)          ||
+|  |  HTTP server (binds 127.0.0.1 + detected Docker/WSL adapters;          ||
+|  |               non-loopback callers need the access token)              ||
 |  |    POST /log                  <- per-invocation token usage            ||
 |  |    POST /snapshot             <- authoritative quota numbers           ||
 |  |    POST /parse_error          <- userscript / tailer parse failures    ||
@@ -189,20 +190,48 @@ failure means that turn is lost. See the failure-modes table below.
      well-known Docker / WSL ranges (Docker Desktop's vEthernet adapter, WSL adapter,
      `172.16.0.0/12`, `192.168.65.0/24`). The user can append explicit addresses
      via `http.bind` for topologies the auto-detect misses.
-  3. There is **no** `0.0.0.0` catch-all. Binding all interfaces would expose the
-     unauthenticated API to whatever LAN the host happens to sit on, with no
-     paired firewall rule to gate it. Topologies that defeat (1) and (2) must add
-     an explicit `http.bind` entry rather than open every interface at once.
-- No authentication. The trust boundary is the host. Anything able to reach the bound
-  interface is already running on this machine or its containers.
-- **Uplink senders inherit this.** A second machine forwarding to `/log` needs
-  the receiver to bind an interface it can reach. A host-only or NAT'd VM
-  adapter keeps the posture above intact — it is the same shape as the Docker
-  and WSL adapters already bound. A *bridged* adapter does not: it publishes an
-  unauthenticated write endpoint to whatever LAN the VM sits on, where anyone
-  could POST junk into `/log` and skew both the combined totals and the slack
-  gate that releases real work. Prefer a host-only adapter; if the topology
-  forces a shared LAN, the roadmap's token gate on `/log` stops being optional.
+  3. `0.0.0.0` is never chosen automatically. An explicit `http.bind: [0.0.0.0]`
+     entry binds every interface, and then stands alone — it already covers (1)
+     and (2), and binding it beside a specific address on the same port fails.
+     The token gate below is what makes this safe to offer; an explicit address
+     is still preferable, since it keeps the listener off networks it has no
+     business on (the hotel Wi-Fi a laptop joins next week).
+- **Access token for every non-loopback caller.** A request whose peer address
+  is loopback (`127.0.0.0/8`, `::1`) is exempt. Every other request — a VM's
+  uplink, a LAN host, and Docker/WSL containers alike — must carry
+  `Authorization: Bearer <token>`, or it is answered `401` before it reaches
+  any handler. Reads are gated too: `/slack`, `/consumption`, and the dashboard
+  expose usage data, not just `/log`.
+  - The trust boundary is the local machine. Anything that can open a loopback
+    connection is already running here, which is why the userscript, the
+    dashboard, and host-side `curl` need no setup.
+  - The decision is made from the TCP peer address, never from a header. A
+    proxy that relays container traffic onto loopback (some Docker Desktop and
+    WSL networking modes do) therefore makes those containers exempt; that is
+    the same trust as the host they run on.
+  - The token is 32 random bytes, base64url-encoded, compared in constant time,
+    and never logged. It lives in `auth_token` in the per-user data dir, not in
+    `config.yaml`: a checkout's `config.yaml` takes precedence and is one
+    `git add` from being committed, and the token must rotate at runtime while
+    the config is read once. It is generated on first start.
+  - The tray menu copies it ("Copy access token") and rotates it ("Rotate
+    access token…"). Rotation takes effect on the next request with no restart;
+    every client holding the old token is refused until updated.
+  - If the token file cannot be read or created, the gate fails closed:
+    loopback keeps working and every other caller is refused.
+  - Rejections are counted in `auth_rejected_total` on `/metrics` and logged at
+    most once a minute, since a client with a stale token retries constantly.
+  - This is plain HTTP. The token stops accidental and casual writes from the
+    network; it does not stop someone who can read traffic on the wire. Remote
+    access beyond a trusted local network still belongs behind TLS (see the
+    Cloudflare tunnel note below).
+- **Uplink senders.** A second machine forwarding to `/log` needs the receiver to
+  bind an interface it can reach, and `uplink.token` set to the receiver's token.
+  A `401` or `403` holds the sender's cursor rather than skipping the event —
+  both mean "this sender is not allowed in", which no later event would fix — so
+  a rotation costs latency, not data. A host-only adapter is still the better
+  topology than a bridged one: the token keeps strangers out, but a bridged
+  adapter still puts the unencrypted traffic on a shared LAN.
 - Inbound `occurred_at` on `/log` is bounded (one hour ahead, a year behind)
   and out-of-range events are rejected with 400. Until the uplink existed every
   writer was local and shared the host's clock; a forwarding sender makes a
@@ -216,10 +245,14 @@ failure means that turn is lost. See the failure-modes table below.
   prevents a hostile caller from exhausting RAM or filling the DB with junk.
 - DNS-rebinding defence: every request's `Host` header must match the configured
   allow-list (`localhost`, `127.0.0.1`, `host.docker.internal`, plus each bound
-  interface IP). Without this, a malicious site could rebind its hostname to
-  127.0.0.1 and bypass the same-origin policy.
-- If the user later wants remote access, route via Cloudflare tunnel + cloudflared
-  Access policy. Do not add bespoke auth to the local server.
+  interface IP — or, under a `0.0.0.0` bind, every interface's IP). Without this,
+  a malicious site could rebind its hostname to 127.0.0.1 and bypass the
+  same-origin policy. This matters most for loopback, which the token gate
+  exempts. Callers must dial an IP or one of the well-known names; a machine
+  hostname is not in the list.
+- If the user later wants remote access beyond a trusted local network, route via
+  Cloudflare tunnel + cloudflared Access policy. The token gate is sized for a
+  VM or container next to the host, not for the internet.
 
 ## Failure modes and recovery
 

@@ -124,8 +124,20 @@ Environment variables:
 - `CLUSAGE_HOST` — defaults to `host.docker.internal`.
 - `CLUSAGE_PORT` — defaults to `27812`.
 - `CLUSAGE_TIMEOUT_MS` — defaults to `2000`.
+- `CLUSAGE_TOKEN` — the trayapp's access token, sent as
+  `Authorization: Bearer <token>` on every request. Required: a container
+  reaches the host over a Docker or WSL adapter, not loopback, and the
+  trayapp refuses every non-loopback caller without it (`401`, exit code
+  `4` from `log`). Copy it from the tray menu, "Copy access token". See
+  `docs/architecture.md`, "Network and security".
 
 No config file. Containers should be configurable via env, not state.
+
+After the token is rotated, hooks fail with `401` until `CLUSAGE_TOKEN` is
+updated. The Stop hook re-posts the whole transcript each turn and the
+receiver dedupes, so a session that has another turn after the fix
+backfills its gap. A session that ended during the gap does not — unlike
+the uplink, the hook keeps no backlog.
 
 ## Wiring into Claude Code's Stop hook
 
@@ -158,5 +170,5 @@ is the input contract the CLI must parse.
 
 For containers where adding a binary is awkward, you can replicate Mode B as a small
 shell script that reads stdin, extracts `transcript_path` with `jq`, and POSTs the last
-assistant message's `usage` block. This is more code than just installing the CLI, so
+assistant message's `usage` block (with `-H "Authorization: Bearer $CLUSAGE_TOKEN"`). This is more code than just installing the CLI, so
 the CLI is the recommended path.

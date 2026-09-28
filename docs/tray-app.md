@@ -37,6 +37,13 @@ process has no stderr, which is why logging falls back to a file — see
   flips the tray icon to a paused state. Logging continues so no data is lost; only the
   release recommendation is suppressed. Use this when starting a heavy interactive
   session and you don't want background jobs racing you.
+- **Copy access token** — copies the token that non-loopback callers (VMs,
+  containers) must present to the clipboard, and says where it is stored. It
+  goes to the clipboard rather than into the dialog so it is not left on
+  screen.
+- **Rotate access token…** — after a confirmation that defaults to No, issues
+  a new token, refuses the old one from the next request on, and copies the new
+  one. See docs/architecture.md "Network and security".
 - **About** — version, build commit.
 - **Quit** — graceful shutdown (flush DB, persist tailer offsets).
 

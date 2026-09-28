@@ -60,6 +60,11 @@ slack:
 # database:
 #   path: ""
 
+# Docker/WSL adapters are detected and bound automatically. Add an address
+# here to reach the trayapp from elsewhere (e.g. the host's IP on a VM's
+# host-only adapter), or 0.0.0.0 for every interface. Callers not on
+# loopback must present the access token from the tray menu ("Copy access
+# token") — see docs/architecture.md "Network and security".
 # http:
 #   port: 27812
 #   bind:
@@ -74,6 +79,11 @@ slack:
 # host leaves it empty and just needs http.bind above extended to an
 # interface the sender can reach.
 #
+# token is the receiving host's access token, from its tray menu ("Copy
+# access token"). A receiver not on this machine's loopback refuses every
+# event without it. After the receiver rotates its token, events wait here
+# (nothing is dropped) until token is updated.
+#
 # The value is the receiver's base URL with no path — the forwarder appends
 # the endpoint itself. Events are forwarded raw (tokens and model, not
 # cost), so the receiver prices and derives everything from its own tables.
@@ -84,9 +94,11 @@ slack:
 #
 #   uplink:
 #     url: "http://192.168.56.1:27812"
+#     token: "<paste from the receiver's tray menu>"
 # ---------------------------------------------------------------------------
 # uplink:
 #   url: ""
+#   token: ""
 
 # claude:
 #   projects_dir: "~/.claude/projects"

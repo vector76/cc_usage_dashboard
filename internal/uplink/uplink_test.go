@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -284,5 +285,85 @@ func TestForwardOnceSendsCacheCreation1hTokens(t *testing.T) {
 	}
 	if got := rec.bodies[0]["cache_creation_1h_tokens"]; got != float64(80) {
 		t.Errorf("cache_creation_1h_tokens = %v, want 80", got)
+	}
+}
+
+func TestForwardOnceSendsBearerToken(t *testing.T) {
+	s := newTestStore(t)
+	insertEvent(t, s, "m1")
+
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		got = req.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	f := New(srv.URL, s)
+	f.SetToken("s3cret")
+	if _, err := f.forwardOnce(); err != nil {
+		t.Fatalf("forwardOnce: %v", err)
+	}
+	if got != "Bearer s3cret" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer s3cret")
+	}
+}
+
+func TestForwardOnceOmitsAuthorizationWithoutToken(t *testing.T) {
+	s := newTestStore(t)
+	insertEvent(t, s, "m1")
+
+	sent := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		_, sent = req.Header["Authorization"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := New(srv.URL, s).forwardOnce(); err != nil {
+		t.Fatalf("forwardOnce: %v", err)
+	}
+	if sent {
+		t.Error("no token configured, so no Authorization header should be sent")
+	}
+}
+
+// 401 and 403 are 4xx by number but say nothing about the event: they mean
+// this sender is not (yet) allowed in — a rotated token, a missing Host
+// allow-list entry. Treating them as permanent would step the cursor over
+// every event until the config is fixed, silently discarding the backlog.
+func TestForwardOnceHoldsCursorOnAuthRejection(t *testing.T) {
+	for _, code := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			s := newTestStore(t)
+			insertEvent(t, s, "m1")
+			insertEvent(t, s, "m2")
+			rec := newReceiver(t, func(n int) int { return code })
+
+			f := New(rec.srv.URL, s)
+			_, err := f.forwardOnce()
+			if err == nil {
+				t.Fatal("expected an auth rejection to surface as an error")
+			}
+			if cursor, _ := s.GetUplinkCursor(rec.srv.URL); cursor != 0 {
+				t.Errorf("cursor must not advance on %d, got %d", code, cursor)
+			}
+			if rec.count() != 1 {
+				t.Errorf("the batch should stop at the first rejection, receiver saw %d", rec.count())
+			}
+		})
+	}
+}
+
+// The 401 message is what a user reads in the sender's log after rotating
+// the receiver's token, so it must say which setting to fix.
+func TestForwardOnceUnauthorizedNamesTheSetting(t *testing.T) {
+	s := newTestStore(t)
+	insertEvent(t, s, "m1")
+	rec := newReceiver(t, func(n int) int { return http.StatusUnauthorized })
+
+	_, err := New(rec.srv.URL, s).forwardOnce()
+	if err == nil || !strings.Contains(err.Error(), "uplink.token") {
+		t.Errorf("expected the error to name uplink.token, got %v", err)
 	}
 }
