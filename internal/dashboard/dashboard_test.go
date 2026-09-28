@@ -583,3 +583,64 @@ func TestLoadVolumeSeriesByFamily(t *testing.T) {
 		}
 	}
 }
+
+// The "last allowance snapshot" age must describe the same row the slack
+// gate's baseline_freshness check reads: the newest one carrying a reading.
+// A content-free row is not a fresh reading, and a received_at beyond the
+// gate's future-skew tolerance is reported as negative rather than clamped
+// to "just now", so the page cannot look fresh while the gate says stale.
+func TestLastSnapshotAgeMatchesGateFreshness(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	used := 40.0
+
+	open := func(t *testing.T) *store.Store {
+		t.Helper()
+		s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+		if err != nil {
+			t.Fatalf("store.Open: %v", err)
+		}
+		t.Cleanup(func() { s.Close() })
+		return s
+	}
+	insert := func(t *testing.T, s *store.Store, received time.Time, sessionUsed *float64) {
+		t.Helper()
+		if _, err := s.InsertQuotaSnapshot(received, received, "test",
+			sessionUsed, nil, nil, nil, nil, nil, nil, "{}"); err != nil {
+			t.Fatalf("InsertQuotaSnapshot: %v", err)
+		}
+	}
+	age := func(t *testing.T, s *store.Store) time.Duration {
+		t.Helper()
+		h := &Handler{store: s, now: func() time.Time { return now }}
+		got, ok, err := h.lastSnapshotAge(s.DB(), now)
+		if err != nil || !ok {
+			t.Fatalf("lastSnapshotAge: ok=%v err=%v", ok, err)
+		}
+		return got
+	}
+
+	t.Run("content-free row is skipped", func(t *testing.T) {
+		s := open(t)
+		insert(t, s, now.Add(-10*time.Minute), &used)
+		insert(t, s, now.Add(-1*time.Minute), nil)
+		if got := age(t, s); got != 10*time.Minute {
+			t.Errorf("age = %v, want 10m (the newest row with a reading)", got)
+		}
+	})
+
+	t.Run("future jitter within tolerance reads as zero", func(t *testing.T) {
+		s := open(t)
+		insert(t, s, now.Add(30*time.Second), &used)
+		if got := age(t, s); got != 0 {
+			t.Errorf("age = %v, want 0", got)
+		}
+	})
+
+	t.Run("future beyond tolerance stays negative", func(t *testing.T) {
+		s := open(t)
+		insert(t, s, now.Add(5*time.Minute), &used)
+		if got := age(t, s); got != -5*time.Minute {
+			t.Errorf("age = %v, want -5m", got)
+		}
+	})
+}

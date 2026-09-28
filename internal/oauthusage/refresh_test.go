@@ -114,6 +114,34 @@ func TestRefreshErrorDisarms(t *testing.T) {
 	}
 }
 
+// RefreshFunc's contract: success is judged by re-reading the credential,
+// not by the error. A command that rotated the token and then exited
+// non-zero (or tripped WaitDelay) has still worked, so the poll is retried
+// and the source recovers within the same tick.
+func TestRefreshErrorStillRereadsCredential(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	h := newPollerHarness(t, func() time.Time { return now })
+	h.writeToken(t, "tok-expired", now.Add(-1*time.Hour))
+	withRefresh(h, func(context.Context) error {
+		h.writeToken(t, "tok-fresh", now.Add(8*time.Hour))
+		return fmt.Errorf("exit status 1")
+	})
+
+	if err := h.poller.poll(context.Background()); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if got := h.snapshots(); len(got) != 1 {
+		t.Fatalf("recorded %d snapshots, want 1", len(got))
+	}
+	st := h.poller.Status()
+	if !st.Available || !st.RefreshArmed {
+		t.Errorf("available/armed = %v/%v, want true/true", st.Available, st.RefreshArmed)
+	}
+	if st.LastRefreshError != "" {
+		t.Errorf("LastRefreshError = %q, want empty: the credential was refreshed", st.LastRefreshError)
+	}
+}
+
 // Once the credential is good again -- here because Claude Code ran on its
 // own -- the next stale episode gets its own single attempt.
 func TestRefreshRearmsAfterRecovery(t *testing.T) {

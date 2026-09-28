@@ -29,9 +29,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not (Test-Path $ExePath)) {
+if (-not (Test-Path -LiteralPath $ExePath -PathType Leaf)) {
     throw "trayapp.exe not found at '$ExePath'. Build it first with: go build -ldflags=`"-H=windowsgui`" -o trayapp.exe ./cmd/trayapp"
 }
+# Store an absolute path: Task Scheduler would resolve a relative one
+# against System32 at logon, not against the directory it was typed in.
+$ExePath = (Resolve-Path -LiteralPath $ExePath).ProviderPath
 
 # --- Register Task Scheduler "at logon" task ---------------------------------
 
@@ -46,18 +49,23 @@ $settings  = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -ExecutionTimeLimit (New-TimeSpan -Hours 0)
 
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    Write-Host "Removed existing scheduled task '$TaskName'."
-}
+$existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 
+# -Force replaces an existing task in one step, so a registration that fails
+# (a bad principal, a policy restriction) leaves the working autostart in
+# place instead of removing it first.
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $action `
     -Trigger $trigger `
     -Principal $principal `
     -Settings $settings `
-    -Description 'Claude Usage Dashboard tray app (auto-start at logon).' | Out-Null
+    -Description 'Claude Usage Dashboard tray app (auto-start at logon).' `
+    -Force | Out-Null
+
+if ($existing) {
+    Write-Host "Replaced existing scheduled task '$TaskName'."
+}
 
 Write-Host "Registered scheduled task '$TaskName' to launch '$ExePath' at logon."
 Write-Host "Done. The tray app will start automatically on next logon, or run it now with:"

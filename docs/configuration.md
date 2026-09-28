@@ -23,7 +23,10 @@ edited. `config_sample_test.go` pins that neutrality: the sample must load
 to the same effective config as no file at all. A user's `config.yaml` is
 never overwritten or reconciled afterward, and the repo `.gitignore`
 excludes it so `git pull` deployments (`pullrun.bat`) never conflict with
-local edits. Materialization failure (e.g. the config dir not writable) is
+local edits. Because it is where `uplink.token` goes, the materialized file
+is created private to the user (mode 0600, and 0700 for a config dir created
+along with it; on Windows these modes have no effect). Existing files and
+directories keep their modes. Materialization failure (e.g. the config dir not writable) is
 non-fatal: the app logs a warning and runs on built-in defaults, exactly as
 it did before the file existed.
 
@@ -41,7 +44,7 @@ database:
   path: ""
 
 http:
-  port: 27812
+  port: 27812                       # must be 1-65535, else startup fails
   bind:
     - 0.0.0.0
     # Every interface by default; callers not on loopback must present the
@@ -87,7 +90,7 @@ slack:
   session_absolute_threshold: 0.98  #   "
   weekly_absolute_threshold: 0.80   #   "
 
-retention:
+retention:                           # 0 keeps rows forever; negative is rejected
   parse_errors_days: 30
   slack_samples_days: 90
 
@@ -122,6 +125,18 @@ descriptor whether it is a terminal, a pipe, or captured by systemd.
 The log sits in `UserDataDir` rather than `UserConfigDir` because it is mutable
 state, not configuration — on Windows that means Local, never the roaming
 profile.
+
+A failure that stops startup (a `config.yaml` that does not load, an
+unopenable database, an unusable `http.bind`) is written to stderr and, when
+no console is attached, also to that log: through slog once the log is open,
+otherwise appended to the data-dir `trayapp.log` directly. So a headless build
+that never shows its icon still says why in `trayapp.log`, even when the
+failure is in the config that would have named a different log file.
+
+If the rotating log cannot be renamed aside (on Windows, another process
+holding it open without delete sharing — a second instance, a log viewer),
+it is copied to `.1` and truncated in place instead, with a warning at the
+top of the fresh file, so the size cap still holds.
 
 ## Database location
 
@@ -283,8 +298,11 @@ executable; empty means `claude` on `PATH`. The rules:
 - **Only a stale credential triggers it**: an expired token, a 401, or a
   missing credentials file or token. A server error or network failure does
   not, and does not spend the attempt.
-- **Bounded.** An attempt that runs past two minutes is killed. On success the
-  poll is retried straight away rather than an interval later.
+- **Bounded.** An attempt that runs past two minutes is killed. After every
+  attempt the poll is retried straight away rather than an interval later,
+  even when the command exited with an error: whether it worked is judged by
+  re-reading the credential, so a run that rotated the token and then failed
+  still recovers the source.
 - It runs with the per-user data dir as its working directory, so the
   transcript Claude Code writes lands in a project of its own. On Windows it
   runs with no console window.
@@ -377,13 +395,16 @@ common case. Within the bound, skew is *not* corrected; see
 
 `%APPDATA%`, `%LOCALAPPDATA%`, `%USERPROFILE%`, and `%HOME%` placeholders
 are expanded inside `database.path`, `claude.projects_dir`,
-`claude.cowork_sessions_dir`, and `pricing.table_path` at load time. When
+`claude.cowork_sessions_dir`, `pricing.table_path`, `logging.file`,
+`oauth_usage.credentials_path` and `oauth_usage.claude_path` at load time.
+Placeholder names match case-insensitively, as Windows environment variable
+names do, so `%LocalAppData%` works too. When
 the underlying environment variable is unset (typical on Linux), the
 loader falls back to the user's home directory so cross-platform configs
 stay testable.
 
-`claude.projects_dir` additionally expands a leading `~/` to the user's
-home directory.
+`claude.projects_dir` additionally expands a leading `~/` (or `~\` on
+Windows) to the user's home directory.
 
 ## Reload semantics
 

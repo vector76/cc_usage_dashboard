@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 )
@@ -19,28 +21,30 @@ type HookPayload struct {
 
 // processHookInput reads the hook payload from stdin and posts events from the transcript.
 // hostURL is the base URL of the trayapp (e.g., "http://127.0.0.1:27812").
-func processHookInput(stdin io.Reader, hostURL string) {
+// It returns an error only when the payload or transcript is unusable;
+// events the host did not accept are reported on stderr instead.
+func processHookInput(stdin io.Reader, hostURL string) error {
 	// Decode the hook payload
 	var payload HookPayload
 	if err := json.NewDecoder(stdin).Decode(&payload); err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to parse hook payload: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("failed to parse hook payload: %v", err)
 	}
 
 	if err := validateTranscriptPath(payload.TranscriptPath); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(2)
+		return err
 	}
 
 	// Read the transcript file
 	transcript, err := os.ReadFile(payload.TranscriptPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: failed to read transcript: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("failed to read transcript: %v", err)
 	}
 
-	// Count how many events were posted successfully
-	successCount := 0
+	client := &http.Client{Timeout: parseTimeout()}
+
+	// Count how many events were posted, and keep the first failure
+	delivered, failed := 0, 0
+	var firstErr error
 
 	// Split by newlines and post each event
 	for _, line := range bytes.Split(transcript, []byte("\n")) {
@@ -131,34 +135,53 @@ func processHookInput(stdin io.Reader, hostURL string) {
 		}
 
 		// Post the event
-		if postEventPayloadTo(hostURL, eventPayload) {
-			successCount++
+		err := postEventPayloadTo(client, hostURL, eventPayload)
+		if err == nil {
+			delivered++
+			continue
+		}
+		failed++
+		if firstErr == nil {
+			firstErr = err
+		}
+		// A transport failure means the host is unreachable, and against
+		// a host that drops packets every later line would wait out the
+		// same timeout. Stop here; the next Stop re-walks the transcript.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			break
 		}
 	}
 
 	// Hooks must not fail the Claude Code session; the caller exits 0
-	// regardless of whether any events were posted.
-	_ = successCount
+	// regardless of whether any events were posted, so stderr is the only
+	// place a failure shows.
+	if firstErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: not every event reached the host (%d delivered, %d failed): %v\n", delivered, failed, firstErr)
+	}
+	return nil
 }
 
-// postEventPayloadTo posts an event payload to the trayapp at hostURL.
-func postEventPayloadTo(hostURL string, eventPayload map[string]interface{}) bool {
+// postEventPayloadTo posts an event payload to the trayapp at hostURL. A
+// transport failure comes back as the client's *url.Error; a non-2xx answer
+// as an error naming the status.
+func postEventPayloadTo(client *http.Client, hostURL string, eventPayload map[string]interface{}) error {
 	body, err := json.Marshal(eventPayload)
 	if err != nil {
-		return false
+		return err
 	}
-
-	timeout := parseTimeout()
-	client := &http.Client{Timeout: timeout}
 
 	resp, err := httpPost(client, hostURL+"/log", body)
 
 	if err != nil {
-		return false
+		return err
 	}
 	defer resp.Body.Close()
 
-	return resp.StatusCode >= 200 && resp.StatusCode < 300
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("host answered %s", statusText(resp.StatusCode))
+	}
+	return nil
 }
 
 // validateTranscriptPath rejects transcript_path values that don't match

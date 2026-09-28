@@ -912,6 +912,76 @@ func TestActiveSessionInactiveSnapshotNonzeroUsedKeepsWindowOpen(t *testing.T) {
 	}
 }
 
+// TestActiveSessionInactiveSnapshotBeforeWindowStartKeepsWindowOpen covers a
+// limbo observation that predates the window it would close. The userscript
+// backdates observed_at from "Last updated N minutes ago", so a limbo row can
+// arrive after an event-anchored window was minted yet carry an observed_at
+// before its start. It describes the moment before the session began, not
+// the session, and closing on it would write an inverted row (ends_at <
+// started_at).
+func TestActiveSessionInactiveSnapshotBeforeWindowStartKeepsWindowOpen(t *testing.T) {
+	engine, s := createTestEngine(t)
+	defer s.Close()
+
+	eventTime := time.Date(2026, 4, 26, 11, 30, 0, 0, time.UTC)
+	engine.SetNow(func() time.Time { return eventTime })
+
+	if _, err := s.InsertUsageEvent(
+		eventTime, "test", "session-1", "msg-1", "", "claude-3-5-sonnet-20241022",
+		100, 50, 0, 0, nil, "", "{}",
+	); err != nil {
+		t.Fatalf("failed to insert event: %v", err)
+	}
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var windowID int64
+	var origEndsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT id, ends_at FROM windows WHERE kind = 'session' AND closed = 0`,
+	).Scan(&windowID, &origEndsAt); err != nil {
+		t.Fatalf("query initial window: %v", err)
+	}
+
+	// Received after the window opened, observed 20 minutes before it.
+	observedAt := eventTime.Add(-20 * time.Minute)
+	receivedAt := eventTime.Add(5 * time.Minute)
+	engine.SetNow(func() time.Time { return receivedAt })
+
+	inactive := false
+	usedZero := 0.0
+	if _, err := s.InsertQuotaSnapshot(
+		observedAt, receivedAt, "userscript",
+		&usedZero, nil,
+		nil, nil,
+		&inactive,
+		nil,
+		nil,
+		"{}",
+	); err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+
+	if err := engine.UpdateWindows(); err != nil {
+		t.Fatalf("UpdateWindows failed: %v", err)
+	}
+
+	var closed int
+	var endsAt time.Time
+	if err := s.DB().QueryRow(
+		`SELECT closed, ends_at FROM windows WHERE id = ?`, windowID,
+	).Scan(&closed, &endsAt); err != nil {
+		t.Fatalf("query updated window: %v", err)
+	}
+	if closed != 0 {
+		t.Errorf("expected window to remain open (closed=0), got closed=%d", closed)
+	}
+	if !endsAt.Equal(origEndsAt) {
+		t.Errorf("expected original ends_at=%v preserved, got %v", origEndsAt, endsAt)
+	}
+}
+
 // TestActiveSessionMostRecentRulePrefersNewerActiveSnapshot confirms the
 // most-recent-snapshot rule: an older inactive snapshot followed by a newer
 // active snapshot must NOT close the window. The early-close decision is tied

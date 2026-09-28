@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Claude Usage Snapshot
 // @namespace    https://github.com/vector76/cc_usage_dashboard
-// @version      0.10.0
+// @version      0.10.1
 // @description  Reads "Current session", "This week" (formerly "All models"), and "Fable" usage % from claude.ai and posts them to the local Claude Usage Dashboard trayapp.
 // @author       Claude Usage Dashboard
 // @match        https://claude.ai/*
@@ -294,7 +294,7 @@
     function postJSON(url, body, onSuccess) {
         try {
             const payload = JSON.stringify(body);
-            GM.xmlHttpRequest({
+            const pending = GM.xmlHttpRequest({
                 method: 'POST',
                 url: url,
                 headers: { 'Content-Type': 'application/json' },
@@ -312,6 +312,10 @@
                     }
                 },
             });
+            // GM4-style managers also return a Promise that rejects on
+            // error/timeout/abort. The callbacks above already report those,
+            // so only stop the rejection surfacing as "Uncaught (in promise)".
+            if (pending && typeof pending.then === 'function') pending.then(undefined, () => {});
         } catch (e) {
             warn('POST threw', url, e);
         }
@@ -456,17 +460,27 @@
     // enforces that they agree.
     const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const WEEKDAY_CLOCK_RE = /Resets\s+(Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i;
+    // Fallback for locale renderings the en-US form rejects: "Thu, 3:50 PM",
+    // "3:50 p.m.", 24-hour "Thu 15:50". Tried only when WEEKDAY_CLOCK_RE
+    // fails, so every string that form accepts parses exactly as before.
+    const WEEKDAY_CLOCK_ALT_RE = /Resets\s+(Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s+(\d{1,2}):(\d{2})(?!\d)(?:\s*([AP])\.?\s*M\b\.?)?/i;
 
     function parseWeekdayClock(text) {
         if (!text) return null;
-        const m = String(text).match(WEEKDAY_CLOCK_RE);
+        const m = String(text).match(WEEKDAY_CLOCK_RE) || String(text).match(WEEKDAY_CLOCK_ALT_RE);
         if (!m) return null;
         const key = m[1].slice(0, 3).toLowerCase();
         const dow = WEEKDAYS.findIndex(d => d.toLowerCase() === key);
         if (dow < 0) return null;
-        let hour = parseInt(m[2], 10) % 12;
-        if (m[4].toUpperCase() === 'PM') hour += 12;
-        return { dow, hour, minute: parseInt(m[3], 10) };
+        let hour = parseInt(m[2], 10);
+        const minute = parseInt(m[3], 10);
+        if (m[4]) {
+            hour %= 12;
+            if (m[4].toUpperCase().startsWith('P')) hour += 12;
+        } else if (hour > 23 || minute > 59) {
+            return null;
+        }
+        return { dow, hour, minute };
     }
 
     function nearestWeekdayClockMs(clock, baseMs) {
@@ -669,13 +683,21 @@
     function buildFingerprint() {
         try {
             // Match the same tag set extractQuota anchors on so a heading
-            // rename or h2→h3 shuffle is visible in the fingerprint.
-            const headings = Array.from(document.querySelectorAll('h2, h3'))
+            // rename or h2→h3 shuffle is visible in the fingerprint. The
+            // usage page is a modal over whatever page is open, so the
+            // document can hold a conversation whose markdown headings are
+            // user content: scan only the dialog. Only the legacy full-page
+            // route has nothing but settings in the document.
+            const dialog = document.querySelector('[role="dialog"], dialog');
+            const scope = dialog || (location.pathname === USAGE_PATH ? document : null);
+            const headings = (scope ? Array.from(scope.querySelectorAll('h2, h3')) : [])
                 .map(h => (h.textContent || '').trim().slice(0, 80))
                 .filter(Boolean)
                 .slice(0, 30);
             const fp = {
-                pathname: location.pathname,
+                // First segment only: on a chat path the rest is the
+                // conversation id.
+                pathname: '/' + (location.pathname.split('/')[1] || ''),
                 heading_count: headings.length,
                 heading_texts: headings,
                 progressbar_count: document.querySelectorAll('[role="progressbar"]').length,
@@ -792,7 +814,7 @@
         if (dispatchTimer) return;
         dispatchTimer = setTimeout(() => {
             dispatchTimer = null;
-            tryDispatch();
+            try { tryDispatch(); } catch (e) { warn('tryDispatch threw', e); }
         }, DISPATCH_DEBOUNCE_MS);
     }
 
@@ -858,12 +880,18 @@
     // ---------- bootstrap ----------
 
     function start() {
-        // Initial sample, then hand the wheel to the change observer. The
-        // interval is a backstop only — if the observer is somehow torn down
-        // by an SPA re-render, or the tab is throttled, we still see a tick.
-        tryDispatch();
-        startChangeObserver();
-        setInterval(tryDispatch, POST_INTERVAL_MS);
+        // Arm the backstop interval and the change observer, then take the
+        // initial sample. The interval is a backstop only — if the observer
+        // is somehow torn down by an SPA re-render, or the tab is throttled,
+        // we still see a tick. Each step is guarded on its own and the
+        // triggers go first, so one throw (a bad sample, a null body) can't
+        // leave the script without triggers until the page reloads.
+        const dispatch = () => {
+            try { tryDispatch(); } catch (e) { warn('tryDispatch threw', e); }
+        };
+        setInterval(dispatch, POST_INTERVAL_MS);
+        try { startChangeObserver(); } catch (e) { warn('change observer setup failed', e); }
+        dispatch();
     }
 
     waitForQuotaDOM(start);

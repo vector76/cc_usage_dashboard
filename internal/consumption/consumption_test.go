@@ -1,6 +1,7 @@
 package consumption
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -520,8 +521,14 @@ func TestCalculate_InvalidPeriod(t *testing.T) {
 	cases := []string{"banana", "5xd", "-1h"}
 	for _, p := range cases {
 		t.Run(p, func(t *testing.T) {
-			if _, err := c.Calculate(p); err == nil {
-				t.Errorf("expected error for period %q", p)
+			_, err := c.Calculate(p)
+			if err == nil {
+				t.Fatalf("expected error for period %q", p)
+			}
+			// A malformed period is the caller's mistake, distinguishable
+			// from a query failure so the handler can answer 400.
+			if !errors.Is(err, ErrInvalidPeriod) {
+				t.Errorf("Calculate(%q) err = %v, want ErrInvalidPeriod", p, err)
 			}
 		})
 	}
@@ -539,6 +546,13 @@ func TestParsePeriod(t *testing.T) {
 		{"banana", 0, true},
 		{"7days", 0, true},
 		{"", 0, true},
+		// Day counts whose hours overflow time.Duration must be rejected,
+		// not wrapped: 213504d wraps to about +25 minutes, 106752d to a
+		// negative duration.
+		{"106751d", 106751 * 24 * time.Hour, false},
+		{"106752d", 0, true},
+		{"213504d", 0, true},
+		{"-213504d", 0, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

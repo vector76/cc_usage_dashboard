@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"time"
 )
@@ -158,17 +159,33 @@ func (p *Parser) parseLine(line []byte) (*ParsedEvent, error) {
 	}
 
 	if costStr, ok := msg["cost_usd"].(float64); ok {
+		if costStr < 0 || costStr > maxReportedCostUSD {
+			return nil, fmt.Errorf("invalid cost_usd: %v", costStr)
+		}
 		event.ReportedCost = &costStr
 	}
 
 	if cacheCreation, ok := usage["cache_creation_input_tokens"].(float64); ok {
+		if err := checkTokenCount("cache_creation_input_tokens", cacheCreation); err != nil {
+			return nil, err
+		}
 		event.CacheCreationTokens = int(cacheCreation)
 	}
 
 	if cacheRead, ok := usage["cache_read_input_tokens"].(float64); ok {
+		if err := checkTokenCount("cache_read_input_tokens", cacheRead); err != nil {
+			return nil, err
+		}
 		event.CacheReadTokens = int(cacheRead)
 	}
 
+	if split, ok := usage["cache_creation"].(map[string]interface{}); ok {
+		if n, ok := split["ephemeral_1h_input_tokens"].(float64); ok {
+			if err := checkTokenCount("ephemeral_1h_input_tokens", n); err != nil {
+				return nil, err
+			}
+		}
+	}
 	event.CacheCreation1hTokens = CacheCreation1hTokens(usage)
 
 	// Try to extract timestamp
@@ -212,5 +229,30 @@ func extractTokens(usage map[string]interface{}) (int, int, error) {
 		return 0, 0, fmt.Errorf("missing or invalid output_tokens")
 	}
 
+	if err := checkTokenCount("input_tokens", input); err != nil {
+		return 0, 0, err
+	}
+	if err := checkTokenCount("output_tokens", output); err != nil {
+		return 0, 0, err
+	}
+
 	return int(input), int(output), nil
+}
+
+// Bounds on values read from a transcript line. Real per-request counts and
+// costs sit orders of magnitude below them; they exist so one crafted line
+// can't turn totals negative, overflow SQLite's integer SUM() or Go's int
+// conversion, or sum dollars to +Inf, which encoding/json refuses to marshal.
+const (
+	maxTokenCount      = 1e12
+	maxReportedCostUSD = 1e6
+)
+
+// checkTokenCount rejects a token count that is negative, fractional, or
+// above maxTokenCount.
+func checkTokenCount(name string, v float64) error {
+	if v < 0 || v > maxTokenCount || v != math.Trunc(v) {
+		return fmt.Errorf("invalid %s: %v", name, v)
+	}
+	return nil
 }

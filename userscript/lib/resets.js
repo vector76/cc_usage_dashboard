@@ -32,19 +32,31 @@
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const WEEKDAY_CLOCK_RE = /Resets\s+(Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*\s+(\d{1,2}):(\d{2})\s*(AM|PM)/i;
+// Fallback for locale renderings the en-US form rejects: a comma after the
+// weekday ("Thu, 3:50 PM"), a dotted meridiem ("3:50 p.m."), or a 24-hour
+// clock with no meridiem ("Thu 15:50"). Tried only when WEEKDAY_CLOCK_RE
+// fails, so every string that form accepts parses exactly as before.
+const WEEKDAY_CLOCK_ALT_RE = /Resets\s+(Sun|Mon|Tue|Wed|Thu|Fri|Sat)[a-z]*,?\s+(\d{1,2}):(\d{2})(?!\d)(?:\s*([AP])\.?\s*M\b\.?)?/i;
 
-// parseWeekdayClock reads "Resets <weekday> <h>:<mm> <AM|PM>" into
-// { dow (0 = Sunday), hour (0-23), minute }, or null.
+// parseWeekdayClock reads "Resets <weekday> <h>:<mm> <AM|PM>" (or a
+// WEEKDAY_CLOCK_ALT_RE form) into { dow (0 = Sunday), hour (0-23),
+// minute }, or null.
 function parseWeekdayClock(text) {
     if (!text) return null;
-    const m = String(text).match(WEEKDAY_CLOCK_RE);
+    const m = String(text).match(WEEKDAY_CLOCK_RE) || String(text).match(WEEKDAY_CLOCK_ALT_RE);
     if (!m) return null;
     const key = m[1].slice(0, 3).toLowerCase();
     const dow = WEEKDAYS.findIndex(d => d.toLowerCase() === key);
     if (dow < 0) return null;
-    let hour = parseInt(m[2], 10) % 12;
-    if (m[4].toUpperCase() === 'PM') hour += 12;
-    return { dow, hour, minute: parseInt(m[3], 10) };
+    let hour = parseInt(m[2], 10);
+    const minute = parseInt(m[3], 10);
+    if (m[4]) {
+        hour %= 12;
+        if (m[4].toUpperCase().startsWith('P')) hour += 12;
+    } else if (hour > 23 || minute > 59) {
+        return null;
+    }
+    return { dow, hour, minute };
 }
 
 // nearestWeekdayClockMs returns the epoch ms of the occurrence of the given
@@ -105,6 +117,7 @@ if (typeof module !== 'undefined') {
     module.exports = {
         WEEKDAYS,
         WEEKDAY_CLOCK_RE,
+        WEEKDAY_CLOCK_ALT_RE,
         parseWeekdayClock,
         nearestWeekdayClockMs,
         parseSessionEnds,

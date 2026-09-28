@@ -77,6 +77,13 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
+	// Every SQLite connection to ":memory:" is its own private database, so
+	// only the connection that ran the migrations would have the schema. Pin
+	// the pool to that one connection (tests are the only callers).
+	if path == ":memory:" {
+		db.SetMaxOpenConns(1)
+	}
+
 	// Test that the database is writable
 	if err := db.Ping(); err != nil {
 		db.Close()
@@ -362,12 +369,24 @@ func (s *Store) tryPlateauSlide(rec QuotaSnapshotRecord) (int64, bool, error) {
 		return 0, false, nil
 	}
 
-	if _, err := s.db.Exec(`
+	// Only ever slide forward. An older arrival (a second tab posting a
+	// back-dated observation, or a zero observed_at) would otherwise drag the
+	// latest row back in time; it is inserted as its own row instead.
+	observedAt := FormatTime(rec.ObservedAt)
+	result, err := s.db.Exec(`
 		UPDATE quota_snapshots
 		SET observed_at = ?, received_at = ?
-		WHERE id = ?
-	`, FormatTime(rec.ObservedAt), FormatTime(rec.ReceivedAt), prevID); err != nil {
+		WHERE id = ? AND observed_at <= ?
+	`, observedAt, FormatTime(rec.ReceivedAt), prevID, observedAt)
+	if err != nil {
 		return 0, false, fmt.Errorf("failed to slide quota snapshot: %w", err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return 0, false, fmt.Errorf("failed to slide quota snapshot: %w", err)
+	}
+	if n == 0 {
+		return 0, false, nil
 	}
 	return prevID, true, nil
 }
@@ -510,8 +529,12 @@ func parseStoredTime(s string) time.Time {
 }
 
 // PruneParseErrors removes parse errors older than the given duration,
-// keeping only a summary of how many were deleted.
+// keeping only a summary of how many were deleted. A zero or negative age
+// prunes nothing: its cutoff would be now or later and empty the table.
 func (s *Store) PruneParseErrors(olderThan time.Duration) error {
+	if olderThan <= 0 {
+		return nil
+	}
 	cutoff := time.Now().Add(-olderThan)
 	_, err := s.db.Exec("DELETE FROM parse_errors WHERE occurred_at < ?", FormatTime(cutoff))
 	if err != nil {
@@ -520,8 +543,12 @@ func (s *Store) PruneParseErrors(olderThan time.Duration) error {
 	return nil
 }
 
-// PruneSlackSamples removes slack samples older than the given duration.
+// PruneSlackSamples removes slack samples older than the given duration. A
+// zero or negative age prunes nothing, as for PruneParseErrors.
 func (s *Store) PruneSlackSamples(olderThan time.Duration) error {
+	if olderThan <= 0 {
+		return nil
+	}
 	cutoff := time.Now().Add(-olderThan)
 	_, err := s.db.Exec("DELETE FROM slack_samples WHERE sampled_at < ?", FormatTime(cutoff))
 	if err != nil {

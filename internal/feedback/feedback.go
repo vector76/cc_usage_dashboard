@@ -18,12 +18,19 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultCapacity is the ring buffer size used by the process-wide default
 // buffer. ~200 recent warnings is plenty to diagnose a misconfiguration
 // without holding meaningful memory.
 const DefaultCapacity = 200
+
+// maxBufferedValueLen caps, in bytes, each buffered message and attr value.
+// Several handlers log request-controlled strings at Warn, and without a cap
+// 200 records of ~1 MiB each would sit in the buffer and be re-encoded on
+// every GET /api/feedback. The inner handler still gets the full value.
+const maxBufferedValueLen = 1024
 
 // Record is one buffered log record. Attrs are flattened to strings so the
 // value is always JSON-serializable regardless of the original attribute
@@ -185,6 +192,7 @@ type Handler struct {
 	buf      *Buffer
 	minLevel slog.Level
 	attrs    map[string]string // accumulated via WithAttrs, flattened to strings
+	prefix   string            // open WithGroup path, e.g. "req.", prefixed to buffered keys
 }
 
 // NewHandler wraps inner so warn+ records are also copied into buf.
@@ -201,14 +209,14 @@ func (h *Handler) Enabled(ctx context.Context, level slog.Level) bool {
 // Handle copies warn+ records into the buffer, then forwards to inner.
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 	if h.buf != nil && r.Level >= h.minLevel {
-		rec := Record{Time: r.Time, Level: r.Level.String(), Message: r.Message}
+		rec := Record{Time: r.Time, Level: r.Level.String(), Message: truncateValue(r.Message)}
 		if r.NumAttrs() > 0 || len(h.attrs) > 0 {
 			m := make(map[string]string, r.NumAttrs()+len(h.attrs))
 			for k, v := range h.attrs {
 				m[k] = v
 			}
 			r.Attrs(func(a slog.Attr) bool {
-				m[a.Key] = a.Value.String()
+				flattenAttr(m, h.prefix, a)
 				return true
 			})
 			rec.Attrs = m
@@ -216,6 +224,41 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		h.buf.Add(rec)
 	}
 	return h.inner.Handle(ctx, r)
+}
+
+// flattenAttr stores a into m under its group-qualified key, the way slog's
+// own handlers see it: LogValuers are resolved (so a self-redacting type
+// shows its LogValue, not its raw fmt form), group members are qualified by
+// the group's key (an empty-key group is inlined), and empty attrs are
+// dropped.
+func flattenAttr(m map[string]string, prefix string, a slog.Attr) {
+	a.Value = a.Value.Resolve()
+	if a.Value.Kind() == slog.KindGroup {
+		if a.Key != "" {
+			prefix += a.Key + "."
+		}
+		for _, ga := range a.Value.Group() {
+			flattenAttr(m, prefix, ga)
+		}
+		return
+	}
+	if a.Equal(slog.Attr{}) {
+		return
+	}
+	m[prefix+a.Key] = truncateValue(a.Value.String())
+}
+
+// truncateValue cuts s to at most maxBufferedValueLen bytes on a rune
+// boundary, marking the cut with an ellipsis.
+func truncateValue(s string) string {
+	if len(s) <= maxBufferedValueLen {
+		return s
+	}
+	cut := maxBufferedValueLen
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // WithAttrs returns a handler that adds attrs to both the inner handler and
@@ -226,15 +269,19 @@ func (h *Handler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		m[k] = v
 	}
 	for _, a := range attrs {
-		m[a.Key] = a.Value.String()
+		flattenAttr(m, h.prefix, a)
 	}
-	return &Handler{inner: h.inner.WithAttrs(attrs), buf: h.buf, minLevel: h.minLevel, attrs: m}
+	return &Handler{inner: h.inner.WithAttrs(attrs), buf: h.buf, minLevel: h.minLevel, attrs: m, prefix: h.prefix}
 }
 
-// WithGroup delegates grouping to the inner handler. Group prefixing is not
-// applied to buffered attribute keys — the buffer is a flat diagnostic view.
+// WithGroup delegates grouping to the inner handler and qualifies later
+// buffered attribute keys with the group name ("group.key"), so attrs under
+// different groups don't overwrite each other in the flat diagnostic view.
 func (h *Handler) WithGroup(name string) slog.Handler {
-	return &Handler{inner: h.inner.WithGroup(name), buf: h.buf, minLevel: h.minLevel, attrs: h.attrs}
+	if name == "" {
+		return h
+	}
+	return &Handler{inner: h.inner.WithGroup(name), buf: h.buf, minLevel: h.minLevel, attrs: h.attrs, prefix: h.prefix + name + "."}
 }
 
 // Process-wide defaults. The tray app wires slog to tee into defaultBuffer and

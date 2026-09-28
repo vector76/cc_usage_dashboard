@@ -239,7 +239,8 @@ failure means that turn is lost. See the failure-modes table below.
   topology than a bridged one: the token keeps strangers out, but a bridged
   adapter still puts the unencrypted traffic on a shared LAN.
 - Inbound `occurred_at` on `/log` is bounded (one hour ahead, a year behind)
-  and out-of-range events are rejected with 400. Until the uplink existed every
+  and out-of-range events are rejected with 400, as are negative token counts and
+  a `cost_usd` above $10,000 per event. Until the uplink existed every
   writer was local and shared the host's clock; a forwarding sender makes a
   foreign clock a real input, and the windows engine anchors new session windows
   on the newest event's timestamp. See `docs/design-decisions.md`, "Clock skew

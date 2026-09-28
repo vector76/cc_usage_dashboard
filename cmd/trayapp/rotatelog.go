@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -73,6 +75,7 @@ func (w *rotatingWriter) rotate() error {
 	w.f = nil
 
 	// Shift backups: .N-1 -> .N, drop the oldest beyond maxBackups.
+	var renameErr error
 	for i := w.maxBackups; i >= 1; i-- {
 		src := fmt.Sprintf("%s.%d", w.path, i-1)
 		dst := fmt.Sprintf("%s.%d", w.path, i)
@@ -85,14 +88,54 @@ func (w *rotatingWriter) rotate() error {
 		if i == w.maxBackups {
 			_ = os.Remove(dst)
 		}
-		_ = os.Rename(src, dst)
+		if err := os.Rename(src, dst); err != nil && i == 1 {
+			renameErr = err
+		}
 	}
 
-	f, err := os.OpenFile(w.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	flags := os.O_APPEND | os.O_CREATE | os.O_WRONLY
+	var copyErr error
+	if renameErr != nil {
+		// On Windows any other handle opened without FILE_SHARE_DELETE (a
+		// second instance, a log viewer) blocks the rename. Reopening the
+		// same file and counting from zero would let it grow without bound,
+		// so copy it out and truncate it in place instead.
+		copyErr = copyFile(w.path, w.path+".1")
+		flags |= os.O_TRUNC
+	}
+
+	f, err := os.OpenFile(w.path, flags, 0644)
 	if err != nil {
 		return fmt.Errorf("reopen log file: %w", err)
 	}
 	w.f = f
 	w.size = 0
+	if renameErr != nil {
+		// Written straight to the file: logging through slog here would
+		// re-enter Write while w.mu is held.
+		slog.New(slog.NewJSONHandler(f, nil)).Warn("log rotation: rename failed; copied and truncated in place",
+			"err", renameErr, "copy_err", copyErr)
+		if info, err := f.Stat(); err == nil {
+			w.size = info.Size()
+		}
+	}
 	return nil
+}
+
+// copyFile copies src to dst, replacing dst.
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }

@@ -131,6 +131,37 @@ func TestHandleFeedback_LogPathFeedsUnknownModel(t *testing.T) {
 	}
 }
 
+// TestHandleFeedback_LogPathCountsOnlyStoredEvents verifies the unknown-model
+// aggregate counts events, not requests: the Stop hook re-posts every turn
+// of the transcript on each stop, so a duplicate must not bump the count,
+// and neither must a request rejected before it was stored.
+func TestHandleFeedback_LogPathCountsOnlyStoredEvents(t *testing.T) {
+	srv, _, _ := newIsolatedFeedbackServer(t)
+
+	post := func(body string, want int) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, jsonPOST("/log", []byte(body)))
+		if w.Code != want {
+			t.Fatalf("expected %d from /log, got %d (body=%s)", want, w.Code, w.Body.String())
+		}
+	}
+	event := `{"input_tokens":100,"output_tokens":50,"model":"http-unpriced-model","session_id":"s","message_id":"m1"}`
+	post(event, http.StatusOK)
+	post(event, http.StatusOK) // idempotent re-post: duplicate
+	future := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	post(`{"input_tokens":100,"output_tokens":50,"model":"rejected-model","occurred_at":"`+future+`"}`,
+		http.StatusBadRequest)
+
+	_, resp := getFeedback(t, srv)
+	if len(resp.UnknownModels) != 1 || resp.UnknownModels[0].Model != "http-unpriced-model" {
+		t.Fatalf("expected only http-unpriced-model aggregated, got %+v", resp.UnknownModels)
+	}
+	if resp.UnknownModels[0].Count != 1 {
+		t.Errorf("expected count 1, got %d", resp.UnknownModels[0].Count)
+	}
+}
+
 // TestHandleFeedback_LogPathIgnoresEmptyModel ensures an event with no model
 // (a different, already-handled case) is not aggregated as an unknown model.
 func TestHandleFeedback_LogPathIgnoresEmptyModel(t *testing.T) {

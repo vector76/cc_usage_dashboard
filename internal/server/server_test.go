@@ -180,6 +180,72 @@ func TestHandleAdminReimportRejectsConcurrentRun(t *testing.T) {
 	close(fr.block) // release the first Reimport so its goroutine exits
 }
 
+// TestHandleAdminReimportRequiresJSONContentType verifies the reimport
+// trigger carries the same CSRF gate as every other POST: a browser can
+// mount a form-encoded (or Content-Type-less no-cors) POST cross-origin,
+// and the loopback peer needs no token, so without the gate any web page
+// could restart the full re-walk at will.
+func TestHandleAdminReimportRequiresJSONContentType(t *testing.T) {
+	for _, ct := range []string{"", "application/x-www-form-urlencoded", "text/plain"} {
+		t.Run("ct="+ct, func(t *testing.T) {
+			srv, testStore := createTestServer(t)
+			defer testStore.Close()
+
+			fr := &fakeReimporter{called: make(chan struct{})}
+			srv.SetReimporter(fr)
+
+			req := httptest.NewRequest("POST", "/admin/reimport", bytes.NewReader([]byte("a=b")))
+			if ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+
+			if w.Code != http.StatusUnsupportedMediaType {
+				t.Fatalf("expected 415, got %d (%s)", w.Code, w.Body.String())
+			}
+			select {
+			case <-fr.called:
+				t.Fatal("Reimport ran for a request without a JSON Content-Type")
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// TestHandleLogRejectsInvalidCounts verifies /log refuses token counts no
+// real turn can produce (negative) and a reported cost large enough to
+// swamp every consumption sum, instead of storing them.
+func TestHandleLogRejectsInvalidCounts(t *testing.T) {
+	cases := map[string]string{
+		"negative input":          `{"input_tokens":-1000000,"output_tokens":1}`,
+		"negative output":         `{"input_tokens":10,"output_tokens":-1}`,
+		"negative cache creation": `{"input_tokens":10,"output_tokens":1,"cache_creation_tokens":-5}`,
+		"negative cache 1h":       `{"input_tokens":10,"output_tokens":1,"cache_creation_tokens":5,"cache_creation_1h_tokens":-5}`,
+		"negative cache read":     `{"input_tokens":10,"output_tokens":1,"cache_read_tokens":-5}`,
+		"huge cost":               `{"input_tokens":10,"output_tokens":1,"cost_usd":1e308}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv, testStore := createTestServer(t)
+			defer testStore.Close()
+
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, jsonPOST("/log", []byte(body)))
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d (%s)", w.Code, w.Body.String())
+			}
+			var n int
+			if err := testStore.DB().QueryRow(`SELECT COUNT(*) FROM usage_events`).Scan(&n); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if n != 0 {
+				t.Errorf("rejected event was stored (%d rows)", n)
+			}
+		})
+	}
+}
+
 func TestHandleLogValid(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()

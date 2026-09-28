@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -58,6 +59,11 @@ func (m *Metrics) EventsIngested(source string) int64 {
 	return 0
 }
 
+// labelEscaper escapes a label value per the text exposition format, which
+// defines only \\, \" and \n. Go's %q would also emit \t, \x.. and \u....,
+// which a strict parser rejects, failing the whole scrape.
+var labelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
 // handleMetrics emits all counters in Prometheus text exposition format.
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
@@ -72,7 +78,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(sources)
 	for _, src := range sources {
-		fmt.Fprintf(w, "events_ingested_total{source=%q} %d\n", src, s.metrics.eventsIngested[src].Load())
+		fmt.Fprintf(w, "events_ingested_total{source=\"%s\"} %d\n", labelEscaper.Replace(src), s.metrics.eventsIngested[src].Load())
 	}
 	s.metrics.mu.RUnlock()
 

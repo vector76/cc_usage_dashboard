@@ -33,6 +33,7 @@ const (
 	maxBodySnapshot     = 1 << 16 // 64 KiB: /snapshot is a few floats + timestamps
 	maxBodyParseError   = 1 << 18 // 256 KiB: /parse_error carries fingerprint diagnostics
 	maxBodySlackRelease = 1 << 13 // 8 KiB: /slack/release is a fixed-shape struct
+	maxBodyReimport     = 1 << 10 // 1 KiB: /admin/reimport takes no body; never read
 )
 
 // TailerStatus reports whether the tailer has caught up with all known
@@ -379,6 +380,11 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 // hold the HTTP request open; poll GET /healthz's tailer_caught_up field
 // (or GET /api/feedback for parse error activity) to observe progress.
 func (s *Server) handleAdminReimport(w http.ResponseWriter, r *http.Request) {
+	// Same CSRF gate as every other POST: without it any web page could
+	// restart the full re-walk with a cross-origin form post.
+	if !requireJSONPOST(w, r, maxBodyReimport) {
+		return
+	}
 	if s.reimporter == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "reimport not available")
 		return
@@ -452,6 +458,11 @@ const (
 	maxLogOccurredPast   = 365 * 24 * time.Hour
 )
 
+// maxLogCostUSD bounds a reported per-event cost_usd. One assistant turn
+// at the priciest list rate with a full context costs on the order of $100;
+// this is two orders of magnitude above that, so it only catches garbage.
+const maxLogCostUSD = 10_000.0
+
 // validateLogOccurredAt rejects an event timestamp far enough from the
 // receiving host's clock that it cannot be a real observation.
 func validateLogOccurredAt(occurredAt, now time.Time) error {
@@ -480,6 +491,17 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "input_tokens and output_tokens required")
 		return
 	}
+	// A negative count prices to a negative cost, and a huge reported cost
+	// swamps (or overflows to Inf) every consumption sum it lands in.
+	if req.InputTokens < 0 || req.OutputTokens < 0 || req.CacheCreationTokens < 0 ||
+		req.CacheCreation1hTokens < 0 || req.CacheReadTokens < 0 {
+		writeJSONError(w, http.StatusBadRequest, "token counts must not be negative")
+		return
+	}
+	if req.CostUSD != nil && *req.CostUSD > maxLogCostUSD {
+		writeJSONError(w, http.StatusBadRequest, "cost_usd out of range")
+		return
+	}
 
 	// Resolve cost
 	cost, costSource := ingest.ResolveCost(
@@ -492,16 +514,6 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		req.CacheReadTokens,
 		s.priceTable,
 	)
-
-	// A non-empty model missing from the price table — whether it got a
-	// ceiling estimate or no cost at all — is aggregated (never logged per
-	// event — one usage event per message would flood the buffer with the same
-	// missing model) so the dashboard can prompt the user to add it to
-	// prices.yaml. A ceiling estimate is never nil, so testing cost == nil
-	// alone would silently retire this signal.
-	if req.Model != "" && (cost == nil || costSource == "ceiling") {
-		s.unknownModels.Record(req.Model, time.Now())
-	}
 
 	// Default source if not provided
 	if req.Source == "" {
@@ -562,6 +574,18 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.metrics.IncEventsIngested(req.Source)
+
+	// A non-empty model missing from the price table — whether it got a
+	// ceiling estimate or no cost at all — is aggregated (never logged per
+	// event — one usage event per message would flood the buffer with the same
+	// missing model) so the dashboard can prompt the user to add it to
+	// prices.yaml. A ceiling estimate is never nil, so testing cost == nil
+	// alone would silently retire this signal. Recorded only once the event
+	// is stored, so the Stop hook's duplicate re-posts and rejected requests
+	// don't inflate the count.
+	if req.Model != "" && (cost == nil || costSource == "ceiling") {
+		s.unknownModels.Record(req.Model, time.Now())
+	}
 
 	s.deriveWindows()
 

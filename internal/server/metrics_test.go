@@ -257,6 +257,34 @@ func TestMetricsEndpointPrometheusOutput(t *testing.T) {
 	}
 }
 
+// TestMetricsEndpointEscapesLabelsPerExpositionFormat verifies a source label
+// is escaped the way the Prometheus text format defines — only backslash,
+// double quote and newline — rather than with Go's %q, whose \t, \x.. and
+// \u.... escapes a strict parser rejects, failing the whole scrape.
+func TestMetricsEndpointEscapesLabelsPerExpositionFormat(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	srv.metrics.IncEventsIngested("a\tb")
+	srv.metrics.IncEventsIngested("q\"b\\s\nn")
+	srv.metrics.IncEventsIngested("café​")
+
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	for _, line := range []string{
+		"events_ingested_total{source=\"a\tb\"} 1\n",
+		`events_ingested_total{source="q\"b\\s\nn"} 1` + "\n",
+		"events_ingested_total{source=\"café​\"} 1\n",
+	} {
+		if !strings.Contains(body, line) {
+			t.Errorf("metrics output missing line %q\nfull body:\n%s", line, body)
+		}
+	}
+}
+
 func TestMetricsEndpointEmpty(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()

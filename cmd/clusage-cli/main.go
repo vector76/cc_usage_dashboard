@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,8 +22,10 @@ var (
 	timeoutMs = getenv("CLUSAGE_TIMEOUT_MS", "2000")
 	// token is the trayapp's access token. The trayapp demands it from every
 	// caller not on loopback, which includes containers reaching it through
-	// host.docker.internal.
-	token = os.Getenv("CLUSAGE_TOKEN")
+	// host.docker.internal. Trimmed like config.Load's uplink.token: an env
+	// file written on Windows leaves a trailing CR, which net/http refuses
+	// to send in a header.
+	token = strings.TrimSpace(os.Getenv("CLUSAGE_TOKEN"))
 )
 
 func main() {
@@ -73,7 +77,9 @@ func cmdPing() {
 
 	resp, err := httpGet(client, fmt.Sprintf("http://%s:%s/healthz", host, port))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "connection refused\n")
+		// The error says which failure it was (refused, DNS, timeout),
+		// and each needs a different fix. It never contains the token.
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(3) // Exit code 3: host unreachable
 	}
 	defer resp.Body.Close()
@@ -103,8 +109,14 @@ func cmdLog() {
 	fs.Parse(os.Args[2:])
 
 	if *fromHook {
-		// Mode B: process hook payload from stdin
-		processHookInput(os.Stdin, hostURL())
+		// Mode B: process hook payload from stdin. Exit 2 from a Stop hook
+		// tells Claude Code to keep going instead of stopping, which would
+		// only re-fire the same failing hook, so failures here exit 1:
+		// reported, but non-blocking.
+		if err := processHookInput(os.Stdin, hostURL()); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 
@@ -151,7 +163,7 @@ func cmdSlack() {
 
 	resp, err := httpGet(client, fmt.Sprintf("http://%s:%s/slack", host, port))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(3)
 	}
 	defer resp.Body.Close()
@@ -171,13 +183,24 @@ func cmdSlack() {
 	case "json":
 		json.NewEncoder(os.Stdout).Encode(result)
 	case "release-bool":
-		if release, ok := result["release_recommended"].(bool); ok {
-			fmt.Println(release)
+		release, ok := result["release_recommended"].(bool)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "error: response has no release_recommended\n")
+			os.Exit(5)
 		}
+		fmt.Println(release)
 	case "fraction":
-		if fraction, ok := result["slack_combined_fraction"].(float64); ok {
-			fmt.Printf("%.4f\n", fraction)
+		// Null until the trayapp has quota data for the session window.
+		// Printing nothing with exit 0 would read as success to a script.
+		fraction, ok := result["slack_combined_fraction"].(float64)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "error: slack_combined_fraction is not available\n")
+			os.Exit(5)
 		}
+		fmt.Printf("%.4f\n", fraction)
+	default:
+		fmt.Fprintf(os.Stderr, "error: unknown format %q\n", *format)
+		os.Exit(2)
 	}
 
 	os.Exit(0)
@@ -196,7 +219,7 @@ func postEvent(payload map[string]interface{}) {
 	resp, err := httpPost(client, fmt.Sprintf("http://%s:%s/log", host, port), body)
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(3) // Exit code 3: host unreachable
 	}
 	defer resp.Body.Close()
@@ -241,7 +264,7 @@ func cmdConsumption() {
 	q.Set("period", *period)
 	resp, err := httpGet(client, fmt.Sprintf("%s/consumption?%s", hostURL(), q.Encode()))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(3)
 	}
 	defer resp.Body.Close()
@@ -312,7 +335,7 @@ func cmdRelease() {
 
 	resp, err := httpPost(client, fmt.Sprintf("%s/slack/release", hostURL()), body)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(3)
 	}
 	defer resp.Body.Close()
@@ -352,7 +375,7 @@ func cmdReimport() {
 	client := &http.Client{Timeout: parseTimeout()}
 	resp, err := httpPost(client, fmt.Sprintf("%s/admin/reimport", hostURL()), nil)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: connection refused\n")
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(3)
 	}
 	body, _ := io.ReadAll(resp.Body)
@@ -438,10 +461,25 @@ func statusText(code int) string {
 	return fmt.Sprintf("%d", code)
 }
 
+// maxTimeout caps CLUSAGE_TIMEOUT_MS at Claude Code's default hook timeout;
+// a longer request would be killed with the hook anyway.
+const maxTimeout = 10 * time.Minute
+
+// parseTimeout reads CLUSAGE_TIMEOUT_MS. A value that is not a positive
+// whole number falls back to the default: 0 or a negative value would turn
+// http.Client's timeout off, leaving a hook to hang on a silent host.
 func parseTimeout() time.Duration {
-	var ms int64 = 2000
-	if timeoutMs != "" {
-		fmt.Sscanf(timeoutMs, "%d", &ms)
+	const defaultTimeout = 2000 * time.Millisecond
+	if timeoutMs == "" {
+		return defaultTimeout
+	}
+	ms, err := strconv.ParseInt(strings.TrimSpace(timeoutMs), 10, 64)
+	if err != nil || ms <= 0 {
+		fmt.Fprintf(os.Stderr, "warning: ignoring CLUSAGE_TIMEOUT_MS=%q, using %s\n", timeoutMs, defaultTimeout)
+		return defaultTimeout
+	}
+	if ms > maxTimeout.Milliseconds() {
+		return maxTimeout
 	}
 	return time.Duration(ms) * time.Millisecond
 }

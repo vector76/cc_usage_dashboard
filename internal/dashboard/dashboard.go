@@ -630,10 +630,15 @@ func (h *Handler) loadUsedSeries(db *sql.DB, kind string, startedAt, endsAt time
 	return out, rows.Err()
 }
 
+// lastSnapshotAge reads the same row as the slack gate's baseline_freshness
+// check: the newest one carrying a reading. Future jitter within
+// slack.MaxFutureSkew reads as zero; anything further ahead stays negative
+// so the page can flag it, since the gate treats it as stale.
 func (h *Handler) lastSnapshotAge(db *sql.DB, now time.Time) (time.Duration, bool, error) {
 	var receivedAt time.Time
 	err := db.QueryRow(`
 		SELECT received_at FROM quota_snapshots
+		WHERE session_used IS NOT NULL OR weekly_used IS NOT NULL
 		ORDER BY received_at DESC LIMIT 1
 	`).Scan(&receivedAt)
 	if err == sql.ErrNoRows {
@@ -643,7 +648,7 @@ func (h *Handler) lastSnapshotAge(db *sql.DB, now time.Time) (time.Duration, boo
 		return 0, false, err
 	}
 	age := now.Sub(receivedAt)
-	if age < 0 {
+	if age < 0 && age >= -slack.MaxFutureSkew {
 		age = 0
 	}
 	return age, true, nil

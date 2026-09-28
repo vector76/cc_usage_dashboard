@@ -67,23 +67,25 @@ func ResolveCredentialsPath(override string) string {
 // state an expired token produces — in every case the source simply
 // cannot produce a reading right now, and the distinction does not change
 // what the dashboard should show. Errors never quote the file's contents.
+//
+// A read that fails or does not decode is retried a few times before it is
+// reported: a poll that lands while Claude Code is rewriting the file (or,
+// on Windows, holding it open) sees a torn or locked file for a moment, and
+// that is not the broken source the error would otherwise report.
 func LoadCredential(path string) (*Credential, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%w: no credentials file at %s", ErrCredentialStale, path)
+	var (
+		f   credentialsFile
+		err error
+	)
+	for attempt := 1; ; attempt++ {
+		f, err = readCredentialsFile(path)
+		if err == nil || errors.Is(err, ErrCredentialStale) || attempt == credentialReadAttempts {
+			break
 		}
-		// os.ReadFile's error text is a path and a syscall message, not
-		// file contents, so it is safe to wrap.
-		return nil, fmt.Errorf("reading credentials: %w", err)
+		time.Sleep(credentialRetryDelay)
 	}
-
-	var f credentialsFile
-	if err := json.Unmarshal(data, &f); err != nil {
-		// Deliberately not %w on the decode error: json.Unmarshal's
-		// message can quote the offending value, which for this file
-		// could be the token itself.
-		return nil, fmt.Errorf("credentials file at %s is not valid JSON", path)
+	if err != nil {
+		return nil, err
 	}
 
 	if f.ClaudeAIOAuth.AccessToken == "" {
@@ -95,6 +97,35 @@ func LoadCredential(path string) (*Credential, error) {
 		cred.ExpiresAt = time.UnixMilli(f.ClaudeAIOAuth.ExpiresAtMs).UTC()
 	}
 	return cred, nil
+}
+
+// credentialReadAttempts and credentialRetryDelay bound LoadCredential's
+// retry of a torn or locked read: long enough to outlast a rewrite of a
+// file this small, short enough not to hold up the poll.
+const (
+	credentialReadAttempts = 3
+	credentialRetryDelay   = 100 * time.Millisecond
+)
+
+func readCredentialsFile(path string) (credentialsFile, error) {
+	var f credentialsFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return f, fmt.Errorf("%w: no credentials file at %s", ErrCredentialStale, path)
+		}
+		// os.ReadFile's error text is a path and a syscall message, not
+		// file contents, so it is safe to wrap.
+		return f, fmt.Errorf("reading credentials: %w", err)
+	}
+
+	if err := json.Unmarshal(data, &f); err != nil {
+		// Deliberately not %w on the decode error: json.Unmarshal's
+		// message can quote the offending value, which for this file
+		// could be the token itself.
+		return f, fmt.Errorf("credentials file at %s is not valid JSON", path)
+	}
+	return f, nil
 }
 
 // UsableAt reports whether the token is worth sending at now.

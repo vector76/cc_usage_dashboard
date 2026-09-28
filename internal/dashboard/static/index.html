@@ -29,6 +29,9 @@
   .metric .label { color: #666; margin-right: 0.35rem; }
   .metric .value { font-variant-numeric: tabular-nums; }
   .snapshot-line { margin: 0.9rem 0 0 0; font-size: 0.8rem; color: #888; }
+  /* Shown, and the state-driven parts dimmed, only while polls fail. */
+  .stale-note { font-size: 0.85rem; color: #b45309; font-weight: bold; }
+  .stale { opacity: 0.45; }
   #period { font: inherit; font-size: 0.85rem; padding: 0.05rem 0.25rem; }
   .muted { color: #888; }
   svg { width: 100%; height: auto; display: block; }
@@ -57,6 +60,7 @@
   <div class="section-head">
     <h2>Burn-down</h2>
     <span class="slack-flag">Slack release: <span id="slack-release" class="muted">—</span></span>
+    <span class="stale-note" id="stale-note" role="status" hidden></span>
   </div>
   <div class="chart-block">
     <h3>Session window (last 15h, current window in rightmost third)</h3>
@@ -236,6 +240,14 @@ function renderSnapshotLine(s) {
     return;
   }
   const nowMs = s.now ? new Date(s.now).getTime() : Date.now();
+  if (age < 0) {
+    // Ahead of the server clock by more than the slack gate tolerates, so
+    // the gate treats it as stale; most likely the clock stepped backward.
+    p.appendChild(document.createTextNode(
+      fmtTooltipTime(nowMs - age * 1000) + " (" + fmtAge(-age) +
+      " in the future; the PC clock may have changed)"));
+    return;
+  }
   p.appendChild(document.createTextNode(
     fmtTooltipTime(nowMs - age * 1000) + " (" + fmtAge(age) + " ago)"));
 }
@@ -707,11 +719,60 @@ function selectedPeriod() {
   return PERIODS.indexOf(v) !== -1 ? v : PERIODS[0];
 }
 
-async function refreshConsumption() {
+// Every request gives up after this long. Without a limit, a server that
+// accepts the connection but never answers leaves the request — and, with the
+// one-cycle-at-a-time guard in refresh(), the whole poll loop — pending
+// forever. Generous because a cold 30-day consumption scan is legitimately slow.
+const FETCH_TIMEOUT_MS = 30000;
+
+// fetchJSON GETs url and resolves with the parsed body, or rejects when there
+// is no usable answer: network failure, timeout, a non-2xx status, a body that
+// is not JSON, or an {"error": ...} payload. A 500's JSON error body parses
+// fine, so without the status check it would be drawn as a state or feedback
+// payload with every field missing — i.e. as "no data" rather than a failure.
+async function fetchJSON(url) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
   try {
-    const resp = await fetch("/consumption?period=" + encodeURIComponent(selectedPeriod()));
-    renderConsumption(await resp.json());
+    const resp = await fetch(url, { signal: ctl.signal });
+    let body = null;
+    try { body = await resp.json(); } catch (e) { /* not JSON; rejected below */ }
+    if (!resp.ok || body == null || typeof body !== "object" || body.error) {
+      const err = new Error(url + ": HTTP " + resp.status);
+      err.reason = resp.ok ? "unreadable response" : "server error (HTTP " + resp.status + ")";
+      throw err;
+    }
+    return body;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// failureReason turns a fetchJSON rejection into the few words the stale note
+// and the feedback panel show. Only fixed strings and a status number — never
+// anything from the response body.
+function failureReason(e) {
+  if (e && e.reason) return e.reason;
+  if (e && e.name === "AbortError") return "request timed out";
+  return "server unreachable";
+}
+
+// consumptionSeq numbers each request so only the latest one renders. The
+// period picker fires a request of its own while the poll's may still be in
+// flight, and the slower one — typically the old, longer period — would
+// otherwise land last and paint its numbers under the new selection.
+let consumptionSeq = 0;
+
+async function refreshConsumption() {
+  const seq = ++consumptionSeq;
+  let d = null;
+  try {
+    d = await fetchJSON("/consumption?period=" + encodeURIComponent(selectedPeriod()));
   } catch (e) { console.error("consumption error", e); }
+  if (seq !== consumptionSeq) return;
+  // A failed fetch renders as "unavailable" rather than leaving the previous
+  // poll's numbers on screen as if they were current.
+  renderConsumption(d);
 }
 
 // fmtFbTime renders a feedback timestamp in local time, tolerating both the
@@ -834,17 +895,35 @@ function renderFeedbackBody(d) {
 // instantly from cache while a fresh fetch is in flight.
 let lastFeedback = null;
 
+// feedbackSeq numbers each request so only the latest one renders: expanding
+// the panel fetches while a poll-driven fetch may still be in flight.
+let feedbackSeq = 0;
+
 // refreshFeedback fetches /api/feedback, updates the always-visible badge, and
 // (re)renders the body only while the panel is open. Called on each state
-// refresh tick so the badge stays live even when collapsed.
+// refresh tick so the badge stays live even when collapsed. A failure says so
+// in the badge and panel — an error body is not an empty feedback list, and
+// "(none)" there would make a database failure look like a clean install —
+// and leaves lastFeedback holding the last good payload.
 async function refreshFeedback() {
+  const seq = ++feedbackSeq;
+  let d;
   try {
-    const resp = await fetch("/api/feedback");
-    const d = await resp.json();
-    lastFeedback = d;
-    renderFeedbackBadge(d.summary || {});
-    if (document.getElementById("feedback").open) renderFeedbackBody(d);
-  } catch (e) { console.error("feedback error", e); }
+    d = await fetchJSON("/api/feedback");
+  } catch (e) {
+    console.error("feedback error", e);
+    if (seq !== feedbackSeq) return;
+    document.getElementById("fb-badge").textContent = "(unavailable)";
+    if (document.getElementById("feedback").open) {
+      clear(document.getElementById("fb-body"))
+        .appendChild(fbEmpty("Could not load feedback: " + failureReason(e) + "."));
+    }
+    return;
+  }
+  if (seq !== feedbackSeq) return;
+  lastFeedback = d;
+  renderFeedbackBadge(d.summary || {});
+  if (document.getElementById("feedback").open) renderFeedbackBody(d);
 }
 
 document.getElementById("feedback").addEventListener("toggle", (e) => {
@@ -854,10 +933,47 @@ document.getElementById("feedback").addEventListener("toggle", (e) => {
   }
 });
 
-async function refresh() {
+// stateFailedSince is when the current run of failed state polls began, on the
+// client's clock, or null while polls succeed.
+let stateFailedSince = null;
+
+// renderStale flags (err set) or unflags (err null) everything drawn from
+// /api/dashboard/state. Once the server stops answering, the charts, the slack
+// flag and the snapshot line would otherwise keep the last good poll's values
+// indefinitely — and the snapshot age is server-supplied, so it freezes too,
+// reading "5 s ago" hours later. On failure the flag drops to "—" rather than
+// keep a verdict nothing is re-evaluating (the same reasoning as "paused"),
+// and the rest is dimmed under a note saying why and since when.
+function renderStale(err) {
+  const stale = err != null;
+  for (const id of ["chart-session", "chart-weekly", "snapshot-line"]) {
+    document.getElementById(id).classList.toggle("stale", stale);
+  }
+  const note = document.getElementById("stale-note");
+  if (!stale) {
+    stateFailedSince = null;
+    note.hidden = true;
+    note.textContent = "";
+    return;
+  }
+  if (stateFailedSince == null) stateFailedSince = Date.now();
+  renderSlackRelease(null);
+  note.textContent = "Not updating: " + failureReason(err) +
+    " since " + fmtTooltipTime(stateFailedSince);
+  note.hidden = false;
+}
+
+async function refreshState() {
+  let s;
   try {
-    const sResp = await fetch("/api/dashboard/state");
-    const s = await sResp.json();
+    s = await fetchJSON("/api/dashboard/state");
+  } catch (e) {
+    console.error("state error", e);
+    renderStale(e);
+    return;
+  }
+  try {
+    renderStale(null);
     renderSlackRelease(s);
     renderSnapshotLine(s);
     // Slack zones come from the server (state.slack_profiles), which
@@ -877,11 +993,26 @@ async function refresh() {
       slackProfile: profiles.weekly || [[0, 80], [30, 80], [100, 10]],
     });
     renderVolumeLegend(presentFamilies([s.session, s.weekly]));
-  } catch (e) { console.error("state error", e); }
-  await refreshConsumption();
-  // Keep the feedback badge live so the user can tell at a glance whether
-  // the collapsed panel is worth expanding.
-  refreshFeedback();
+  } catch (e) { console.error("state render error", e); }
+}
+
+// refreshing guards the poll: a tick that finds the previous cycle still in
+// flight is skipped rather than stacking another set of requests behind a
+// stalled server. FETCH_TIMEOUT_MS bounds how long a cycle can hold it.
+let refreshing = false;
+
+async function refresh() {
+  if (refreshing) return;
+  refreshing = true;
+  try {
+    await refreshState();
+    await refreshConsumption();
+    // Keep the feedback badge live so the user can tell at a glance whether
+    // the collapsed panel is worth expanding.
+    await refreshFeedback();
+  } finally {
+    refreshing = false;
+  }
 }
 
 // Changing the period re-fetches straight away rather than waiting out the

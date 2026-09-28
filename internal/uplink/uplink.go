@@ -65,9 +65,18 @@ type Forwarder struct {
 // no path — config.Load has already validated and normalized it).
 func New(baseURL string, s *store.Store) *Forwarder {
 	return &Forwarder{
-		baseURL:  baseURL,
-		store:    s,
-		client:   &http.Client{Timeout: requestTimeout},
+		baseURL: baseURL,
+		store:   s,
+		client: &http.Client{
+			Timeout: requestTimeout,
+			// Following a redirect would reissue the POST as a bodyless
+			// GET and let whatever answers it settle the event. The
+			// receiver never redirects, so post treats a 3xx as a
+			// transient failure and holds the cursor.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		interval: defaultInterval,
 		batch:    defaultBatch,
 		stopChan: make(chan struct{}),

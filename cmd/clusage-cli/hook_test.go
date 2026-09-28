@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -211,11 +213,113 @@ func TestHookPostSendsBearerToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if !postEventPayloadTo(srv.URL, map[string]interface{}{"input_tokens": 1, "output_tokens": 1}) {
-		t.Fatal("post failed")
+	if err := postEventPayloadTo(&http.Client{}, srv.URL, map[string]interface{}{"input_tokens": 1, "output_tokens": 1}); err != nil {
+		t.Fatalf("post failed: %v", err)
 	}
 	if got != "Bearer s3cret" {
 		t.Errorf("Authorization = %q, want %q", got, "Bearer s3cret")
+	}
+}
+
+// writeHookTranscript writes a transcript of n assistant lines under a
+// projects/<encoded>/ layout and returns the hook payload naming it.
+func writeHookTranscript(t *testing.T, n int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&buf, `{"type":"assistant","sessionId":"s","timestamp":"2026-09-22T10:00:00Z","message":{"id":"m%d","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1}}}`+"\n", i)
+	}
+	dir := filepath.Join(t.TempDir(), "projects", "-p")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "s.jsonl")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	payload, _ := json.Marshal(map[string]string{"transcript_path": path})
+	return payload
+}
+
+// captureStderr runs fn with os.Stderr redirected and returns what it wrote.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+	old := os.Stderr
+	os.Stderr = f
+	fn()
+	os.Stderr = old
+	f.Close()
+	out, err := os.ReadFile(f.Name())
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	return string(out)
+}
+
+// A host that drops packets costs a full timeout per request, so walking
+// on after the first transport failure multiplies it by every line in the
+// transcript. Later lines would fail the same way; the next Stop re-walks
+// the whole transcript anyway.
+func TestHookStopsAfterFirstTransportFailure(t *testing.T) {
+	var (
+		mu       sync.Mutex
+		attempts int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		attempts++
+		mu.Unlock()
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close()
+	}))
+	defer srv.Close()
+
+	captureStderr(t, func() {
+		processHookInput(bytes.NewReader(writeHookTranscript(t, 3)), srv.URL)
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts != 1 {
+		t.Errorf("expected the walk to stop after the first transport failure, host saw %d attempts", attempts)
+	}
+}
+
+// A rotated token makes every hook POST fail with 401. The hook still exits
+// 0, so stderr is the only place the failure can show.
+func TestHookReportsFailedPostsOnStderr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	got := captureStderr(t, func() {
+		processHookInput(bytes.NewReader(writeHookTranscript(t, 2)), srv.URL)
+	})
+	if !strings.Contains(got, "401") || !strings.Contains(got, "CLUSAGE_TOKEN") {
+		t.Errorf("expected stderr to report the 401 and name CLUSAGE_TOKEN, got %q", got)
+	}
+}
+
+func TestHookSuccessWritesNothingToStderr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	got := captureStderr(t, func() {
+		processHookInput(bytes.NewReader(writeHookTranscript(t, 2)), srv.URL)
+	})
+	if got != "" {
+		t.Errorf("expected no stderr output on success, got %q", got)
 	}
 }
 
@@ -231,7 +335,7 @@ func TestHookPostOmitsAuthorizationWithoutToken(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	postEventPayloadTo(srv.URL, map[string]interface{}{"input_tokens": 1, "output_tokens": 1})
+	postEventPayloadTo(&http.Client{}, srv.URL, map[string]interface{}{"input_tokens": 1, "output_tokens": 1})
 	if sent {
 		t.Error("no token configured, so no Authorization header should be sent")
 	}

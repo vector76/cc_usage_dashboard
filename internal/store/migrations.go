@@ -239,16 +239,37 @@ func ApplyMigrations(db *sql.DB) error {
 			continue
 		}
 
-		_, err := db.Exec(m.SQL)
-		if err != nil {
-			return fmt.Errorf("migration %d (%s) failed: %w", m.Version, m.Name, err)
-		}
-
-		_, err = db.Exec("INSERT INTO schema_version (version) VALUES (?)", m.Version)
-		if err != nil {
-			return fmt.Errorf("failed to record migration %d: %w", m.Version, err)
+		if err := applyMigration(db, m); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// applyMigration runs one migration's SQL and records its version in a
+// single transaction. Without it each statement autocommits, so a failure or
+// process death partway through (or before the version row lands) leaves the
+// schema changed but the version unrecorded, and the next start re-runs a
+// non-idempotent ALTER and fails on every start after that. SQLite DDL is
+// transactional, so the whole step now commits or rolls back as one.
+func applyMigration(db *sql.DB, m Migration) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin migration %d: %w", m.Version, err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(m.SQL); err != nil {
+		return fmt.Errorf("migration %d (%s) failed: %w", m.Version, m.Name, err)
+	}
+
+	if _, err := tx.Exec("INSERT INTO schema_version (version) VALUES (?)", m.Version); err != nil {
+		return fmt.Errorf("failed to record migration %d: %w", m.Version, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit migration %d: %w", m.Version, err)
+	}
 	return nil
 }

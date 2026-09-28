@@ -70,6 +70,25 @@ func TestHandleConsumption_DefaultPeriod(t *testing.T) {
 	}
 }
 
+// TestHandleConsumption_BadPeriodIs400 verifies a malformed ?period is
+// answered as the caller's error (400), matching /api/usage/breakdown,
+// rather than as a 500 server fault.
+func TestHandleConsumption_BadPeriodIs400(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	for _, p := range []string{"abc", "-5h", "213504d"} {
+		t.Run(p, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/consumption?period="+p, nil)
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected 400, got %d (body=%s)", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
 func mapKeys(m map[string]any) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

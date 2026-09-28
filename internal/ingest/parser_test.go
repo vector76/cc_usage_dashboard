@@ -319,6 +319,55 @@ func TestParserErrors(t *testing.T) {
 	}
 }
 
+// TestParserRejectsOutOfRangeValues verifies that token counts and cost_usd
+// outside a sane range are recorded as parse errors instead of producing an
+// event. Negative counts would reduce SUM() totals, huge ones overflow SQLite's
+// integer SUM() or Go's int conversion, and a huge cost_usd sums to +Inf,
+// which encoding/json refuses to marshal.
+func TestParserRejectsOutOfRangeValues(t *testing.T) {
+	cases := map[string]string{
+		"negative input":    `{"type":"assistant","message":{"usage":{"input_tokens":-100,"output_tokens":50}}}`,
+		"fractional output": `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":1.5}}}`,
+		"huge cache read":   `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":5e18}}}`,
+		"negative cache 5m": `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":-1}}}`,
+		"huge cache 1h":     `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_creation":{"ephemeral_1h_input_tokens":1e300}}}}`,
+		"huge cost_usd":     `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50}},"cost_usd":1e308}`,
+		"negative cost_usd": `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50}},"cost_usd":-5}`,
+	}
+	for name, line := range cases {
+		t.Run(name, func(t *testing.T) {
+			parser := NewParser(strings.NewReader(line + "\n"))
+			event, err := parser.ParseNext()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if event != nil {
+				t.Errorf("expected no event, got %+v", event)
+			}
+			if len(parser.Errors()) != 1 {
+				t.Errorf("expected 1 parse error, got %d", len(parser.Errors()))
+			}
+			if parser.BytesConsumed() != int64(len(line)+1) {
+				t.Errorf("rejected line must still be consumed, BytesConsumed=%d", parser.BytesConsumed())
+			}
+		})
+	}
+}
+
+// TestParserAcceptsInRangeValues guards the other side of the bounds: zero and
+// large-but-realistic values still parse.
+func TestParserAcceptsInRangeValues(t *testing.T) {
+	line := `{"type":"assistant","message":{"usage":{"input_tokens":0,"output_tokens":64000,"cache_read_input_tokens":2000000,"cache_creation_input_tokens":500000,"cache_creation":{"ephemeral_1h_input_tokens":500000}}},"cost_usd":0}`
+	parser := NewParser(strings.NewReader(line))
+	event, err := parser.ParseNext()
+	if err != nil || event == nil {
+		t.Fatalf("event=%v err=%v errors=%+v, want an event", event, err, parser.Errors())
+	}
+	if event.CacheReadTokens != 2000000 || event.CacheCreation1hTokens != 500000 {
+		t.Errorf("got cache read %d, 1h %d", event.CacheReadTokens, event.CacheCreation1hTokens)
+	}
+}
+
 func BenchmarkParser(b *testing.B) {
 	jsonl := `{"type":"assistant","sessionId":"sess-123","message":{"id":"msg-456","model":"claude-3-5-sonnet-20241022","usage":{"input_tokens":1000,"output_tokens":500}}}`
 

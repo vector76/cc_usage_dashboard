@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,10 @@ import (
 	"github.com/vector76/cc_usage_dashboard/internal/store"
 	"github.com/fsnotify/fsnotify"
 )
+
+// syntheticModel is the model name Claude Code writes on zero-usage assistant
+// entries it generates itself rather than receiving from the API.
+const syntheticModel = "<synthetic>"
 
 // Tailer watches the Claude projects directory for transcript changes.
 type Tailer struct {
@@ -54,6 +59,11 @@ func (t *Tailer) Start() {
 // loadPersistedOffsets pre-populates the in-memory offset map from the
 // database so previously-tracked files resume at their last persisted
 // position rather than being re-read from the beginning.
+//
+// Only offsets under this tailer's root are loaded. The table is shared with
+// the other tailer root, whose files this tailer never processes, so their
+// entries would sit stale in the map and pin CaughtUp false. A path skipped
+// here by mistake is harmless: processFile falls back to the database.
 func (t *Tailer) loadPersistedOffsets() {
 	persisted, err := t.store.LoadAllTailerOffsets()
 	if err != nil {
@@ -62,9 +72,20 @@ func (t *Tailer) loadPersistedOffsets() {
 	}
 	t.offsetMu.Lock()
 	for path, offset := range persisted {
-		t.offsets[path] = offset
+		if t.underRoot(path) {
+			t.offsets[path] = offset
+		}
 	}
 	t.offsetMu.Unlock()
+}
+
+// underRoot reports whether path lies inside this tailer's projects dir.
+func (t *Tailer) underRoot(path string) bool {
+	rel, err := filepath.Rel(t.projectsDir, path)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // Stop stops the tailer.
@@ -266,15 +287,19 @@ func (t *Tailer) processFile(filePath string) {
 	if !cached {
 		dbOffset, err := t.store.GetTailerOffset(filePath)
 		if err != nil {
+			// Retry on the next poll: reading from 0 would re-insert every
+			// parse error already recorded for this file.
 			slog.Warn("failed to load tailer offset from database", "path", filePath, "err", err)
+			return
 		}
 		offset = dbOffset
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
+		// Logged only: every poll retries this file, so a parse_errors row
+		// here would add one per poll for as long as it stays unopenable.
 		slog.Error("failed to open transcript file", "path", filePath, "err", err)
-		t.recordParseError("tailer", filePath, fmt.Sprintf("failed to open: %v", err), "")
 		return
 	}
 	defer file.Close()
@@ -337,8 +362,10 @@ func (t *Tailer) processFile(filePath string) {
 		// on cost == nil alone would have gone quiet the moment ceiling
 		// pricing landed, since a ceiling estimate is never nil. (An empty
 		// model is a different, already-handled case and is ignored by
-		// UnknownModels.Record.)
-		if event.Model != "" && (cost == nil || costSource == "ceiling") {
+		// UnknownModels.Record.) Claude Code's zero-usage "<synthetic>"
+		// entries are not a model anyone could add to prices.yaml, so they
+		// are not aggregated either.
+		if event.Model != "" && event.Model != syntheticModel && (cost == nil || costSource == "ceiling") {
 			t.unknown.Record(event.Model, time.Now())
 		}
 		if _, err := tx.Exec(`
@@ -399,14 +426,6 @@ func (t *Tailer) processFile(filePath string) {
 	t.offsetMu.Lock()
 	t.offsets[filePath] = newOffset
 	t.offsetMu.Unlock()
-}
-
-// recordParseError records a parse error in the database.
-func (t *Tailer) recordParseError(source, path, reason, payload string) {
-	_, err := t.store.InsertParseError(time.Now(), source, reason, payload)
-	if err != nil {
-		slog.Error("failed to record parse error", "path", path, "err", err)
-	}
 }
 
 // isTranscriptFile checks if a file is a transcript JSONL.

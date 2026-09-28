@@ -66,7 +66,8 @@ over an event the peer *permanently rejected* (a 4xx, e.g. the
 `occurred_at` filter answering 400 for a skewed clock) as well as over
 one it accepted, because a rejection that retrying cannot fix would
 otherwise wedge every later event behind it forever. Transient failures
-(5xx, 429, connection refused) do not advance it.
+(5xx, 429, connection refused, and a 3xx, since the forwarder does not
+follow redirects) do not advance it.
 
 The cursor is an optimisation, not a correctness mechanism. Losing it
 re-sends history; the receiver's uniqueness constraint absorbs the
@@ -164,7 +165,10 @@ to the most recent row from the same `source`, the existing row's
 `observed_at` and `received_at` are slid forward in place instead of
 inserting a duplicate. The slide is suppressed when the prior row is itself an
 explicit start (`continuous_with_prev = 0`), so a fresh page load
-always anchors a new row.
+always anchors a new row. The slide only moves forward: an arrival whose
+`observed_at` is older than the latest row's (a second tab posting a
+back-dated observation) is inserted as its own row rather than dragging
+the latest row back in time.
 
 The audit-trail rules:
 
@@ -300,7 +304,11 @@ runtime the table is selected by `ingest.ResolvePriceTable` following a preceden
 
 A model the table does not list is priced at the table's **ceiling** — the
 maximum of each rate across every entry (`ingest.CeilingPrices`) — and marked
-`cost_source = 'ceiling'`.
+`cost_source = 'ceiling'`. "Does not list" means after `ingest.ResolveCost` has
+tried the exact id, the id without its `-YYYYMMDD` date, that family's `-0`
+alias (`claude-sonnet-4-20250514` → `claude-sonnet-4-0`), and, for a Bedrock
+or Vertex id, the same steps on its native form
+(`us.anthropic.claude-sonnet-4-5-20250929-v1:0`, `claude-opus-4-5@20251101`).
 
 The alternative, leaving such events NULL, hid them twice over: they were
 excluded from every dollar total, *and* the dashboard's stacked bars skip NULL

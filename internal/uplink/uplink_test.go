@@ -355,6 +355,31 @@ func TestForwardOnceHoldsCursorOnAuthRejection(t *testing.T) {
 	}
 }
 
+// Following a redirect turns the POST into a bodyless GET, and whatever
+// answers that GET — a login page, a portal — would decide the event's fate.
+// The receiver never redirects, so a 3xx means something between the two is
+// misconfigured: hold the cursor rather than count the event as delivered.
+func TestForwardOnceHoldsCursorOnRedirect(t *testing.T) {
+	s := newTestStore(t)
+	insertEvent(t, s, "m1")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/log" {
+			http.Redirect(w, req, "/landing", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	if _, err := New(srv.URL, s).forwardOnce(); err == nil {
+		t.Fatal("expected a redirect to surface as an error")
+	}
+	if cursor, _ := s.GetUplinkCursor(srv.URL); cursor != 0 {
+		t.Errorf("cursor must not advance on a redirect, got %d", cursor)
+	}
+}
+
 // The 401 message is what a user reads in the sender's log after rotating
 // the receiver's token, so it must say which setting to fix.
 func TestForwardOnceUnauthorizedNamesTheSetting(t *testing.T) {

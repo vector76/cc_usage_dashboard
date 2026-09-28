@@ -122,7 +122,10 @@ For session windows, three behaviours flow from that:
   window already exists and a snapshot reports `session_active=false`
   (with `session_used=0` as a defensive contradiction check), the
   engine closes the window at the snapshot's `observed_at` rather
-  than waiting for the calendar 5-hour expiry. This produces a clean
+  than waiting for the calendar 5-hour expiry. A limbo snapshot whose
+  (backdated) `observed_at` precedes the window's `started_at` does
+  not close it: it describes the gap before this session, and closing
+  on it would invert the window. This produces a clean
   boundary between "real session" and "post-closure limbo" so later
   evidence can be attributed correctly.
 - **Event-anchored open (fallback).** When no session window is

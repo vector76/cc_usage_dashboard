@@ -155,7 +155,7 @@ slack:
 #   # build has no console, so leaving this empty still gets you logs.
 #   file: ""
 
-# retention:
+# retention:           # days to keep; 0 keeps rows forever
 #   parse_errors_days: 30
 #   slack_samples_days: 90
 

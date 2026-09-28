@@ -651,3 +651,83 @@ func TestBaselineFreshness_NoSnapshot(t *testing.T) {
 		t.Error("release_recommended must be false when no snapshot exists")
 	}
 }
+
+// A row that carries no quota reading says nothing about current usage, so
+// it must not keep the freshness gate open over a frozen percent_used: the
+// gate goes stale once the last row with a reading ages out.
+func TestBaselineFreshness_IgnoresRowWithoutReading(t *testing.T) {
+	c, s := newCalc(t)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	seedFreshSnapshot(t, s, now.Add(-1*time.Hour), 5.0)
+	insertSnapshot(t, s, now, nil, nil, nil)
+
+	resp, err := c.GetSlack()
+	if err != nil {
+		t.Fatalf("GetSlack: %v", err)
+	}
+	if resp.Gates["baseline_freshness"] {
+		t.Error("baseline_freshness must fail when the only fresh row has no reading")
+	}
+}
+
+// A received_at in the future (wall clock stepped backward) is not evidence
+// of a fresh reading: without a lower bound the gate would stay open for the
+// size of the step plus BaselineMaxAgeSeconds after the sources stopped.
+func TestBaselineFreshness_FutureReceivedAtFails(t *testing.T) {
+	c, s := newCalc(t)
+	defer s.Close()
+
+	seedFreshSnapshot(t, s, time.Now().UTC().Add(1*time.Hour), 5.0)
+
+	resp, err := c.GetSlack()
+	if err != nil {
+		t.Fatalf("GetSlack: %v", err)
+	}
+	if resp.Gates["baseline_freshness"] {
+		t.Error("baseline_freshness must fail for a received_at an hour in the future")
+	}
+}
+
+// A negative percent_used is out of range, not "more than all the quota
+// free": it must fail the headroom gate rather than pass every profile.
+func TestHeadroomGate_NegativePercentUsedFails(t *testing.T) {
+	c, s := newCalc(t)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), -1.0, "snapshot:1")
+
+	resp, err := c.GetSlack()
+	if err != nil {
+		t.Fatalf("GetSlack: %v", err)
+	}
+	if resp.Gates["session_headroom"] {
+		t.Error("session_headroom must fail for a negative percent_used")
+	}
+}
+
+// RecordSample attributes the sample to the same open session window GetSlack
+// reads (the newest), not whichever duplicate open row SQLite returns first.
+func TestRecordSample_UsesNewestOpenSessionWindow(t *testing.T) {
+	c, s := newCalc(t)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	insertWindow(t, s.DB(), "session", now.Add(-4*time.Hour), now.Add(1*time.Hour), 10.0, "snapshot:1")
+	wantID := insertWindow(t, s.DB(), "session", now.Add(-1*time.Hour), now.Add(4*time.Hour), 20.0, "snapshot:2")
+
+	sampleID, err := c.RecordSample(fptr(0.1))
+	if err != nil {
+		t.Fatalf("RecordSample: %v", err)
+	}
+
+	var gotWindowID int64
+	if err := s.DB().QueryRow(`SELECT window_id FROM slack_samples WHERE id = ?`, sampleID).Scan(&gotWindowID); err != nil {
+		t.Fatalf("query slack_samples: %v", err)
+	}
+	if gotWindowID != wantID {
+		t.Errorf("window_id: got %d, want %d", gotWindowID, wantID)
+	}
+}

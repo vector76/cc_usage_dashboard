@@ -78,15 +78,26 @@ const (
 	windowsTickInterval       = 30 * time.Second
 )
 
-func main() {
-	configPath := flag.String("config", "", "path to config file")
-	flag.String("version", Version, "show version")
-	flag.Parse()
+// parseFlags registers trayapp's flags on fs and parses args. main passes
+// flag.CommandLine, which exits on a bad flag exactly as flag.Parse does.
+func parseFlags(fs *flag.FlagSet, args []string) (configPath string, showVersion bool, err error) {
+	fs.StringVar(&configPath, "config", "", "path to config file")
+	fs.BoolVar(&showVersion, "version", false, "print the version and exit")
+	err = fs.Parse(args)
+	return configPath, showVersion, err
+}
 
-	if *configPath == "" {
-		*configPath = config.ResolveConfigPath()
+func main() {
+	configPath, showVersion, _ := parseFlags(flag.CommandLine, os.Args[1:])
+	if showVersion {
+		fmt.Println(Version)
+		return
 	}
-	if *configPath == "" {
+
+	if configPath == "" {
+		configPath = config.ResolveConfigPath()
+	}
+	if configPath == "" {
 		// First run: no config anywhere in the search chain. Materialize
 		// the embedded sample in the per-user config dir so the user has a
 		// real file to edit (its active values match the built-in defaults,
@@ -101,14 +112,13 @@ func main() {
 			slog.Warn("failed to create default config.yaml; using built-in defaults", "dir", dir, "err", err)
 		} else {
 			slog.Info("created default config.yaml", "path", path)
-			*configPath = path
+			configPath = path
 		}
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
-		os.Exit(1)
+		fatalStartup(false, "failed to load config: %v", err)
 	}
 
 	if cfg.Database.Path == "" {
@@ -120,8 +130,7 @@ func main() {
 
 	dbDir := filepath.Dir(cfg.Database.Path)
 	if err := os.MkdirAll(dbDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create database directory %s: %v\n", dbDir, err)
-		os.Exit(1)
+		fatalStartup(false, "failed to create database directory %s: %v", dbDir, err)
 	}
 
 	// Configure logging destination before opening the DB so startup errors
@@ -139,8 +148,7 @@ func main() {
 		// Name the path: the previous relative default made this error
 		// ("unable to open database file (14)") impossible to act on,
 		// because it never said which file had been tried.
-		fmt.Fprintf(os.Stderr, "failed to open database %s: %v\n", cfg.Database.Path, err)
-		os.Exit(1)
+		fatalStartup(logCloser != nil, "failed to open database %s: %v", cfg.Database.Path, err)
 	}
 	// db.Close is invoked explicitly during graceful shutdown after the
 	// WAL checkpoint, so we don't defer it here.
@@ -295,8 +303,7 @@ func main() {
 		UserOverrides: cfg.HTTP.Bind,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to select bind addresses: %v\n", err)
-		os.Exit(1)
+		fatalStartup(logCloser != nil, "failed to select bind addresses: %v", err)
 	}
 
 	if netbind.IsWildcard(bindAddrs) {

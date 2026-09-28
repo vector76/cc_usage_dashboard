@@ -88,6 +88,9 @@ func ProfileFromPairs(pairs [][]float64) (Profile, error) {
 // [0, 100]: remaining can never exceed 100, so a clamped-at-100 segment
 // (absolute = 1.0, the "disabled" sentinel) passes only at exactly-untouched
 // quota — the same condition percent_used <= 0 expressed by the legacy leg.
+// A negative surplus makes the pace boundary reach 0 at
+// elapsed = 100*(1 + surplus), inside the window; that knee is a vertex too,
+// so the interpolation follows the clamped line instead of cutting above it.
 func SynthesizeProfile(surplus, absolute float64) Profile {
 	clamp := func(v float64) float64 {
 		if v < 0 {
@@ -103,14 +106,24 @@ func SynthesizeProfile(surplus, absolute float64) Profile {
 		return clamp(100*(1+surplus) - elapsedPct)
 	}
 	crossing := 100 * (1 + surplus - absolute)
+	knee := 100 * (1 + surplus)
+
+	// paceTail finishes the profile from the pace segment's start at elapsed
+	// `from`, inserting the knee where the pace line bottoms out mid-window.
+	paceTail := func(p Profile, from float64) Profile {
+		if knee > from && knee < 100 {
+			p = append(p, ProfilePoint{knee, 0})
+		}
+		return append(p, ProfilePoint{100, paceAt(100)})
+	}
 
 	// Pace boundary already below the floor at window start: pure pace line.
 	if crossing <= 0 {
-		return Profile{{0, paceAt(0)}, {100, paceAt(100)}}
+		return paceTail(Profile{{0, paceAt(0)}}, 0)
 	}
 	// Pace boundary never dips below the floor inside the window: pure floor.
 	if crossing >= 100 {
 		return Profile{{0, floor}, {100, floor}}
 	}
-	return Profile{{0, floor}, {crossing, floor}, {100, paceAt(100)}}
+	return paceTail(Profile{{0, floor}, {crossing, floor}}, crossing)
 }

@@ -217,18 +217,22 @@ func (p *Poller) poll(ctx context.Context) error {
 	rctx, cancel := context.WithTimeout(ctx, p.refreshTimeout)
 	rerr := p.refresh(rctx)
 	cancel()
-	if rerr != nil {
-		p.setRefreshError(rerr.Error())
-		slog.Warn("oauth credential refresh failed; not retrying until the credential recovers",
-			"err", rerr)
-		return err
-	}
 
+	// Re-poll whatever the refresh returned: per RefreshFunc, success is
+	// judged by re-reading the credential. A command that rotated the token
+	// and then exited non-zero has still worked; its error is kept only to
+	// explain a re-poll that still fails.
 	err = p.PollOnce(ctx)
 	if err == nil {
 		p.setRefreshError("")
 		slog.Info("oauth credential refreshed")
 		return nil
+	}
+	if rerr != nil {
+		p.setRefreshError(rerr.Error())
+		slog.Warn("oauth credential refresh failed; not retrying until the credential recovers",
+			"err", rerr)
+		return err
 	}
 	msg := err.Error()
 	if errors.Is(err, ErrCredentialStale) {

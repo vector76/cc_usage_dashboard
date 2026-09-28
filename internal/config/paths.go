@@ -34,10 +34,13 @@ func EnsureDefaultConfig(dir string, sample []byte) (string, error) {
 	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// Private to the user: this is the file the sample tells a sending
+	// machine to paste the receiver's uplink token into. Only what is
+	// created here is affected; existing directories keep their modes.
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, sample, 0644); err != nil {
+	if err := os.WriteFile(path, sample, 0600); err != nil {
 		return "", err
 	}
 	return path, nil

@@ -118,6 +118,8 @@ func TestSynthesizeProfile(t *testing.T) {
 		{"absolute zero collapses to always-pass", 0.50, 0, Profile{{0, 0}, {100, 0}}},
 		{"absolute below surplus stays flat", 0.50, 0.30, Profile{{0, 30}, {100, 30}}},
 		{"surplus with disabled absolute clamps at 100", 0.50, 1.0, Profile{{0, 100}, {50, 100}, {100, 50}}},
+		{"negative surplus bottoms out after the floor", -0.20, 0.50, Profile{{0, 50}, {30, 50}, {80, 0}, {100, 0}}},
+		{"negative surplus bottoms out on the pure pace line", -0.50, 0.80, Profile{{0, 50}, {50, 0}, {100, 0}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -185,6 +187,10 @@ func TestSynthesizeProfileMatchesLegacyGate(t *testing.T) {
 		{0.50, 0},
 		{0, 1.0},
 		{0.25, 0.60},
+		// Negative surplus: the pace boundary bottoms out at 0 inside
+		// the window, once after a floor segment and once without one.
+		{-0.20, 0.50},
+		{-0.50, 0.80},
 	}
 	for _, c := range configs {
 		p := SynthesizeProfile(c.surplus, c.absolute)

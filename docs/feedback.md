@@ -15,7 +15,11 @@ Three signals are collected in `internal/feedback` and read by the server's
    buffer while passing every record through to the underlying destination
    (console or rotated log file). Because the tee wraps whatever base handler
    the tray app configures, startup warnings such as "price table file not
-   found" land in the buffer naturally.
+   found" land in the buffer naturally. Attrs are flattened to strings the way
+   slog's own handlers see them — `LogValuer`s resolved, grouped keys qualified
+   as `group.key` — and each buffered message and attr value is capped at 1 KiB,
+   since several handlers log request-controlled strings. The inner handler
+   still receives the full record.
 
 2. **Unknown-model aggregate** — `feedback.UnknownModels` counts usage events
    whose model is missing from the price table, keyed by model name with
@@ -29,8 +33,12 @@ Three signals are collected in `internal/feedback` and read by the server's
    one usage event per message means per-event logging would flood the buffer
    with exactly the model that is missing. Both `ResolveCost` call sites feed
    the same aggregate — the tailer ingest path (`internal/ingest/tailer.go`) and
-   the HTTP `POST /log` handler (`internal/server/server.go`). An empty/absent
+   the HTTP `POST /log` handler (`internal/server/server.go`), which records
+   only once the event is stored, so the Stop hook's duplicate re-posts and
+   rejected requests are not counted. An empty/absent
    model name is a different, already-handled case and is never counted here.
+   The tailer also skips Claude Code's zero-usage `<synthetic>` entries, which
+   are not a model that could be added to `prices.yaml`.
 
 3. **Recent parse errors** — the most recent rows (default 50) from the
    existing `parse_errors` table (`store.RecentParseErrors`), which already

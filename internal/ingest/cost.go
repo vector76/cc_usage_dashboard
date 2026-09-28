@@ -37,10 +37,15 @@ type ModelPrices struct {
 //
 // Model lookup tries an exact price-table match first; failing that, a dated
 // snapshot id like "claude-haiku-4-5-20251001" falls back to its undated
-// family entry ("claude-haiku-4-5"). Transcripts report dated ids while the
-// price table lists family names, and an exact-only lookup left such events
-// permanently unpriced. An explicit dated entry always wins, so a snapshot
+// family entry ("claude-haiku-4-5"), or to its "-0" alias when that is how
+// the family is keyed ("claude-sonnet-4-20250514" -> "claude-sonnet-4-0").
+// Transcripts report dated ids while the price table lists family names, and
+// an exact-only lookup left such events permanently unpriced. An explicit
+// dated entry always wins, so a snapshot
 // can still be priced differently from its family if that ever happens.
+// A Bedrock or Vertex id that matches none of those is retried in its native
+// form ("us.anthropic.claude-sonnet-4-5-20250929-v1:0" ->
+// "claude-sonnet-4-5-20250929").
 func ResolveCost(
 	reportedCost *float64,
 	model string,
@@ -54,13 +59,13 @@ func ResolveCost(
 
 	// Try to compute from price table
 	if model != "" && priceTable != nil {
-		prices, ok := priceTable[model]
-		if !ok || prices == nil {
-			if base := undatedModelName(model); base != "" {
-				prices, ok = priceTable[base]
+		prices := lookupPrices(priceTable, model)
+		if prices == nil {
+			if native := nativeModelID(model); native != model {
+				prices = lookupPrices(priceTable, native)
 			}
 		}
-		if ok && prices != nil {
+		if prices != nil {
 			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheCreation1hTokens, cacheReadTokens, prices)
 			return &cost, "computed"
 		}
@@ -127,6 +132,43 @@ func undatedModelName(model string) string {
 		return ""
 	}
 	return m[1]
+}
+
+// lookupPrices finds model's row: an exact match, else its undated family
+// entry, else that family's "-0" alias. Sonnet 4 and Opus 4 are listed under
+// their aliases (claude-sonnet-4-0), which the date strip alone never reaches.
+func lookupPrices(t PriceTable, model string) *ModelPrices {
+	if p := t[model]; p != nil {
+		return p
+	}
+	if base := undatedModelName(model); base != "" {
+		if p := t[base]; p != nil {
+			return p
+		}
+		return t[base+"-0"]
+	}
+	return nil
+}
+
+// bedrockModelID matches a Bedrock model id: an optional region prefix, the
+// "anthropic." vendor prefix and an optional "-vN:M" version suffix, as in
+// "us.anthropic.claude-sonnet-4-5-20250929-v1:0". vertexModelID matches
+// Vertex's "@" date separator, as in "claude-opus-4-5@20251101".
+var (
+	bedrockModelID = regexp.MustCompile(`^(?:[a-z]+\.)?anthropic\.(claude-.+?)(?:-v\d+(?::\d+)?)?$`)
+	vertexModelID  = regexp.MustCompile(`^(claude-.+)@(\d{8})$`)
+)
+
+// nativeModelID rewrites a Bedrock or Vertex model id into the Anthropic API
+// form the price table uses, returning model unchanged for any other id.
+func nativeModelID(model string) string {
+	if m := bedrockModelID.FindStringSubmatch(model); m != nil {
+		model = m[1]
+	}
+	if m := vertexModelID.FindStringSubmatch(model); m != nil {
+		model = m[1] + "-" + m[2]
+	}
+	return model
 }
 
 // computeCost computes the cost from tokens and pricing.

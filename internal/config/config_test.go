@@ -404,6 +404,40 @@ pricing:
 	}
 }
 
+// logging.file is a path like the others; left unexpanded it made
+// newRotatingWriter create a directory literally named "%LOCALAPPDATA%".
+func TestLoadExpandsPlaceholdersInLoggingFile(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", "/fake/localappdata")
+	path := writeTempConfig(t, "logging:\n  file: \"%LOCALAPPDATA%/usage_dashboard/trayapp.log\"\n")
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if want := "/fake/localappdata/usage_dashboard/trayapp.log"; cfg.Logging.File != want {
+		t.Errorf("logging.file = %q, want %q", cfg.Logging.File, want)
+	}
+}
+
+// Windows env var names are case-insensitive, and %LocalAppData% is the
+// spelling Windows itself tends to show, so it must expand like the
+// all-caps form.
+func TestExpandPlaceholdersIsCaseInsensitive(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", "/fake/localappdata")
+	t.Setenv("APPDATA", "/fake/appdata")
+
+	cases := map[string]string{
+		`%LocalAppData%\usage.db`:    `/fake/localappdata\usage.db`,
+		`%appdata%/x/%AppData%/y`:    `/fake/appdata/x//fake/appdata/y`,
+		`%LOCALAPPDATA%/still/works`: `/fake/localappdata/still/works`,
+	}
+	for in, want := range cases {
+		if got := expandPlaceholders(in); got != want {
+			t.Errorf("expandPlaceholders(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestDefaultCoworkSessionsDir(t *testing.T) {
 	t.Setenv("APPDATA", `C:\fake\appdata`)
 	cfg, err := Load("")
@@ -422,6 +456,33 @@ func TestDefaultCoworkSessionsDir(t *testing.T) {
 	}
 	if cfg.Claude.CoworkSessionsDir != "" {
 		t.Errorf("expected empty cowork_sessions_dir when APPDATA is unset, got %q", cfg.Claude.CoworkSessionsDir)
+	}
+}
+
+// The sample and docs show projects_dir as "~/.claude/projects", so a user
+// who uncomments that block must get the home-relative path, not a literal
+// "~" directory under the working directory.
+func TestLoadExpandsHomeInProjectsDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir: %v", err)
+	}
+	want := filepath.Join(home, ".claude", "projects")
+	values := []string{"~/.claude/projects"}
+	if runtime.GOOS == "windows" {
+		values = append(values, `~\.claude\projects`)
+	}
+	for _, v := range values {
+		t.Run(v, func(t *testing.T) {
+			path := writeTempConfig(t, "claude:\n  projects_dir: '"+v+"'\n")
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load failed: %v", err)
+			}
+			if cfg.Claude.ProjectsDir != want {
+				t.Errorf("projects_dir %q loaded as %q, want %q", v, cfg.Claude.ProjectsDir, want)
+			}
+		})
 	}
 }
 
@@ -501,6 +562,9 @@ func TestLoadRejectsBadUplinkURL(t *testing.T) {
 		{"no host", "http://"},
 		{"endpoint path included", "http://192.168.56.1:27812/log"},
 		{"query string", "http://192.168.56.1:27812?x=1"},
+		// An empty query still survives u.String(), so "/log" would be
+		// appended after the "?" and land in the query instead of the path.
+		{"trailing question mark", "http://192.168.56.1:27812?"},
 		{"not a url", "://"},
 	}
 
@@ -521,6 +585,58 @@ func TestLoadRejectsBadUplinkURL(t *testing.T) {
 			// profiles report their own validation failures.
 			if !strings.Contains(err.Error(), "uplink.url") {
 				t.Errorf("error should name the offending key, got: %v", err)
+			}
+		})
+	}
+}
+
+// A port outside 1-65535 cannot work: 0 binds a random port per listener
+// (so the dashboard URL and Host allow-list are wrong), and anything else
+// fails only once the listeners start.
+func TestLoadRejectsOutOfRangePort(t *testing.T) {
+	for _, port := range []string{"0", "-1", "65536"} {
+		t.Run(port, func(t *testing.T) {
+			path := writeTempConfig(t, "http:\n  port: "+port+"\n")
+			_, err := Load(path)
+			if err == nil {
+				t.Fatalf("expected Load to reject http.port %s", port)
+			}
+			if !strings.Contains(err.Error(), "http.port") {
+				t.Errorf("error should name the offending key, got: %v", err)
+			}
+		})
+	}
+	for _, port := range []string{"1", "65535"} {
+		path := writeTempConfig(t, "http:\n  port: "+port+"\n")
+		if _, err := Load(path); err != nil {
+			t.Errorf("http.port %s rejected: %v", port, err)
+		}
+	}
+}
+
+// A negative retention has no meaning; 0 is the documented "keep forever"
+// (the store prunes nothing for a non-positive age) and must keep loading.
+func TestLoadValidatesRetention(t *testing.T) {
+	for _, key := range []string{"parse_errors_days", "slack_samples_days"} {
+		t.Run(key, func(t *testing.T) {
+			_, err := Load(writeTempConfig(t, "retention:\n  "+key+": -1\n"))
+			if err == nil {
+				t.Fatalf("expected Load to reject retention.%s: -1", key)
+			}
+			if !strings.Contains(err.Error(), "retention."+key) {
+				t.Errorf("error should name the offending key, got: %v", err)
+			}
+
+			cfg, err := Load(writeTempConfig(t, "retention:\n  "+key+": 0\n"))
+			if err != nil {
+				t.Fatalf("retention.%s: 0 rejected: %v", key, err)
+			}
+			got := cfg.Retention.ParseErrorsDays
+			if key == "slack_samples_days" {
+				got = cfg.Retention.SlackSamplesDays
+			}
+			if got != 0 {
+				t.Errorf("retention.%s: 0 loaded as %d", key, got)
 			}
 		})
 	}

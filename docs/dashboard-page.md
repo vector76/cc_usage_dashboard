@@ -79,6 +79,25 @@ age — so a skewed client clock shifts neither. `fmtAge` clamps a negative
 age to zero, since a disagreement between those two server-supplied fields
 is skew, not time travel.
 
+The age describes the same snapshot the slack gate's `baseline_freshness`
+check reads: the newest row carrying a session or weekly reading, so a
+content-free row never makes the line look fresh. A `received_at` ahead of
+the server clock by up to `slack.MaxFutureSkew` (one minute) reads as zero.
+Anything further ahead is sent as a negative age, which the gate treats as
+stale, and the line says the snapshot is in the future and that the PC
+clock may have changed, rather than showing it as "just now".
+
+Because the age is server-supplied, it freezes when the server stops
+answering. So a failed state poll — no response, a timeout
+(`FETCH_TIMEOUT_MS`), a non-2xx status, or an `{"error": ...}` body — is
+never rendered as data: the slack flag drops to `—`, the charts and this
+line are dimmed, and a note on the Burn-down heading says why and since
+when, until a poll succeeds again. A failed `/consumption` or
+`/api/feedback` fetch likewise shows "unavailable" rather than zeros or
+`(none)`. The poll runs one cycle at a time (a tick is skipped while the
+previous one is in flight), and the period picker and feedback panel drop
+any response that a newer request has superseded.
+
 The other former status fields were dropped rather than relocated:
 `parse_errors_24h` is already counted in the feedback badge, `now` is the
 clock in the corner of the screen, and the session countdown is the
@@ -102,6 +121,11 @@ live in two require-able modules that the page loads as plain scripts and
 - `static/grouping.js` — polyline splitting, family order and colours.
 - `static/summary.js` — allowance extrapolation, the slack-release state
   machine, age formatting.
+
+The inline fetch and poll logic of this page and `/report` — failure
+handling, superseded responses, the in-flight guard — is exercised by
+`userscript/test/dashboard-pages.test.js`, which runs each page's inline
+`<script>` in a Node `vm` context against a minimal fake DOM and fetch.
 
 `internal/server/dashboard_test.go` asserts both are reachable as
 standalone routes, so a module that the tests cover can't quietly stop

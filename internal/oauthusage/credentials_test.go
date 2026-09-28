@@ -71,6 +71,29 @@ func TestLoadCredentialRejectsMalformedJSON(t *testing.T) {
 	}
 }
 
+// A poll that lands while Claude Code is rewriting the file reads it torn.
+// That is not a broken source: a moment later the file is whole, so the
+// read is retried before the decode failure is reported.
+func TestLoadCredentialRetriesTornRead(t *testing.T) {
+	path := writeCredentials(t, `{"claudeAiOauth":{"accessT`)
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		done <- os.WriteFile(path, []byte(`{"claudeAiOauth":{"accessToken":"tok-whole"}}`), 0600)
+	}()
+
+	cred, err := LoadCredential(path)
+	if werr := <-done; werr != nil {
+		t.Fatalf("rewrite credentials: %v", werr)
+	}
+	if err != nil {
+		t.Fatalf("LoadCredential after a torn read: %v", err)
+	}
+	if cred.AccessToken != "tok-whole" {
+		t.Errorf("AccessToken = %q, want the rewritten token", cred.AccessToken)
+	}
+}
+
 // TestLoadCredentialDoesNotLeakTokenInError matters because these errors
 // are logged. A parse or validation failure must describe the problem
 // without quoting the file's contents back into the log.

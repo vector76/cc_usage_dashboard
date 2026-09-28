@@ -66,7 +66,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	id, err := s.RecordSnapshot(req)
 	if err != nil {
 		if errors.Is(err, ErrInvalidSnapshot) {
-			slog.Warn("rejecting snapshot with out-of-range timestamp", "err", err, "source", req.Source)
+			slog.Warn("rejecting snapshot with missing or out-of-range timestamp", "err", err, "source", req.Source)
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -139,16 +139,20 @@ func (s *Server) deriveWindows() {
 // *_window_ends fields are wildly out of range. The window-ends fields
 // drive the engine's reset-boundary math; an unbounded value here would
 // freeze a window indefinitely (year 9999) or shove it into the deep
-// past. Zero-valued timestamps are tolerated — the userscript may omit
-// the reset hint when the source DOM doesn't expose one.
+// past. Absent *_window_ends are tolerated — the userscript may omit the
+// reset hint when the source DOM doesn't expose one — but ObservedAt is
+// required: stored as year 1 it would drop out of every "latest by
+// observed_at" query, and a plateau slide would rewrite the previous row's
+// timestamp to it.
 func validateSnapshotTimestamps(req *SnapshotRequest, now time.Time) error {
-	if !req.ObservedAt.IsZero() {
-		if req.ObservedAt.Before(now.Add(-maxObservedPast)) {
-			return fmt.Errorf("observed_at too far in the past")
-		}
-		if req.ObservedAt.After(now.Add(maxObservedFuture)) {
-			return fmt.Errorf("observed_at too far in the future")
-		}
+	if req.ObservedAt.IsZero() {
+		return fmt.Errorf("observed_at is required")
+	}
+	if req.ObservedAt.Before(now.Add(-maxObservedPast)) {
+		return fmt.Errorf("observed_at too far in the past")
+	}
+	if req.ObservedAt.After(now.Add(maxObservedFuture)) {
+		return fmt.Errorf("observed_at too far in the future")
 	}
 	if req.SessionWindowEnds != nil {
 		if req.SessionWindowEnds.Before(now.Add(-maxEndsPast)) {

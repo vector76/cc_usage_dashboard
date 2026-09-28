@@ -811,3 +811,147 @@ func TestTailerReimportRecoversPastOffset(t *testing.T) {
 		}
 	}
 }
+
+// TestTailerCaughtUpIgnoresOtherRootsOffsets verifies that a tailer's
+// caught-up flag reflects only its own root. Two tailers (primary and Cowork)
+// share one tailer_offsets table; a stale offset for a file under the other
+// root, which this tailer never processes, must not pin CaughtUp false.
+func TestTailerCaughtUpIgnoresOtherRootsOffsets(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+	rootA := filepath.Join(tmpDir, "a")
+	rootB := filepath.Join(tmpDir, "b")
+	for _, d := range []string{rootA, rootB} {
+		if err := os.Mkdir(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	// A file under root B that grew past its persisted offset: B's tailer
+	// has work pending, but A's tailer has none.
+	otherPath := filepath.Join(rootB, "session-b.jsonl")
+	first := `{"type":"assistant","sessionId":"b","message":{"id":"m1","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n"
+	second := `{"type":"assistant","sessionId":"b","message":{"id":"m2","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n"
+	if err := os.WriteFile(otherPath, []byte(first+second), 0644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+	if err := s.SetTailerOffset(otherPath, int64(len(first))); err != nil {
+		t.Fatalf("seed offset: %v", err)
+	}
+
+	tailer := NewTailer(rootA, s, make(PriceTable))
+	tailer.loadPersistedOffsets() // mirrors what Start() does
+	tailer.pollOnce()
+
+	if !tailer.CaughtUp() {
+		t.Error("CaughtUp() = false, want true: root A has no pending bytes; only root B's file is behind")
+	}
+}
+
+func countParseErrors(t *testing.T, s *store.Store) int {
+	t.Helper()
+	var n int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM parse_errors`).Scan(&n); err != nil {
+		t.Fatalf("count parse_errors: %v", err)
+	}
+	return n
+}
+
+// TestTailerOpenFailureDoesNotRecordParseErrorEachPoll verifies that a
+// transcript that cannot be opened is logged, not written to parse_errors:
+// processFile runs on every poll, so a permanently unopenable file would
+// otherwise add one row every 30 s.
+func TestTailerOpenFailureDoesNotRecordParseErrorEachPoll(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+	tailer := NewTailer(tmpDir, s, make(PriceTable))
+	missing := filepath.Join(tmpDir, "gone.jsonl")
+	tailer.processFile(missing)
+	tailer.processFile(missing)
+
+	if n := countParseErrors(t, s); n != 0 {
+		t.Errorf("open failure should not add parse_errors rows, got %d", n)
+	}
+}
+
+// TestTailerSyntheticModelNotReportedUnknown verifies that Claude Code's
+// zero-usage "<synthetic>" assistant entries are still stored but are not
+// aggregated as an unknown model: adding "<synthetic>" to prices.yaml, as the
+// feedback panel would otherwise ask, is meaningless.
+func TestTailerSyntheticModelNotReportedUnknown(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	pt := PriceTable{"known-model": &ModelPrices{InputRate: 1, OutputRate: 1}}
+	tmpDir := t.TempDir()
+	tailer := NewTailer(tmpDir, s, pt)
+	agg := feedback.NewUnknownModels()
+	tailer.unknown = agg
+
+	transcriptPath := filepath.Join(tmpDir, "session-syn.jsonl")
+	line := `{"type":"assistant","sessionId":"s","timestamp":"2026-04-26T10:00:00Z","message":{"id":"m1","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}` + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(line), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+
+	tailer.processFile(transcriptPath)
+
+	if snap := agg.Snapshot(); len(snap) != 0 {
+		t.Errorf("expected no unknown models, got %+v", snap)
+	}
+	var n int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM usage_events WHERE model = '<synthetic>'`).Scan(&n); err != nil {
+		t.Fatalf("count usage_events: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected the synthetic row to be stored, got %d rows", n)
+	}
+}
+
+// TestTailerOffsetLoadErrorDoesNotRereadFromZero verifies that when the
+// offset lookup fails, processFile gives up until the next poll rather than
+// treating the file as new and re-reading it from byte 0, which re-inserts
+// every historical parse error in it.
+func TestTailerOffsetLoadErrorDoesNotRereadFromZero(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("failed to create test store: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+	transcriptPath := filepath.Join(tmpDir, "session-err.jsonl")
+	content := "not json\n"
+	if err := os.WriteFile(transcriptPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write transcript: %v", err)
+	}
+	// A stored offset that cannot be scanned into an int64 makes
+	// GetTailerOffset fail, standing in for SQLITE_BUSY or a closed DB.
+	if _, err := s.DB().Exec(`INSERT INTO tailer_offsets (file_path, byte_offset, updated_at) VALUES (?, 'garbage', ?)`,
+		transcriptPath, store.FormatTime(time.Now())); err != nil {
+		t.Fatalf("seed offset: %v", err)
+	}
+	if _, err := s.GetTailerOffset(transcriptPath); err == nil {
+		t.Fatal("precondition: expected GetTailerOffset to fail")
+	}
+
+	tailer := NewTailer(tmpDir, s, make(PriceTable))
+	tailer.processFile(transcriptPath)
+
+	if n := countParseErrors(t, s); n != 0 {
+		t.Errorf("file was re-read from byte 0 after an offset-load error: parse_errors=%d", n)
+	}
+}

@@ -96,6 +96,10 @@ GET /consumption?period=7d
 }
 ```
 
+A malformed or negative `period` (or a day count that overflows) answers
+**400**, distinct from the 500 a query failure produces — the same split
+`/api/usage/breakdown` makes.
+
 `consumed_session_pct = 740` over a 7-day period is normal — that's
 roughly 7 sessions/day × 7 days × ~15% per session, give or take. It is
 not bounded at 100.

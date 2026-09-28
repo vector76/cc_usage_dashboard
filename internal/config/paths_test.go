@@ -172,3 +172,33 @@ func TestEnsureDefaultConfigCreatesMissingDir(t *testing.T) {
 		t.Errorf("materialized config = %q, want the sample", got)
 	}
 }
+
+// config.yaml is where the sample tells a sending machine to paste the
+// receiver's uplink token, so the file (and a directory this program creates
+// for it) must not be readable by other local accounts. File modes are Unix
+// permissions; Windows only maps the write bit to the read-only attribute.
+func TestEnsureDefaultConfigIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits do not apply on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "usage-dashboard")
+
+	path, err := EnsureDefaultConfig(dir, []byte("# sample\n"))
+	if err != nil {
+		t.Fatalf("EnsureDefaultConfig failed: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("config.yaml mode = %o, want no group/other access", perm)
+	}
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("config dir mode = %o, want no group/other access", perm)
+	}
+}

@@ -121,4 +121,7 @@ The dashboard polls `/api/dashboard/state` every 10 seconds. A 30-day
 per-model scan on that timer would cost far more than it tells anyone, and
 the report is something a user consults rather than watches. `/report`
 fetches on demand — once on arrival, then on each preset or Run click —
-and nothing on it runs on a timer.
+and nothing on it runs on a timer. Only the latest click's answer is
+shown: a slower, superseded response is dropped rather than replacing the
+newer result or the From/To inputs. A failed request clears the totals and
+table, so the previous range's numbers never sit under the new preset.

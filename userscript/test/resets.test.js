@@ -22,6 +22,31 @@ test('parseWeekdayClock: short and long weekday names, 12-hour clock', () => {
     assert.deepStrictEqual(parseWeekdayClock('Resets sat 12:30 pm'), { dow: 6, hour: 12, minute: 30 });
 });
 
+test('parseWeekdayClock: 24-hour clock, comma after the weekday, and dotted meridiems', () => {
+    // Locale renderings the en-US form rejects (en-GB / 24-hour OS clock,
+    // "Thu, 3:50 PM", "p.m."). Without them no window_ends is sent and the
+    // server mints no weekly window.
+    assert.deepStrictEqual(parseWeekdayClock('Resets Thu 15:50'), { dow: 4, hour: 15, minute: 50 });
+    assert.deepStrictEqual(parseWeekdayClock('Resets Thursday 03:50'), { dow: 4, hour: 3, minute: 50 });
+    assert.deepStrictEqual(parseWeekdayClock('Resets Sun 00:00'), { dow: 0, hour: 0, minute: 0 });
+    assert.deepStrictEqual(parseWeekdayClock('Resets Thu, 3:50 PM'), { dow: 4, hour: 15, minute: 50 });
+    assert.deepStrictEqual(parseWeekdayClock('Resets Thursday, 23:00'), { dow: 4, hour: 23, minute: 0 });
+    assert.deepStrictEqual(parseWeekdayClock('Resets Thu 3:50 p.m.'), { dow: 4, hour: 15, minute: 50 });
+    assert.deepStrictEqual(parseWeekdayClock('Resets Sun 12:00 a.m.'), { dow: 0, hour: 0, minute: 0 });
+});
+
+test('parseWeekdayClock: an out-of-range 24-hour time is not a clock time', () => {
+    assert.strictEqual(parseWeekdayClock('Resets Thu 24:00'), null);
+    assert.strictEqual(parseWeekdayClock('Resets Thu 15:60'), null);
+});
+
+test('parseWeekdayClock: the en-US 12-hour form still parses exactly as before', () => {
+    // The 24-hour form is a fallback; a meridiem, when present, always wins.
+    assert.deepStrictEqual(parseWeekdayClock('Resets Thu 3:50 PM'), { dow: 4, hour: 15, minute: 50 });
+    assert.deepStrictEqual(parseWeekdayClock('Resets Thu 3:50PM'), { dow: 4, hour: 15, minute: 50 });
+    assert.deepStrictEqual(parseWeekdayClock('Resets Thu 12:05 AM'), { dow: 4, hour: 0, minute: 5 });
+});
+
 test('parseWeekdayClock: relative hints and garbage are not clock times', () => {
     assert.strictEqual(parseWeekdayClock('Resets in 3 hr 33 min'), null);
     assert.strictEqual(parseWeekdayClock('Resets May 1'), null);
@@ -76,6 +101,12 @@ test('parseWeeklyEnds: a reset earlier today rolls to next week, never the past'
     assert.strictEqual(parseWeeklyEnds('Resets Thu 11:00 PM', THU_0410), new Date(THU_2300).toISOString());
     const NEXT_THU_2300 = new Date(2026, 8, 24, 23, 0, 0, 0).getTime();
     assert.strictEqual(parseWeeklyEnds('Resets Thu 11:00 PM', THU_2300), new Date(NEXT_THU_2300).toISOString());
+});
+
+test('parseSessionEnds and parseWeeklyEnds: 24-hour hints resolve like their 12-hour twins', () => {
+    assert.strictEqual(parseSessionEnds('Resets Thu 03:50', WED_2300), new Date(THU_0350).toISOString());
+    assert.strictEqual(parseWeeklyEnds('Resets Thu 23:00', WED_2300), new Date(THU_2300).toISOString());
+    assert.strictEqual(parseWeeklyEnds('Resets Thursday, 11:00 p.m.', WED_2300), new Date(THU_2300).toISOString());
 });
 
 test('parseWeeklyEnds: unparseable text is null', () => {

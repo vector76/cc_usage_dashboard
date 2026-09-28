@@ -57,10 +57,21 @@ file. The hook contract is `JSON-on-stdin`, not env vars.
 Exit codes:
 
 - `0` — accepted (HTTP 2xx).
-- `2` — usage error (bad flags or unparseable hook payload).
-- `3` — host unreachable.
+- `1` — `--from-hook` only: the hook payload or transcript is unusable (unparseable
+  payload, a `transcript_path` outside the `projects/<encoded>/<file>.jsonl` layout,
+  an unreadable transcript). Claude Code treats this as a non-blocking hook error. The
+  CLI never exits `2` here, because exit `2` from a Stop hook makes Claude continue
+  instead of stopping.
+- `2` — usage error (bad flags).
+- `3` — host unreachable. stderr carries the underlying error (refused, DNS, timeout).
 - `4` — host returned 4xx (validation error).
 - `5` — host returned 5xx.
+
+In `--from-hook` mode, events the host does not accept do not fail the hook: it exits
+`0` and writes one warning line to stderr naming the first failure (for example a `401`
+after a token rotation). The walk stops at the first transport failure, so an
+unreachable host costs one `CLUSAGE_TIMEOUT_MS` per turn, not one per transcript line;
+the next Stop re-walks the whole transcript.
 
 Non-zero exit codes must not abort the user's Claude Code session. The hook command
 should append `|| true` so the hook exits 0 regardless.
@@ -72,6 +83,10 @@ GET `/slack` and print one of:
 - `--format json` (default) — full payload from the slack endpoint.
 - `--format release-bool` — print `true` or `false` based on `release_recommended`.
 - `--format fraction` — print `slack_combined_fraction` as a decimal.
+
+If the requested field is missing or `null` (the fraction is `null` until the trayapp
+has quota data), nothing is printed on stdout and the command exits `5` with the
+reason on stderr. An unknown `--format` exits `2`.
 
 Useful in queue scripts:
 
@@ -123,18 +138,21 @@ Environment variables:
 
 - `CLUSAGE_HOST` — defaults to `host.docker.internal`.
 - `CLUSAGE_PORT` — defaults to `27812`.
-- `CLUSAGE_TIMEOUT_MS` — defaults to `2000`.
+- `CLUSAGE_TIMEOUT_MS` — defaults to `2000`. A value that is not a positive whole
+  number falls back to the default with a warning on stderr; `0` does not disable the
+  timeout. Values above `600000` (10 minutes) are capped.
 - `CLUSAGE_TOKEN` — the trayapp's access token, sent as
   `Authorization: Bearer <token>` on every request. Required: a container
   reaches the host over a Docker or WSL adapter, not loopback, and the
   trayapp refuses every non-loopback caller without it (`401`, exit code
-  `4` from `log`). Copy it from the tray menu, "Copy access token". See
+  `4` from `log`). Copy it from the tray menu, "Copy access token". Surrounding
+  whitespace is trimmed, so an env file with CRLF line endings works. See
   `docs/architecture.md`, "Network and security".
 
 No config file. Containers should be configurable via env, not state.
 
-After the token is rotated, hooks fail with `401` until `CLUSAGE_TOKEN` is
-updated. The Stop hook re-posts the whole transcript each turn and the
+After the token is rotated, hooks fail with `401` (reported on stderr) until
+`CLUSAGE_TOKEN` is updated. The Stop hook re-posts the whole transcript each turn and the
 receiver dedupes, so a session that has another turn after the fix
 backfills its gap. A session that ended during the gap does not — unlike
 the uplink, the hook keeps no backlog.

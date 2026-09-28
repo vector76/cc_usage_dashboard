@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -84,6 +85,48 @@ func TestBusyTimeoutOnAllConnections(t *testing.T) {
 		if timeout != 5000 {
 			t.Errorf("conn %d busy_timeout = %d, want 5000", i, timeout)
 		}
+	}
+}
+
+// TestOpenMemoryIsOneDatabase guards Open(":memory:"): every SQLite
+// connection to ":memory:" is its own private database, so a query that the
+// pool routes to a second connection (here, one issued while another
+// connection is checked out) must not land on an empty database with no
+// tables.
+func TestOpenMemoryIsOneDatabase(t *testing.T) {
+	s, err := Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	held, err := s.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("check out connection: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.InsertParseError(time.Now(), "test", "reason", "payload")
+		done <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	held.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("insert while another connection was busy: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("insert did not complete after the held connection was released")
+	}
+	var count int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM parse_errors").Scan(&count); err != nil {
+		t.Fatalf("count parse errors: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("parse_errors has %d rows, want 1", count)
 	}
 }
 
@@ -374,6 +417,52 @@ func TestMigrations(t *testing.T) {
 		if exists != 1 {
 			t.Errorf("table %s does not exist", table)
 		}
+	}
+}
+
+// TestFailedMigrationLeavesNoPartialSchema guards against a migration whose
+// SQL commits piecemeal: the ALTER must roll back with the failing statement
+// after it, or the unrecorded version re-runs the ALTER on the next start and
+// fails with "duplicate column name" forever.
+func TestFailedMigrationLeavesNoPartialSchema(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migrate.db"))
+	if err != nil {
+		t.Fatalf("failed to open DB: %v", err)
+	}
+	defer db.Close()
+
+	saved := migrations
+	defer func() { migrations = saved }()
+	next := len(saved) + 1
+	migrations = append(saved[:len(saved):len(saved)], Migration{
+		Version: next,
+		Name:    "test_fails_after_alter",
+		SQL: `
+ALTER TABLE quota_snapshots ADD COLUMN test_col INTEGER;
+INSERT INTO no_such_table VALUES (1);
+`,
+	})
+	if err := ApplyMigrations(db); err == nil {
+		t.Fatal("expected the failing migration to return an error")
+	}
+	if columnExists(t, db, "quota_snapshots", "test_col") {
+		t.Error("the failed migration's ALTER was committed")
+	}
+	var version int
+	if err := db.QueryRow("SELECT COALESCE(MAX(version), 0) FROM schema_version").Scan(&version); err != nil {
+		t.Fatalf("failed to query schema version: %v", err)
+	}
+	if version != len(saved) {
+		t.Errorf("expected schema version %d after the failure, got %d", len(saved), version)
+	}
+
+	// The next start, with the migration fixed, must apply it cleanly.
+	migrations[len(migrations)-1].SQL = `ALTER TABLE quota_snapshots ADD COLUMN test_col INTEGER;`
+	if err := ApplyMigrations(db); err != nil {
+		t.Fatalf("re-running the migration failed: %v", err)
+	}
+	if !columnExists(t, db, "quota_snapshots", "test_col") {
+		t.Error("test_col missing after the re-run")
 	}
 }
 
@@ -1131,6 +1220,55 @@ func TestInsertQuotaSnapshotContinuationOnColdDB(t *testing.T) {
 	}
 }
 
+// TestInsertQuotaSnapshotSlideNeverMovesBackwards covers out-of-order arrival
+// (a second tab posting an older, identical observation) and a zero
+// observed_at from an in-process caller: neither may drag the latest row's
+// observed_at backwards. Both are inserted as their own rows instead.
+func TestInsertQuotaSnapshotSlideNeverMovesBackwards(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		observed func(base time.Time) time.Time
+	}{
+		{"older arrival", func(base time.Time) time.Time { return base.Add(30 * time.Second) }},
+		{"zero observed_at", func(time.Time) time.Time { return time.Time{} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := createTestStore(t)
+			defer store.Close()
+
+			base := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+			sessionEnds := base.Add(5 * time.Hour)
+			insert := func(observed time.Time, continuous bool) int64 {
+				t.Helper()
+				id, err := store.InsertQuotaSnapshot(
+					observed, observed, "userscript",
+					floatPtr(25.0), &sessionEnds, nil, nil,
+					nil, nil, boolPtr(continuous), `{}`,
+				)
+				if err != nil {
+					t.Fatalf("insert at %s: %v", observed, err)
+				}
+				return id
+			}
+			insert(base, false)
+			latestAt := base.Add(2 * time.Minute)
+			latestID := insert(latestAt, true)
+
+			if id := insert(tc.observed(base), true); id == latestID {
+				t.Errorf("an older arrival slid onto the latest row id=%d", latestID)
+			}
+
+			var observedStr string
+			if err := store.db.QueryRow(`SELECT observed_at FROM quota_snapshots WHERE id = ?`, latestID).Scan(&observedStr); err != nil {
+				t.Fatalf("select latest row: %v", err)
+			}
+			if got := parseStoredTime(observedStr); !got.Equal(latestAt) {
+				t.Errorf("latest row's observed_at moved from %s to %s", FormatTime(latestAt), FormatTime(got))
+			}
+		})
+	}
+}
+
 func TestInsertQuotaSnapshotSlideScopedBySource(t *testing.T) {
 	store := createTestStore(t)
 	defer store.Close()
@@ -1344,6 +1482,55 @@ func TestPruneSlackSamples(t *testing.T) {
 	store.db.QueryRow("SELECT COUNT(*) FROM slack_samples WHERE slack_fraction = 0.3").Scan(&count)
 	if count != 1 {
 		t.Error("expected recent sample to remain")
+	}
+}
+
+// TestPruneWithNonPositiveRetentionKeepsEverything guards the store-side
+// backstop for retention: a zero or negative age would put the cutoff at or
+// after now and empty the whole table, so it means "no pruning" instead.
+func TestPruneWithNonPositiveRetentionKeepsEverything(t *testing.T) {
+	for _, olderThan := range []time.Duration{0, -24 * time.Hour} {
+		store := createTestStore(t)
+
+		now := time.Now()
+		result, err := store.db.Exec(`
+			INSERT INTO windows (kind, started_at, ends_at) VALUES (?, ?, ?)
+		`, "session", FormatTime(now), FormatTime(now.Add(5*time.Hour)))
+		if err != nil {
+			t.Fatalf("failed to create window: %v", err)
+		}
+		windowID, _ := result.LastInsertId()
+		for _, age := range []time.Duration{40 * 24 * time.Hour, time.Minute} {
+			if _, err := store.db.Exec(
+				"INSERT INTO parse_errors (occurred_at, source, reason, payload) VALUES (?, ?, ?, ?)",
+				FormatTime(now.Add(-age)), "tailer", "err", "payload",
+			); err != nil {
+				t.Fatalf("insert parse error: %v", err)
+			}
+			if _, err := store.db.Exec(`
+				INSERT INTO slack_samples (sampled_at, slack_fraction, window_id) VALUES (?, ?, ?)
+			`, FormatTime(now.Add(-age)), 0.5, windowID); err != nil {
+				t.Fatalf("insert slack sample: %v", err)
+			}
+		}
+
+		if err := store.PruneParseErrors(olderThan); err != nil {
+			t.Fatalf("PruneParseErrors(%v): %v", olderThan, err)
+		}
+		if err := store.PruneSlackSamples(olderThan); err != nil {
+			t.Fatalf("PruneSlackSamples(%v): %v", olderThan, err)
+		}
+
+		for _, table := range []string{"parse_errors", "slack_samples"} {
+			var count int
+			if err := store.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
+				t.Fatalf("count %s: %v", table, err)
+			}
+			if count != 2 {
+				t.Errorf("olderThan=%v: %s has %d rows, want 2 (nothing pruned)", olderThan, table, count)
+			}
+		}
+		store.Close()
 	}
 }
 

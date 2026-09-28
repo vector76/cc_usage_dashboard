@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -196,9 +197,10 @@ func Load(path string) (*Config, error) {
 
 	// Resolve env-style placeholders in path/dir fields.
 	cfg.Database.Path = expandPlaceholders(cfg.Database.Path)
-	cfg.Claude.ProjectsDir = expandPlaceholders(cfg.Claude.ProjectsDir)
+	cfg.Claude.ProjectsDir = expandHome(expandPlaceholders(cfg.Claude.ProjectsDir))
 	cfg.Claude.CoworkSessionsDir = expandPlaceholders(cfg.Claude.CoworkSessionsDir)
 	cfg.Pricing.TablePath = expandPlaceholders(cfg.Pricing.TablePath)
+	cfg.Logging.File = expandPlaceholders(cfg.Logging.File)
 	cfg.OAuthUsage.CredentialsPath = expandPlaceholders(cfg.OAuthUsage.CredentialsPath)
 	cfg.OAuthUsage.ClaudePath = expandPlaceholders(cfg.OAuthUsage.ClaudePath)
 
@@ -221,6 +223,23 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.Uplink.URL = normalized
 	cfg.Uplink.Token = strings.TrimSpace(cfg.Uplink.Token)
+
+	// Port 0 would bind a random port per listener, leaving the dashboard
+	// URL and Host allow-list wrong; anything else out of range fails only
+	// once the listeners start, after every other component is running.
+	if cfg.HTTP.Port < 1 || cfg.HTTP.Port > 65535 {
+		return nil, fmt.Errorf("config http.port: %d is outside 1-65535", cfg.HTTP.Port)
+	}
+	// 0 means "keep forever" (the store prunes nothing for a non-positive
+	// age); a negative value has no meaning of its own.
+	if cfg.Retention.ParseErrorsDays < 0 {
+		return nil, fmt.Errorf("config retention.parse_errors_days: %d is negative; use 0 to keep forever",
+			cfg.Retention.ParseErrorsDays)
+	}
+	if cfg.Retention.SlackSamplesDays < 0 {
+		return nil, fmt.Errorf("config retention.slack_samples_days: %d is negative; use 0 to keep forever",
+			cfg.Retention.SlackSamplesDays)
+	}
 
 	// Only meaningful when something will actually poll: a stale or
 	// nonsense interval left behind in a disabled block should not block
@@ -273,7 +292,8 @@ func normalizeUplinkURL(raw string) (string, error) {
 	if u.Path != "" && u.Path != "/" {
 		return "", fmt.Errorf("must be a base URL with no path, got path %q", u.Path)
 	}
-	if u.RawQuery != "" || u.Fragment != "" {
+	// ForceQuery catches a bare trailing "?", which u.String() keeps.
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", fmt.Errorf("must be a base URL with no query or fragment")
 	}
 
@@ -293,8 +313,10 @@ func expandPlaceholders(s string) string {
 	var home string
 	homeResolved := false
 	for _, name := range tokens {
-		token := "%" + name + "%"
-		if !strings.Contains(s, token) {
+		// Case-insensitive, as Windows env var names are: %LocalAppData%
+		// names the same variable as %LOCALAPPDATA%.
+		token := regexp.MustCompile("(?i)%" + name + "%")
+		if !token.MatchString(s) {
 			continue
 		}
 		val := os.Getenv(name)
@@ -310,7 +332,7 @@ func expandPlaceholders(s string) string {
 		if val == "" {
 			continue
 		}
-		s = strings.ReplaceAll(s, token, val)
+		s = token.ReplaceAllLiteralString(s, val)
 	}
 	return s
 }
@@ -330,9 +352,10 @@ func defaultCoworkSessionsDir() string {
 	return filepath.Join(appData, "Claude", "local-agent-mode-sessions")
 }
 
-// expandHome expands a leading ~/ to the user's home directory.
+// expandHome expands a leading ~/ (or ~\ on Windows) to the user's home
+// directory.
 func expandHome(path string) string {
-	if !strings.HasPrefix(path, "~/") {
+	if !strings.HasPrefix(path, "~/") && !strings.HasPrefix(path, "~"+string(filepath.Separator)) {
 		return path
 	}
 	home, err := os.UserHomeDir()

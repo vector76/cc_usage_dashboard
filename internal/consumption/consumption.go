@@ -6,7 +6,9 @@ package consumption
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +36,10 @@ type Result struct {
 	EventsWithoutCost     int64 `json:"events_without_cost"`
 }
 
+// ErrInvalidPeriod marks a Calculate failure caused by the period string
+// itself rather than by a query, so an HTTP caller can answer 400.
+var ErrInvalidPeriod = errors.New("invalid period")
+
 // Calculator computes the consumption report.
 type Calculator struct {
 	db  *sql.DB
@@ -57,10 +63,10 @@ func (c *Calculator) Calculate(periodStr string) (*Result, error) {
 	}
 	duration, err := parsePeriod(periodStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid period: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidPeriod, err)
 	}
 	if duration < 0 {
-		return nil, fmt.Errorf("invalid period: negative duration %q", periodStr)
+		return nil, fmt.Errorf("%w: negative duration %q", ErrInvalidPeriod, periodStr)
 	}
 	endTime := c.now().UTC()
 	startTime := endTime.Add(-duration)
@@ -277,9 +283,15 @@ func (c *Calculator) snapshotsInRange(usedCol string, startTime, endTime time.Ti
 // parsePeriod parses a period string like "24h", "7d", "30d". Go's
 // time.ParseDuration doesn't accept day units, so a strict "<int>d" form is
 // normalized to hours; everything else falls through to time.ParseDuration.
+// A day count whose hours overflow time.Duration is rejected rather than
+// left to wrap, as time.ParseDuration does for the other units.
 func parsePeriod(periodStr string) (time.Duration, error) {
 	if rest, ok := strings.CutSuffix(periodStr, "d"); ok {
 		if days, err := strconv.Atoi(rest); err == nil {
+			const maxDays = math.MaxInt64 / int64(24*time.Hour)
+			if int64(days) > maxDays || int64(days) < -maxDays {
+				return 0, fmt.Errorf("invalid duration: %q overflows", periodStr)
+			}
 			return time.Duration(days) * 24 * time.Hour, nil
 		}
 	}

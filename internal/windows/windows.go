@@ -166,8 +166,12 @@ func (e *Engine) ensureSessionWindow() error {
 			// Defensive contradiction: if the snapshot says inactive but
 			// reports nonzero usage, leave the window alone — Anthropic
 			// briefly flickers session_active=false while a session is
-			// opening.
-			if active != nil && !*active && used != nil && *used == 0 {
+			// opening. A limbo observation from before the window started
+			// (the userscript backdates observed_at) describes the gap
+			// before this session, not the session itself; closing on it
+			// would write ends_at < started_at.
+			if active != nil && !*active && used != nil && *used == 0 &&
+				!observedAt.Before(window.StartedAt) {
 				if _, err := e.db.Exec(
 					`UPDATE windows SET closed = 1, ends_at = ? WHERE id = ?`,
 					store.FormatTime(observedAt), window.ID,

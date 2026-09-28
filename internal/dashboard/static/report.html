@@ -320,28 +320,52 @@ function clearError() {
 
 // --- fetching ------------------------------------------------------------
 
+// clearResults empties the totals and table after a failed request, so the
+// previous range's numbers don't sit under the newly pressed preset looking
+// like its answer.
+function clearResults() {
+  clear(document.getElementById("totals"));
+  clear(document.getElementById("table-host"));
+}
+
+// runSeq numbers each run() so only the latest request's outcome — success or
+// failure — reaches the page. Presets can be clicked faster than a multi-week
+// scan returns; without this a superseded response lands last, replaces the
+// newer result under the newer preset's pressed button, and overwrites the
+// From/To inputs.
+let runSeq = 0;
+
 // run issues the request. A preset passes its period (or a computed local
 // range); the custom inputs pass absolute instants derived from local values.
 async function run(params, activePresetID) {
+  const seq = ++runSeq;
   clearError();
   for (const b of document.querySelectorAll("#presets button")) {
     b.setAttribute("aria-pressed", String(b.dataset.preset === activePresetID));
   }
 
   const qs = new URLSearchParams(params).toString();
-  let resp, data;
+  let resp, data = null;
   try {
     resp = await fetch("/api/usage/breakdown?" + qs);
-    data = await resp.json();
   } catch (e) {
+    if (seq !== runSeq) return;
     console.error("breakdown fetch failed", e);
+    clearResults();
     showError("Could not reach the server.");
     return;
   }
-  if (!resp.ok) {
+  // Parsed apart from the fetch: a plain-text rejection (a ServeMux 404 or
+  // 405) is an answer from the server, not a failure to reach it.
+  try { data = await resp.json(); } catch (e) { /* not JSON; reported below */ }
+  if (seq !== runSeq) return;
+  if (!resp.ok || !data) {
     // The server deliberately does not echo the submitted range, so the
     // message is generic; the inputs are still on screen for comparison.
-    showError(data && data.error ? "Request rejected: " + data.error : "Request failed.");
+    clearResults();
+    showError(data && data.error ? "Request rejected: " + data.error
+      : !resp.ok ? "Request failed (HTTP " + resp.status + ")."
+      : "The server's response could not be read.");
     return;
   }
   renderTotals(data);

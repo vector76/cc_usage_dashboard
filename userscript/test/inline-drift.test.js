@@ -8,6 +8,11 @@ const path = require('node:path');
 const rows = require('../lib/rows');
 const resets = require('../lib/resets');
 const dedup = require('../lib/dedup');
+const bars = require('../lib/bars');
+const continuity = require('../lib/continuity');
+const route = require('../lib/route');
+const state = require('../lib/state');
+const visibility = require('../lib/visibility');
 
 // The pure helpers under lib/ are the source of truth, but Tampermonkey
 // loads a single file with no build step, so each helper's body is also
@@ -28,7 +33,7 @@ const USERSCRIPT = fs.readFileSync(
 // here rather than silently skipping the comparison. Function bodies end
 // at the first line that is exactly the IIFE's four-space-indented "}".
 function extractConst(name) {
-    const m = USERSCRIPT.match(new RegExp(`^    const ${name} = [^;]*;`, 'm'));
+    const m = USERSCRIPT.match(new RegExp(`^    const ${name} =\\s[^;]*;`, 'm'));
     assert.ok(m, `${name} not found in the userscript`);
     return m[0];
 }
@@ -91,13 +96,15 @@ test('inlined prefix and heading lists match lib/rows.js', () => {
 
 test('inlined reset parsers match lib/resets.js', () => {
     const inlined = evalInlined(
-        ['WEEKDAYS', 'WEEKDAY_CLOCK_RE'],
+        ['WEEKDAYS', 'WEEKDAY_CLOCK_RE', 'WEEKDAY_CLOCK_ALT_RE'],
         ['parseWeekdayClock', 'nearestWeekdayClockMs', 'parseSessionEnds', 'parseWeeklyEnds'],
         ['parseWeekdayClock', 'parseSessionEnds', 'parseWeeklyEnds'],
     );
 
     const texts = [
         'Resets Thu 3:50 AM', 'Resets Thursday 11:00 PM', 'Resets sat 12:30 pm', 'Resets Sun 12:00 AM',
+        'Resets Thu 15:50', 'Resets Thursday, 23:00', 'Resets Thu, 3:50 PM', 'Resets Thu 3:50 p.m.',
+        'Resets Thu 24:00', 'Resets Thu 15:60',
         'Resets in 3 hr 33 min', 'Resets in 19 min', 'Resets in 5 hr', 'Resets in 0 min',
         'Resets May 1', 'Starts when a message is sent', '', null, undefined,
     ];
@@ -149,6 +156,153 @@ test('inlined shouldSend matches lib/dedup.js', () => {
             );
         }
     }
+});
+
+test('inlined usage-bar recognition matches lib/bars.js', () => {
+    const inlined = evalInlined(['USAGE_BAR_SELECTOR'], ['isUsageBarTarget'], ['USAGE_BAR_SELECTOR', 'isUsageBarTarget']);
+    assert.strictEqual(inlined.USAGE_BAR_SELECTOR, bars.USAGE_BAR_SELECTOR);
+    for (const role of ['meter', 'progressbar', 'slider', '', null, undefined]) {
+        for (const label of ['Usage', 'Usage credits', 'usage', '', null, undefined]) {
+            assert.strictEqual(inlined.isUsageBarTarget(role, label), bars.isUsageBarTarget(role, label),
+                `isUsageBarTarget disagrees on ${JSON.stringify([role, label])}`);
+        }
+    }
+});
+
+test('inlined decideContinuity matches lib/continuity.js', () => {
+    const inlined = evalInlined(
+        ['WALL_CLOCK_GAP_MS', 'WINDOW_ENDS_JUMP_MS'],
+        ['decideContinuity'],
+        ['decideContinuity', 'WALL_CLOCK_GAP_MS', 'WINDOW_ENDS_JUMP_MS'],
+    );
+    assert.strictEqual(inlined.WALL_CLOCK_GAP_MS, continuity.WALL_CLOCK_GAP_MS);
+    assert.strictEqual(inlined.WINDOW_ENDS_JUMP_MS, continuity.WINDOW_ENDS_JUMP_MS);
+
+    const base = 1714200000000;
+    const states = [
+        null,
+        { lastSentAtMs: base, lastPercent: 42, lastWindowEndsMs: base + 3600000 },
+        { lastSentAtMs: base, lastPercent: 42, lastWindowEndsMs: null },
+    ];
+    const observations = [
+        { percent: 42, windowEndsMs: base + 3600000 },
+        { percent: 43, windowEndsMs: base + 3600000 + continuity.WINDOW_ENDS_JUMP_MS + 1 },
+        { percent: 41, windowEndsMs: base + 3600000 },
+        { percent: 42, windowEndsMs: null },
+        { percent: null, windowEndsMs: undefined },
+    ];
+    const clocks = [base + 1000, base + continuity.WALL_CLOCK_GAP_MS, base + continuity.WALL_CLOCK_GAP_MS + 1];
+    for (const prev of states) {
+        for (const obs of observations) {
+            for (const now of clocks) {
+                assert.strictEqual(inlined.decideContinuity(obs, prev, now), continuity.decideContinuity(obs, prev, now),
+                    `decideContinuity disagrees on ${JSON.stringify([obs, prev, now])}`);
+            }
+        }
+    }
+});
+
+test('inlined isUsageRoute matches lib/route.js', () => {
+    const inlined = evalInlined(['USAGE_PATH'], ['isUsageRoute'], ['isUsageRoute']);
+    const pathnames = ['/settings/usage', '/settings/usage/', '/settings', '/new', '/chat/abc', '', null, undefined];
+    const hashes = ['#settings/usage', '#/settings/usage', '#settings/usage/x', '#settings/usage?x=1',
+        '#settings/usage-summary', '#settings', 'settings/usage', '', null, undefined];
+    for (const p of pathnames) {
+        for (const h of hashes) {
+            assert.strictEqual(inlined.isUsageRoute(p, h), route.isUsageRoute(p, h),
+                `isUsageRoute disagrees on ${JSON.stringify([p, h])}`);
+        }
+    }
+});
+
+function memoryStorage(initial) {
+    const map = new Map(initial === undefined ? [] : [[state.STATE_STORAGE_KEY, initial]]);
+    return {
+        getItem: k => (map.has(k) ? map.get(k) : null),
+        setItem: (k, v) => map.set(k, String(v)),
+        dump: () => Object.fromEntries(map),
+    };
+}
+
+// The inlined copies read globalThis.localStorage directly where lib/ goes
+// through a test seam; shadow globalThis so neither touches the real one.
+function inlinedState(storage) {
+    const src = [extractConst('STATE_STORAGE_KEY'), extractFunction('loadState'), extractFunction('recordSentState')].join('\n');
+    // eslint-disable-next-line no-new-func
+    return new Function('globalThis', `${src}\nreturn { STATE_STORAGE_KEY, loadState, recordSentState };`)(
+        { localStorage: storage },
+    );
+}
+
+test('inlined loadState/recordSentState match lib/state.js', () => {
+    assert.strictEqual(inlinedState(memoryStorage()).STATE_STORAGE_KEY, state.STATE_STORAGE_KEY);
+
+    const raws = [
+        undefined, 'not json', 'null', '"str"', '{}', '{"lastSentAtMs":"x"}',
+        JSON.stringify({ lastSentAtMs: 1, lastPercent: 42, lastResetText: 'Resets in 3 hr', lastWindowEndsMs: 2 }),
+        JSON.stringify({ lastSentAtMs: 1, lastPercent: 0, lastResetText: null, lastWindowEndsMs: null,
+            lastFablePercent: 11, lastSessionActive: false, lastWeeklyActive: false }),
+        JSON.stringify({ lastSentAtMs: 1, lastPercent: 5, lastFablePercent: null, lastSessionActive: true }),
+    ];
+    const records = [
+        { sentAtMs: 1, percent: 42, resetText: 'Resets Thu 3:50 AM', windowEndsMs: 2 },
+        { sentAtMs: 1, percent: 0, resetText: null, windowEndsMs: null, sessionActive: false, weeklyActive: false, fablePercent: 7 },
+        { sentAtMs: 1, percent: null, resetText: undefined, windowEndsMs: undefined, fablePercent: null },
+    ];
+    try {
+        for (const raw of raws) {
+            const libStorage = memoryStorage(raw);
+            state._setStorageForTests(libStorage);
+            assert.deepStrictEqual(inlinedState(memoryStorage(raw)).loadState(), state.loadState(),
+                `loadState disagrees on ${raw}`);
+        }
+        for (const rec of records) {
+            const libStorage = memoryStorage();
+            const inlStorage = memoryStorage();
+            state._setStorageForTests(libStorage);
+            state.recordSentState(rec);
+            inlinedState(inlStorage).recordSentState(rec);
+            assert.deepStrictEqual(inlStorage.dump(), libStorage.dump(),
+                `recordSentState disagrees on ${JSON.stringify(rec)}`);
+        }
+    } finally {
+        state._setStorageForTests(null);
+    }
+});
+
+function stubDocument({ lockHidden = false } = {}) {
+    const doc = { listeners: [] };
+    doc.addEventListener = (type, fn, capture) => doc.listeners.push({ type, fn, capture });
+    if (lockHidden) Object.defineProperty(doc, 'hidden', { value: true, configurable: false });
+    return doc;
+}
+
+function spoofOutcome(install, opts) {
+    const doc = stubDocument(opts);
+    install(doc);
+    const calls = [];
+    const event = {
+        stopImmediatePropagation: () => calls.push('stopImmediatePropagation'),
+        stopPropagation: () => calls.push('stopPropagation'),
+    };
+    for (const l of doc.listeners) l.fn(event);
+    return {
+        hidden: doc.hidden,
+        visibilityState: doc.visibilityState,
+        webkitHidden: doc.webkitHidden,
+        webkitVisibilityState: doc.webkitVisibilityState,
+        listeners: doc.listeners.map(l => [l.type, l.capture]),
+        calls,
+    };
+}
+
+test('inlined installVisibilitySpoof matches lib/visibility.js', () => {
+    const inlined = evalInlined([], ['installVisibilitySpoof'], ['installVisibilitySpoof']);
+    for (const opts of [{}, { lockHidden: true }]) {
+        assert.deepStrictEqual(spoofOutcome(inlined.installVisibilitySpoof, opts),
+            spoofOutcome(visibility.installVisibilitySpoof, opts), `spoof disagrees on ${JSON.stringify(opts)}`);
+    }
+    assert.doesNotThrow(() => inlined.installVisibilitySpoof(null));
 });
 
 // The snapshot body is the contract with the server (internal/server/snapshot.go).

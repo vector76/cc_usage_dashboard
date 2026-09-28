@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestBufferOrderingNewestFirst(t *testing.T) {
@@ -120,6 +122,105 @@ func TestHandlerWithAttrs(t *testing.T) {
 	}
 	if got[0].Attrs["path"] != "/tmp/x" {
 		t.Errorf("expected path attr, got %+v", got[0].Attrs)
+	}
+}
+
+// TestHandlerTruncatesLongValues verifies a buffered record cannot pin an
+// arbitrarily large string: several handlers log request-controlled values
+// (query strings, sources, session ids) at Warn, and 200 records of ~1 MiB
+// each would otherwise sit in the buffer and be re-encoded on every
+// GET /api/feedback. The inner handler still receives the full value.
+func TestHandlerTruncatesLongValues(t *testing.T) {
+	var out bytes.Buffer
+	buf := NewBuffer(10)
+	inner := slog.NewTextHandler(&out, nil)
+	huge := strings.Repeat("é", 100_000) // multi-byte, so the cut must respect rune boundaries
+	logger := slog.New(NewHandler(inner, buf)).With("with", huge)
+
+	logger.Warn(huge, "period", huge)
+
+	got := buf.Recent()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(got))
+	}
+	for name, v := range map[string]string{
+		"message": got[0].Message, "attr": got[0].Attrs["period"], "with attr": got[0].Attrs["with"],
+	} {
+		if len(v) > maxBufferedValueLen+len("…") {
+			t.Errorf("%s: buffered %d bytes, want at most %d", name, len(v), maxBufferedValueLen+len("…"))
+		}
+		if !utf8.ValidString(v) {
+			t.Errorf("%s: truncation split a rune", name)
+		}
+		if !strings.HasPrefix(huge, strings.TrimSuffix(v, "…")) {
+			t.Errorf("%s: truncated value is not a prefix of the original", name)
+		}
+	}
+	if !strings.Contains(out.String(), huge) {
+		t.Error("inner handler must receive the untruncated value")
+	}
+}
+
+// redacted implements slog.LogValuer the way a credential wrapper would.
+type redacted string
+
+func (redacted) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
+
+// TestHandlerResolvesLogValuers verifies the buffered view shows a value's
+// LogValue(), as the standard handlers do, rather than its raw fmt form —
+// otherwise a self-redacting type would leak through GET /api/feedback.
+func TestHandlerResolvesLogValuers(t *testing.T) {
+	buf := NewBuffer(10)
+	inner := slog.NewTextHandler(&bytes.Buffer{}, nil)
+	logger := slog.New(NewHandler(inner, buf)).With("with", redacted("secret-1"))
+
+	logger.Warn("auth", "token", redacted("secret-2"))
+
+	got := buf.Recent()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(got))
+	}
+	for _, k := range []string{"with", "token"} {
+		if got[0].Attrs[k] != "[REDACTED]" {
+			t.Errorf("attr %q = %q, want [REDACTED]", k, got[0].Attrs[k])
+		}
+	}
+}
+
+// TestHandlerQualifiesGroupedKeys verifies attrs under different groups do
+// not overwrite each other in the flat buffered view: keys carry their group
+// path, inline (empty-key) groups contribute their members, and empty attrs
+// are dropped, as slog's own handlers do.
+func TestHandlerQualifiesGroupedKeys(t *testing.T) {
+	buf := NewBuffer(10)
+	inner := slog.NewTextHandler(&bytes.Buffer{}, nil)
+	logger := slog.New(NewHandler(inner, buf)).
+		With("id", "top").
+		WithGroup("req").With("id", "r1")
+
+	logger.Warn("grouped",
+		"id", "r1-rec",
+		slog.Group("peer", "id", "p1"),
+		slog.Group("", "inline", "yes"),
+		slog.Attr{})
+
+	got := buf.Recent()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(got))
+	}
+	want := map[string]string{
+		"id":          "top",
+		"req.id":      "r1-rec",
+		"req.peer.id": "p1",
+		"req.inline":  "yes",
+	}
+	if len(got[0].Attrs) != len(want) {
+		t.Errorf("attrs = %+v, want %+v", got[0].Attrs, want)
+	}
+	for k, v := range want {
+		if got[0].Attrs[k] != v {
+			t.Errorf("attr %q = %q, want %q (all: %+v)", k, got[0].Attrs[k], v, got[0].Attrs)
+		}
 	}
 }
 

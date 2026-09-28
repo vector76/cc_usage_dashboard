@@ -237,9 +237,10 @@ func (c *Calculator) GetSlack() (*SlackResponse, error) {
 // the callers' nil-metrics disjuncts, decided before this is consulted).
 // PercentExpected doubles as the elapsed fraction in percent — computeMetrics
 // clamps it to [0, 100], and it is 0 before the window starts, which matches
-// the profile's flat extension to the left of its first point.
+// the profile's flat extension to the left of its first point. A PercentUsed
+// outside [0, 100] is a source quirk, not a measurement, and fails the same way.
 func profilePasses(p Profile, m *WindowMetrics) bool {
-	if m.PercentUsed == nil {
+	if m.PercentUsed == nil || *m.PercentUsed < 0 || *m.PercentUsed > 100 {
 		return false
 	}
 	return (100 - *m.PercentUsed) >= p.ThresholdAt(m.PercentExpected)
@@ -396,10 +397,16 @@ func (c *Calculator) combineSlackFractions(session, weekly *WindowMetrics) *floa
 // stops posting (page closed, tampermonkey down), release_recommended must
 // flip to false within BaselineMaxAgeSeconds — otherwise queued work would
 // keep draining quota against a frozen percent_used.
+//
+// Only rows carrying a session or weekly reading count: a content-free row
+// is no evidence that percent_used is current. A received_at more than
+// MaxFutureSkew ahead of now (wall clock stepped backward) also fails, since
+// otherwise the gate would stay open for the size of the step.
 func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
 	var receivedAt time.Time
 	err := c.db.QueryRow(`
 		SELECT received_at FROM quota_snapshots
+		WHERE session_used IS NOT NULL OR weekly_used IS NOT NULL
 		ORDER BY received_at DESC LIMIT 1
 	`).Scan(&receivedAt)
 	if err == sql.ErrNoRows {
@@ -411,8 +418,14 @@ func (c *Calculator) baselineFreshnessOk(now time.Time) (bool, error) {
 
 	age := now.Sub(receivedAt)
 	maxAge := time.Duration(c.config.BaselineMaxAgeSeconds) * time.Second
-	return age <= maxAge, nil
+	return age >= -MaxFutureSkew && age <= maxAge, nil
 }
+
+// MaxFutureSkew bounds how far a snapshot's received_at may sit ahead of now
+// and still count as fresh. received_at is this process's own wall clock, so
+// anything beyond small jitter means the clock stepped backward. The
+// dashboard's snapshot age uses the same bound so it agrees with this gate.
+const MaxFutureSkew = time.Minute
 
 // RecordRelease records a release event to the database, resolving it to the
 // active window of the requested kind containing releasedAt.
@@ -451,12 +464,15 @@ func (c *Calculator) RecordRelease(releasedAt time.Time, jobTag string, estimate
 // requested kind contains the releasedAt timestamp.
 var ErrNoActiveWindow = fmt.Errorf("no active window")
 
-// RecordSample records a slack sample if sampling is enabled.
+// RecordSample records a slack sample if sampling is enabled. The window is
+// chosen the same way getActiveWindow chooses it (newest open row), so a
+// lingering duplicate open row does not capture the sample.
 func (c *Calculator) RecordSample(fraction *float64) (int64, error) {
 	var windowID int64
 	err := c.db.QueryRow(`
 		SELECT id FROM windows
 		WHERE kind = 'session' AND closed = 0
+		ORDER BY started_at DESC
 		LIMIT 1
 	`).Scan(&windowID)
 

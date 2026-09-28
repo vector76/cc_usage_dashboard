@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -18,11 +19,16 @@ func (s *Server) handleConsumption(w http.ResponseWriter, r *http.Request) {
 	calc := consumption.NewCalculator(s.store.DB())
 	result, err := calc.Calculate(period)
 	if err != nil {
-		// Most failures here are DB errors from the underlying queries;
-		// a malformed ?period also lands here but is the rarer case. We
-		// log the period (so debugging stays possible) but never echo it
-		// in the response body — the dashboard renders d.period via
-		// textContent regardless, but the layered defence is cheap.
+		// We log the period (so debugging stays possible) but never echo
+		// it in the response body — the dashboard renders d.period via
+		// textContent regardless, but the layered defence is cheap. A
+		// malformed ?period is the caller's error, so it answers 400 like
+		// /api/usage/breakdown; anything else is a query failure.
+		if errors.Is(err, consumption.ErrInvalidPeriod) {
+			slog.Warn("consumption: bad period", "err", err, "period", period)
+			writeJSONError(w, http.StatusBadRequest, "invalid period")
+			return
+		}
 		slog.Error("consumption calculation failed", "err", err, "period", period)
 		writeJSONError(w, http.StatusInternalServerError, "calculation error")
 		return

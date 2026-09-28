@@ -86,11 +86,54 @@ func TestSnapshotAcceptsInBoundsTimestamps(t *testing.T) {
 		t.Errorf("validateSnapshotTimestamps rejected a normal snapshot: %v", err)
 	}
 
-	// Zero-valued timestamps must be tolerated (userscript can omit a
-	// reset hint when the DOM doesn't expose one).
-	emptyReq := &SnapshotRequest{}
-	if err := validateSnapshotTimestamps(emptyReq, now); err != nil {
-		t.Errorf("validateSnapshotTimestamps rejected an all-zero snapshot: %v", err)
+	// Absent reset hints must be tolerated (userscript can omit a reset
+	// hint when the DOM doesn't expose one).
+	noHintsReq := &SnapshotRequest{ObservedAt: now}
+	if err := validateSnapshotTimestamps(noHintsReq, now); err != nil {
+		t.Errorf("validateSnapshotTimestamps rejected a snapshot without reset hints: %v", err)
+	}
+}
+
+// TestSnapshotRejectsMissingObservedAt verifies a body without observed_at
+// is refused rather than stored as year 1. A zero observation time drops the
+// row out of every "latest by observed_at" query, and on the plateau-slide
+// path it would rewrite the previous, legitimate row's timestamp to year 1.
+func TestSnapshotRejectsMissingObservedAt(t *testing.T) {
+	srv, testStore := createTestServer(t)
+	defer testStore.Close()
+
+	fixed := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+	srv.windowsEngine.SetNow(func() time.Time { return fixed })
+	srv.SetNow(func() time.Time { return fixed })
+
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, jsonPOST("/snapshot", []byte(
+		`{"observed_at":"2026-04-01T12:00:00Z","source":"userscript","session_used":42}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("seed snapshot: expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	w = httptest.NewRecorder()
+	srv.ServeHTTP(w, jsonPOST("/snapshot", []byte(
+		`{"source":"userscript","session_used":42,"continuous_with_prev":true}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a snapshot without observed_at, got %d (%s)", w.Code, w.Body.String())
+	}
+
+	var observed string
+	if err := testStore.DB().QueryRow(
+		`SELECT observed_at FROM quota_snapshots ORDER BY id`).Scan(&observed); err != nil {
+		t.Fatalf("read seed row: %v", err)
+	}
+	if got, err := time.Parse(time.RFC3339Nano, observed); err != nil || !got.Equal(fixed) {
+		t.Errorf("seed row observed_at = %q, want %s", observed, fixed.Format(time.RFC3339))
+	}
+	var n int
+	if err := testStore.DB().QueryRow(`SELECT COUNT(*) FROM quota_snapshots`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected only the seed row, got %d rows", n)
 	}
 }
 

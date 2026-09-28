@@ -110,6 +110,9 @@ rather than ignored on every unrelated page. On such a route:
    - Weekly: "Resets Thu 11:00 PM" / "Resets Thursday 11:00 PM" → next
      future occurrence of that weekday at that local time, converted to
      UTC. Absolute clock-time hints are unaffected by page staleness.
+   - Both absolute forms also accept a comma after the weekday, a dotted
+     meridiem ("3:50 p.m.") and a 24-hour clock ("Resets Thu 15:50"), as a
+     fallback tried only when the en-US form fails to match.
    These land in `session_window_ends` / `weekly_window_ends` so the server can
    anchor the windows on Anthropic's actual reset boundary. Without a parseable
    hint the server declines to mint and the dashboard renders a `[now, now+7d]`
@@ -307,6 +310,8 @@ Content-Type: application/json
 }
 ```
 
+`observed_at` is required; a body without it is rejected with 400 rather than
+stored as year 1 (which would drop the row out of every "latest" query).
 `session_used` and `weekly_used` are 0–100 percentages, both nullable: when only one
 row is parseable the other field is omitted and the trayapp records what was found.
 `fable_weekly_used` is the "Fable" weekly sub-row, omitted whenever the row is
@@ -355,8 +360,12 @@ The userscript must:
   `parse_error` payload to the local server (separate endpoint) so the trayapp can
   surface "userscript broke, please update" in the tray UI. The payload is a
   structured **fingerprint** (heading texts, progressbar/meter counts, the
-  bars' resolved row labels, pathname) — not raw page HTML — so conversation
-  content and account names never leave the browser. The row labels were
+  bars' resolved row labels, the pathname's first segment) — not raw page
+  HTML — so conversation content and account names never leave the browser.
+  Because the usage page is a modal over any page, headings are read only
+  from inside the settings dialog (`[role="dialog"]`/`<dialog>`), or from the
+  whole document on the legacy full-page `/settings/usage` route; a chat
+  path's conversation id is dropped. The row labels were
   added after the September 2026 relayout: the fingerprint showed seven
   meters under an unfamiliar heading, but which meter was which had to be
   captured by hand from the live page. Recent fingerprints are served by
@@ -378,9 +387,12 @@ bodies are also **inlined** into `claude-usage-snapshot.user.js` alongside the
 existing utilities. The lib copy is the source of truth; the inlined copy is what
 runs on `claude.ai`. A header comment in the inlined block points at the lib file so
 the duplication is discoverable; edit both together. `test/inline-drift.test.js`
-enforces this for the row-matching helper: it extracts the inlined copy from the
-userscript source and asserts it agrees with `lib/rows.js` on every input the
-lib tests cover, so a one-sided edit fails the suite instead of shipping. This keeps the test harness
+enforces this for every lib module (rows, resets, dedup, bars, continuity,
+route, state, visibility): it extracts each inlined copy from the
+userscript source and asserts it agrees with its `lib/` counterpart on a spread
+of inputs, so a one-sided edit fails the suite instead of shipping. Code with
+no lib copy (the fingerprint, `postJSON`, the bootstrap) is exercised the same
+way against stubs in `test/inline-runtime.test.js`. This keeps the test harness
 simple and the userscript install footprint a single file. If the helper count grows
 enough that the duplication becomes painful, a small concat step (Make target that
 prepends lib bodies into the user.js) is a fine future move.

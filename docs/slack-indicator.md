@@ -33,7 +33,8 @@ Boundaries:
 - **Before window starts** (`t < t0`): session windows only begin on first
   use; weekly is anchored from snapshots. If no in-window snapshot has
   arrived, `percent_used` and `slack_fraction` are null and the headroom
-  gate fails (no measurement = don't release).
+  gate fails (no measurement = don't release). A `percent_used` outside
+  [0, 100] fails the headroom gate the same way.
 - **After window ends** (`t > t1`): `progress=1`, `percent_expected=100`.
   Slack is informational only; `release_recommended=false`.
 
@@ -241,8 +242,12 @@ through the `fable_headroom` gate instead.
 The gate passes iff a snapshot exists and is no older than `baseline_max_age`
 (default 8 minutes). Missing snapshot fails the gate.
 
-The freshness clock reads the most-recent `quota_snapshots.received_at`,
-which the server's write-time slide (see `docs/data-model.md`) refreshes
+The freshness clock reads the most-recent `quota_snapshots.received_at`
+among rows that carry a reading (`session_used` or `weekly_used` non-null;
+a content-free row is no evidence that `percent_used` is current). A
+`received_at` more than a minute ahead of the server's clock (the wall
+clock stepped backward) also fails the gate. The server's write-time
+slide (see `docs/data-model.md`) refreshes `received_at`
 on every identical continuation as well as on net-new rows. Combined with
 the userscript's 60-second backstop and freshness-driven dedup (see
 `docs/userscript.md`), an active page that ticks its "Resets in …" text
