@@ -88,6 +88,14 @@ Provide both via a small `install.ps1` script that the user runs once.
   case for any `-H=windowsgui` build. Run a console build from a terminal and
   logs stay on stderr where you can see them. An explicit `logging.file`
   overrides both. See docs/configuration.md "Log destination".
+- Any request that takes a second or more is logged at Warn as `slow request`,
+  with its method, path, status, peer, and the time split into `gate_ms` (Host
+  and token checks) and `handler_ms`. Every endpoint normally answers in well
+  under 100 ms, and `slack-check.bat` gives up after its timeout, so this is
+  what makes an intermittent stall diagnosable. The clock starts when the
+  server begins handling the request. A client timeout with no matching
+  record means the time went before that: in accepting the connection, or
+  with the whole process paused.
 
 ## Graceful shutdown
 

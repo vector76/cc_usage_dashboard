@@ -105,6 +105,10 @@ type Server struct {
 	// tests with fixed-date fixtures override via SetNow so the bounds
 	// move with the fixture instead of drifting against real time.
 	now func() time.Time
+
+	// slowRequestThreshold is how long a request may take before ServeHTTP
+	// logs it (see slowlog.go). Tests lower it.
+	slowRequestThreshold time.Duration
 }
 
 // New creates a new HTTP server.
@@ -141,6 +145,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		}),
 		windowsEngine: windows.NewEngine(s.DB()),
 		now:           time.Now,
+		slowRequestThreshold: defaultSlowRequestThreshold,
 		feedbackBuffer: feedback.DefaultBuffer(),
 		unknownModels:  feedback.DefaultUnknownModels(),
 	}
@@ -196,7 +201,15 @@ func (s *Server) SetPriceTable(pt ingest.PriceTable) {
 // and would only refuse a VM that names the host by its machine name.
 // Loopback, which the gate exempts, keeps the check. With no gate
 // configured (unit tests) every request is checked.
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+//
+// Every request is timed, and one that takes longer than
+// slowRequestThreshold is logged (see logIfSlow).
+func (s *Server) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	w := &statusRecorder{ResponseWriter: rw}
+	var handlerStart time.Time
+	defer func() { s.logIfSlow(r, w.status, start, handlerStart) }()
+
 	tokenGated := s.auth != nil && !isLoopbackPeer(r.RemoteAddr)
 	if !tokenGated && !s.hostAllowed(r.Host) {
 		slog.Warn("rejected request with disallowed Host",
@@ -208,6 +221,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.rejectUnauthorized(w, r)
 		return
 	}
+	handlerStart = time.Now()
 	s.mux.ServeHTTP(w, r)
 }
 

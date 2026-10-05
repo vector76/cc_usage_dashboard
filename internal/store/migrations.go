@@ -300,7 +300,7 @@ func reclaimSpace(db *sql.DB) {
 		slog.Warn("WAL checkpoint after VACUUM failed", "err", err)
 		return
 	}
-	slog.Warn("compacted the database after a migration", "took", time.Since(start).Round(time.Millisecond))
+	slog.Warn("compacted the database after a migration", "took", time.Since(start).Round(time.Millisecond).String())
 }
 
 // applyMigration runs one migration's SQL and records its version in a
