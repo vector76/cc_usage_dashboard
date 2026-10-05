@@ -171,7 +171,8 @@ func (s *Store) InsertUsageEvent(
 	})
 }
 
-// InsertUsageEventRecord inserts a usage event and returns its ID.
+// InsertUsageEventRecord inserts a usage event and returns its ID. RawJSON is
+// stored trimmed of conversation text (see TrimUsageRawJSON).
 func (s *Store) InsertUsageEventRecord(r UsageEventRecord) (int64, error) {
 	result, err := s.db.Exec(`
 		INSERT INTO usage_events (
@@ -181,7 +182,7 @@ func (s *Store) InsertUsageEventRecord(r UsageEventRecord) (int64, error) {
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, FormatTime(r.OccurredAt), r.Source, r.SessionID, r.MessageID, r.ProjectPath,
 		r.InputTokens, r.OutputTokens, r.CacheCreationTokens, r.CacheCreation1hTokens,
-		r.CacheReadTokens, r.CostUSD, r.CostSource, r.Model, r.RawJSON)
+		r.CacheReadTokens, r.CostUSD, r.CostSource, r.Model, TrimUsageRawJSON(r.RawJSON))
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert usage event: %w", err)

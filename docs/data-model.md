@@ -36,7 +36,9 @@ source granularity).
 |                       |              | per-rate maximum, for a model the table does  |
 |                       |              | not list — a deliberate overestimate).        |
 | model                 | TEXT         | Model name when known. Needed for cost compute.|
-| raw_json              | TEXT         | Original event payload for forensic replay.    |
+| raw_json              | TEXT         | Original event payload for forensic replay,    |
+|                       |              | minus the conversation text (see "raw_json     |
+|                       |              | trimming" below).                              |
 
 Constraints:
 
@@ -358,7 +360,7 @@ remainder clamped at zero. `prices.yaml` lists the 1-hour rate per model as
 input rate, so an older override file doesn't price 1-hour writes at $0.
 
 Migration v9 recovers the split for existing rows from `raw_json`, which only
-the tailer populates with the full transcript line. Rows that gain a split and
+the tailer populates with the transcript line. Rows that gain a split and
 carry a `computed` or `ceiling` cost have that cost cleared, and
 `ingest.BackfillCosts` re-prices them at startup, the same path that makes a
 newly added model retroactive. `reported` costs are left alone. Hook- and
@@ -370,9 +372,37 @@ The range report (`GET /api/usage/breakdown`) returns
 `cache_creation_5m_tokens` and `cache_creation_1h_tokens` alongside the total,
 and the report page shows them as separate columns.
 
+## raw_json trimming
+
+A usage event's `raw_json` keeps the transcript line minus the conversation:
+`message.content` (the reply text and tool calls) and `wireToolInputs` (the tool
+inputs Claude Code repeats at the top level) are dropped, and everything else —
+the `usage` block, ids, model, timestamps, `cwd` — is kept. That remainder is
+what a replay needs; migration v9's recovery of the 1-hour cache split read only
+`message.usage`.
+
+Stored whole, the lines averaged about 3.5 KB and grew the database by
+120–150 MB a month, three quarters of it conversation text nothing reads.
+Trimmed, they average about 1.2 KB.
+
+`store.TrimUsageRawJSON` applies the rule on every insert, from the tailer and
+from `POST /log` alike. A payload that is empty, not JSON or not an object is
+stored unchanged. Migration v10 applies the same rule to rows stored before it,
+with SQLite's `json_remove`; a test checks the two agree. Because deleting data
+only moves pages to SQLite's free list, v10 sets the migration's `Vacuum` flag:
+once the pending migrations commit, `ApplyMigrations` runs `VACUUM` and then a
+`wal_checkpoint(TRUNCATE)`, since in WAL mode the rebuilt database passes through
+the WAL. On a 400 MB database the first start after upgrading takes some seconds
+longer and needs free disk space about the size of the database. A failed
+`VACUUM` is logged and startup continues: the data is correct, only larger.
+
+`quota_snapshots.raw_json` is the userscript's or OAuth poller's small payload,
+not a transcript line, and is not trimmed.
+
 ## Retention
 
-- `usage_events`: keep forever. Volume is small (KB/day at most).
+- `usage_events`: keep forever. Each row is about 1–2 KB with its trimmed
+  `raw_json`; at heavy use that is tens of MB a month.
 - `quota_snapshots`: keep forever.
 - `windows`: keep forever.
 - `slack_samples`: optional, default off. If on, retain 90 days.

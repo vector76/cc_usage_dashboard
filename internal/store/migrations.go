@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"time"
 )
 
 // Migration represents a single schema migration.
@@ -10,6 +12,10 @@ type Migration struct {
 	Version int
 	Name    string
 	SQL     string
+	// Vacuum asks for a VACUUM once the pending migrations have committed.
+	// Set it on a migration that deletes enough to matter: SQLite only puts
+	// freed pages on a free list, so the file never shrinks without one.
+	Vacuum bool
 }
 
 var migrations = []Migration{
@@ -211,6 +217,28 @@ WHERE cache_creation_1h_tokens > 0
   AND cost_source IN ('computed', 'ceiling');
 `,
 	},
+	{
+		Version: 10,
+		Name:    "trim_usage_events_raw_json",
+		// The tailer stored each transcript line whole, conversation and
+		// all, and that text grew to three quarters of the database. This
+		// applies store.TrimUsageRawJSON's rule to the rows already stored:
+		// drop message.content and wireToolInputs, keep the rest. The LIKE
+		// prefilter keeps json_valid off rows that can't match, and
+		// json_valid keeps one malformed row from aborting the migration.
+		// json_type is non-NULL for a present key even when its value is
+		// JSON null, matching the Go side, which drops the key either way.
+		SQL: `
+UPDATE usage_events
+SET raw_json = json_remove(raw_json, '$.message.content', '$.wireToolInputs')
+WHERE (raw_json LIKE '%"content"%' OR raw_json LIKE '%"wireToolInputs"%')
+  AND json_valid(raw_json)
+  AND json_type(raw_json) = 'object'
+  AND (json_type(raw_json, '$.message.content') IS NOT NULL
+    OR json_type(raw_json, '$.wireToolInputs') IS NOT NULL);
+`,
+		Vacuum: true,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.
@@ -234,6 +262,7 @@ func ApplyMigrations(db *sql.DB) error {
 	}
 
 	// Apply pending migrations
+	vacuum := false
 	for _, m := range migrations {
 		if m.Version <= currentVersion {
 			continue
@@ -242,9 +271,36 @@ func ApplyMigrations(db *sql.DB) error {
 		if err := applyMigration(db, m); err != nil {
 			return err
 		}
+		vacuum = vacuum || m.Vacuum
 	}
 
+	if vacuum {
+		reclaimSpace(db)
+	}
 	return nil
+}
+
+// reclaimSpace rewrites the database without its free pages, then truncates
+// the WAL. In WAL mode VACUUM writes the whole rebuilt database through the
+// WAL, so without the checkpoint the space would move from one file to the
+// other rather than come back.
+//
+// Failure is logged, not returned: the migrations have committed and the
+// data is correct, only larger than it needs to be. VACUUM needs free disk
+// space about the size of the database, and a full disk shouldn't stop the
+// trayapp from starting. Logged at Warn so a console-less tray user sees in
+// the feedback panel why the first start after upgrading was slow.
+func reclaimSpace(db *sql.DB) {
+	start := time.Now()
+	if _, err := db.Exec("VACUUM"); err != nil {
+		slog.Warn("VACUUM after migration failed; the database keeps its free pages", "err", err)
+		return
+	}
+	if _, err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		slog.Warn("WAL checkpoint after VACUUM failed", "err", err)
+		return
+	}
+	slog.Warn("compacted the database after a migration", "took", time.Since(start).Round(time.Millisecond))
 }
 
 // applyMigration runs one migration's SQL and records its version in a

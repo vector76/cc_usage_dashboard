@@ -35,6 +35,9 @@ type Tailer struct {
 	stopChan chan struct{}
 	doneChan chan struct{}
 	caughtUp atomic.Bool
+	// openFile opens a transcript for reading; tests replace it to count
+	// which files a poll opens.
+	openFile func(name string) (*os.File, error)
 }
 
 // NewTailer creates a new tailer for the given projects directory.
@@ -47,6 +50,7 @@ func NewTailer(projectsDir string, s *store.Store, pt PriceTable) *Tailer {
 		offsets:     make(map[string]int64),
 		stopChan:    make(chan struct{}),
 		doneChan:    make(chan struct{}),
+		openFile:    os.Open,
 	}
 }
 
@@ -269,6 +273,15 @@ func (t *Tailer) handleFileChange(filePath string) {
 		slog.Debug("tailer: skipping symlink under projects dir", "path", filePath)
 		return
 	}
+	// A file read up to its end has nothing new. Every poll walks every
+	// transcript ever written, so skipping the open here keeps a poll's
+	// cost tied to the files that changed rather than to all of history.
+	t.offsetMu.Lock()
+	offset, cached := t.offsets[filePath]
+	t.offsetMu.Unlock()
+	if cached && info.Size() == offset {
+		return
+	}
 	t.processFile(filePath)
 }
 
@@ -295,7 +308,7 @@ func (t *Tailer) processFile(filePath string) {
 		offset = dbOffset
 	}
 
-	file, err := os.Open(filePath)
+	file, err := t.openFile(filePath)
 	if err != nil {
 		// Logged only: every poll retries this file, so a parse_errors row
 		// here would add one per poll for as long as it stays unopenable.
@@ -329,6 +342,13 @@ func (t *Tailer) processFile(filePath string) {
 	newOffset := offset + parser.BytesConsumed()
 
 	if newOffset == offset && len(events) == 0 && len(parseErrors) == 0 {
+		// Cache the offset even though it didn't move, so handleFileChange
+		// can skip this file until it grows. Without this a file first seen
+		// empty, or one whose offset was loaded from the database here, is
+		// opened again on every poll.
+		t.offsetMu.Lock()
+		t.offsets[filePath] = offset
+		t.offsetMu.Unlock()
 		return
 	}
 
@@ -376,7 +396,7 @@ func (t *Tailer) processFile(filePath string) {
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`, store.FormatTime(event.OccurredAt), "tailer", event.SessionID, event.MessageID, event.ProjectPath,
 			event.InputTokens, event.OutputTokens, event.CacheCreationTokens, event.CacheCreation1hTokens,
-			event.CacheReadTokens, cost, costSource, event.Model, event.RawJSON); err != nil {
+			event.CacheReadTokens, cost, costSource, event.Model, store.TrimUsageRawJSON(event.RawJSON)); err != nil {
 			// A UNIQUE-constraint violation on (session_id, message_id) is
 			// the expected steady state, not a failure: the hook (or the
 			// other tailer root) already recorded this exact message. See

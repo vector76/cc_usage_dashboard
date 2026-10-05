@@ -955,3 +955,109 @@ func TestTailerOffsetLoadErrorDoesNotRereadFromZero(t *testing.T) {
 		t.Errorf("file was re-read from byte 0 after an offset-load error: parse_errors=%d", n)
 	}
 }
+
+// TestTailerStoresTrimmedRawJSON verifies the tailer keeps the usage block and
+// ids of a transcript line in raw_json but not the conversation text, which
+// made up most of the database.
+func TestTailerStoresTrimmedRawJSON(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+	tailer := NewTailer(tmpDir, s, make(PriceTable))
+	transcriptPath := filepath.Join(tmpDir, "session-1.jsonl")
+	line := `{"type":"assistant","sessionId":"session-1","timestamp":"2026-10-05T10:00:00Z","wireToolInputs":[{"command":"secret"}],"message":{"id":"msg-1","model":"claude-opus-5-5","content":[{"type":"text","text":"a long reply"}],"usage":{"input_tokens":100,"output_tokens":50}}}`
+	if err := os.WriteFile(transcriptPath, []byte(line+"\n"), 0644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	tailer.processFile(transcriptPath)
+
+	var raw string
+	if err := s.DB().QueryRow(`SELECT raw_json FROM usage_events WHERE message_id = 'msg-1'`).Scan(&raw); err != nil {
+		t.Fatalf("select raw_json: %v", err)
+	}
+	if raw != store.TrimUsageRawJSON(line) {
+		t.Errorf("raw_json = %s, want the trimmed line", raw)
+	}
+	for _, gone := range []string{"a long reply", "secret"} {
+		if strings.Contains(raw, gone) {
+			t.Errorf("raw_json still contains %q: %s", gone, raw)
+		}
+	}
+	if !strings.Contains(raw, `"usage"`) {
+		t.Errorf("raw_json lost the usage block: %s", raw)
+	}
+}
+
+// TestTailerPollSkipsUnchangedFiles verifies a poll opens only transcripts
+// that grew. Every poll walks every transcript ever written, so opening each
+// one made the cost of a poll grow with history rather than with activity.
+func TestTailerPollSkipsUnchangedFiles(t *testing.T) {
+	s, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer s.Close()
+
+	tmpDir := t.TempDir()
+	projectDir := filepath.Join(tmpDir, "-proj")
+	if err := os.Mkdir(projectDir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	tailer := NewTailer(tmpDir, s, make(PriceTable))
+
+	var opened []string
+	tailer.openFile = func(name string) (*os.File, error) {
+		opened = append(opened, filepath.Base(name))
+		return os.Open(name)
+	}
+
+	active := filepath.Join(projectDir, "active.jsonl")
+	idle := filepath.Join(projectDir, "idle.jsonl")
+	empty := filepath.Join(projectDir, "empty.jsonl")
+	line := func(id string) string {
+		return `{"type":"assistant","sessionId":"s","message":{"id":"` + id + `","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n"
+	}
+	for path, content := range map[string]string{active: line("a1"), idle: line("i1"), empty: ""} {
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	tailer.pollOnce()
+	if len(opened) != 3 {
+		t.Fatalf("first poll opened %v, want all three new files", opened)
+	}
+
+	opened = nil
+	tailer.pollOnce()
+	if len(opened) != 0 {
+		t.Errorf("poll with nothing new opened %v, want none", opened)
+	}
+
+	f, err := os.OpenFile(active, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open for append: %v", err)
+	}
+	if _, err := f.WriteString(line("a2")); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	f.Close()
+
+	opened = nil
+	tailer.pollOnce()
+	if len(opened) != 1 || opened[0] != "active.jsonl" {
+		t.Errorf("poll after one file grew opened %v, want only active.jsonl", opened)
+	}
+	var n int
+	if err := s.DB().QueryRow(`SELECT COUNT(*) FROM usage_events WHERE message_id = 'a2'`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("appended event ingested %d times, want 1", n)
+	}
+}

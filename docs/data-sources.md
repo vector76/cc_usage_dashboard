@@ -23,10 +23,13 @@ The tailer:
 
 - Uses `fsnotify` (or polling fallback on filesystems where fsnotify is flaky) to detect
   appends.
-- Reads new bytes from the last persisted offset for each file.
+- Reads new bytes from the last persisted offset for each file. The backup poll walks
+  every transcript under the projects directory, so it compares each file's size with
+  its offset first and opens only the ones that grew.
 - Parses each line; ignores lines without a `usage` block.
 - Inserts a row into `usage_events` keyed by `(session_id, message_id)` so replays are
-  idempotent.
+  idempotent. The line is stored in `raw_json` without its conversation text (see
+  "raw_json trimming" in `docs/data-model.md`).
 - Persists offsets so a trayapp restart resumes from the right place without rereading
   history.
 
