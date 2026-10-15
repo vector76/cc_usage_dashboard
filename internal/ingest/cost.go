@@ -24,6 +24,17 @@ type ModelPrices struct {
 	CacheCreationRate   float64
 	CacheCreation1hRate float64
 	CacheReadRate       float64
+	// LongContext, when set, replaces every rate above for a request whose
+	// prompt (input + cache writes + cache reads) is over ThresholdTokens.
+	// Claude Haiku 5.5 is priced this way; nil means one flat tier.
+	LongContext *LongContextPrices
+}
+
+// LongContextPrices is the higher tier a request pays once its prompt is
+// over ThresholdTokens. Prices.LongContext is always nil.
+type LongContextPrices struct {
+	ThresholdTokens int
+	Prices          ModelPrices
 }
 
 // ResolveCost computes the cost of a usage event based on token counts and pricing.
@@ -108,16 +119,24 @@ func CeilingPrices(t PriceTable) *ModelPrices {
 			continue
 		}
 		found = true
-		ceiling.InputRate = max(ceiling.InputRate, p.InputRate)
-		ceiling.OutputRate = max(ceiling.OutputRate, p.OutputRate)
-		ceiling.CacheCreationRate = max(ceiling.CacheCreationRate, p.CacheCreationRate)
-		ceiling.CacheCreation1hRate = max(ceiling.CacheCreation1hRate, p.CacheCreation1hRate)
-		ceiling.CacheReadRate = max(ceiling.CacheReadRate, p.CacheReadRate)
+		raiseCeiling(&ceiling, p)
+		if p.LongContext != nil {
+			raiseCeiling(&ceiling, &p.LongContext.Prices)
+		}
 	}
 	if !found {
 		return nil
 	}
 	return &ceiling
+}
+
+// raiseCeiling lifts each of ceiling's rates to p's where p's is higher.
+func raiseCeiling(ceiling, p *ModelPrices) {
+	ceiling.InputRate = max(ceiling.InputRate, p.InputRate)
+	ceiling.OutputRate = max(ceiling.OutputRate, p.OutputRate)
+	ceiling.CacheCreationRate = max(ceiling.CacheCreationRate, p.CacheCreationRate)
+	ceiling.CacheCreation1hRate = max(ceiling.CacheCreation1hRate, p.CacheCreation1hRate)
+	ceiling.CacheReadRate = max(ceiling.CacheReadRate, p.CacheReadRate)
 }
 
 // datedModelID matches a model id ending in an 8-digit date suffix
@@ -175,6 +194,13 @@ func nativeModelID(model string) string {
 func computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheCreation1hTokens, cacheReadTokens int, prices *ModelPrices) float64 {
 	const millionTokens = 1_000_000.0
 
+	// A prompt over the long-context threshold pays the higher tier on every
+	// token kind, even when most of the prompt is a cache hit.
+	if lc := prices.LongContext; lc != nil &&
+		inputTokens+cacheCreationTokens+cacheReadTokens > lc.ThresholdTokens {
+		prices = &lc.Prices
+	}
+
 	cost := 0.0
 	if inputTokens > 0 {
 		cost += float64(inputTokens) * prices.InputRate / millionTokens
@@ -221,6 +247,32 @@ func LoadPriceTable(path string) (PriceTable, error) {
 	return ParsePriceTable(data, path)
 }
 
+// rateConfig is one tier of rates as prices.yaml spells it.
+type rateConfig struct {
+	InputRatePerM           float64 `yaml:"input_rate_usd_per_m"`
+	OutputRatePerM          float64 `yaml:"output_rate_usd_per_m"`
+	CacheCreationRatePerM   float64 `yaml:"cache_creation_rate_usd_per_m"`
+	CacheCreation1hRatePerM float64 `yaml:"cache_creation_1h_rate_usd_per_m"`
+	CacheReadRatePerM       float64 `yaml:"cache_read_rate_usd_per_m"`
+}
+
+func (r rateConfig) toPrices() *ModelPrices {
+	// An override file written before the 1h key existed would otherwise
+	// price every 1-hour cache write at $0. Anthropic's published rule is
+	// 2x base input, so that is the default.
+	rate1h := r.CacheCreation1hRatePerM
+	if rate1h == 0 {
+		rate1h = 2 * r.InputRatePerM
+	}
+	return &ModelPrices{
+		InputRate:           r.InputRatePerM,
+		OutputRate:          r.OutputRatePerM,
+		CacheCreationRate:   r.CacheCreationRatePerM,
+		CacheCreation1hRate: rate1h,
+		CacheReadRate:       r.CacheReadRatePerM,
+	}
+}
+
 // ParsePriceTable decodes a YAML price table from raw bytes. source is used
 // only to make parse errors locatable (a file path, or a label like
 // "embedded default"). A malformed document yields an empty table and a
@@ -228,11 +280,11 @@ func LoadPriceTable(path string) (PriceTable, error) {
 func ParsePriceTable(data []byte, source string) (PriceTable, error) {
 	type priceConfig struct {
 		Models map[string]struct {
-			InputRatePerM           float64 `yaml:"input_rate_usd_per_m"`
-			OutputRatePerM          float64 `yaml:"output_rate_usd_per_m"`
-			CacheCreationRatePerM   float64 `yaml:"cache_creation_rate_usd_per_m"`
-			CacheCreation1hRatePerM float64 `yaml:"cache_creation_1h_rate_usd_per_m"`
-			CacheReadRatePerM       float64 `yaml:"cache_read_rate_usd_per_m"`
+			rateConfig  `yaml:",inline"`
+			LongContext *struct {
+				ThresholdTokens int `yaml:"threshold_tokens"`
+				rateConfig      `yaml:",inline"`
+			} `yaml:"long_context"`
 		} `yaml:"models"`
 	}
 
@@ -243,20 +295,16 @@ func ParsePriceTable(data []byte, source string) (PriceTable, error) {
 
 	table := make(PriceTable, len(cfg.Models))
 	for modelName, rates := range cfg.Models {
-		// An override file written before the 1h key existed would otherwise
-		// price every 1-hour cache write at $0. Anthropic's published rule is
-		// 2x base input, so that is the default.
-		rate1h := rates.CacheCreation1hRatePerM
-		if rate1h == 0 {
-			rate1h = 2 * rates.InputRatePerM
+		prices := rates.toPrices()
+		if lc := rates.LongContext; lc != nil {
+			// A tier with no threshold would apply to every request and
+			// silently reprice the model, so reject it outright.
+			if lc.ThresholdTokens <= 0 {
+				return make(PriceTable), fmt.Errorf("parse price table %q: model %q: long_context needs a positive threshold_tokens", source, modelName)
+			}
+			prices.LongContext = &LongContextPrices{ThresholdTokens: lc.ThresholdTokens, Prices: *lc.toPrices()}
 		}
-		table[modelName] = &ModelPrices{
-			InputRate:           rates.InputRatePerM,
-			OutputRate:          rates.OutputRatePerM,
-			CacheCreationRate:   rates.CacheCreationRatePerM,
-			CacheCreation1hRate: rate1h,
-			CacheReadRate:       rates.CacheReadRatePerM,
-		}
+		table[modelName] = prices
 	}
 
 	slog.Debug("loaded price table", "source", source, "models", len(table))

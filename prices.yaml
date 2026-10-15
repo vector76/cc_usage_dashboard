@@ -12,6 +12,10 @@
 # usage.cache_creation.ephemeral_1h_input_tokens says how much of each
 # write was 1h; the remainder is priced at the 5-minute rate. An entry
 # that omits the 1h key defaults it to 2x its input rate.
+#
+# A model priced by prompt length adds a long_context block: threshold_tokens
+# plus the same rate keys. A request whose prompt (input + cache writes +
+# cache reads) is over the threshold pays those rates on every token kind.
 
 models:
   # ---- Fable 5.1 / Mythos 5.1: same $10/$50 tier as Fable 5, but cache reads
@@ -151,6 +155,33 @@ models:
     cache_creation_rate_usd_per_m: 3.75
     cache_creation_1h_rate_usd_per_m: 6.00
     cache_read_rate_usd_per_m: 0.30
+
+  # ---- Sonnet 5.5: same $2/$10 as Sonnet 5, but cache reads are billed at
+  # 0.05x input ($0.10/MTok) rather than the standard 0.1x. ----
+  claude-sonnet-5-5:
+    input_rate_usd_per_m: 2.00
+    output_rate_usd_per_m: 10.00
+    cache_creation_rate_usd_per_m: 2.50
+    cache_creation_1h_rate_usd_per_m: 4.00
+    cache_read_rate_usd_per_m: 0.10
+
+  # ---- Haiku 5.5: priced by prompt length. A request whose prompt (input +
+  # cache writes + cache reads) is over 100,000 tokens pays the long_context
+  # rates on every token kind, output and cache hits included. Unlike the
+  # other 4.6+ models it does not get its full context window at one price. ----
+  claude-haiku-5-5:
+    input_rate_usd_per_m: 0.10
+    output_rate_usd_per_m: 0.50
+    cache_creation_rate_usd_per_m: 0.125
+    cache_creation_1h_rate_usd_per_m: 0.20
+    cache_read_rate_usd_per_m: 0.01
+    long_context:
+      threshold_tokens: 100000
+      input_rate_usd_per_m: 0.50
+      output_rate_usd_per_m: 2.50
+      cache_creation_rate_usd_per_m: 0.625
+      cache_creation_1h_rate_usd_per_m: 1.00
+      cache_read_rate_usd_per_m: 0.05
 
   # ---- Haiku 4.5 ----
   claude-haiku-4-5:
