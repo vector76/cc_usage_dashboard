@@ -173,6 +173,7 @@ func New(s *store.Store, cfg *config.Config) *Server {
 	srv.mux.HandleFunc("GET /api/feedback", srv.handleFeedback)
 	srv.mux.HandleFunc("GET /api/oauth/status", srv.handleOAuthStatus)
 	srv.mux.HandleFunc("POST /admin/reimport", srv.handleAdminReimport)
+	srv.registerProjectRoutes()
 	if srv.dashboardHandler != nil {
 		srv.dashboardHandler.Register(srv.mux)
 	}

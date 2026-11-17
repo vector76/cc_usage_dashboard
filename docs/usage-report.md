@@ -55,7 +55,9 @@ instants. The local-time reasoning lives entirely in the client: the
 report page reads `datetime-local` inputs (which carry no zone), converts
 them through the `Date` constructor — which interprets them in the
 browser's zone — and sends `toISOString()`. Presets like "Today" and
-"This week" are computed from local midnight the same way.
+"This week" are computed from local midnight the same way. Weeks start on
+Sunday, using `startOfWeek` from `static/calendar.js`, shared with the
+`/projects` page so both pages agree on what "a week" is.
 
 This split is deliberate. A user asking for "July 20" means their July 20,
 and a server that received a zoneless `2026-07-20T00:00` would have to

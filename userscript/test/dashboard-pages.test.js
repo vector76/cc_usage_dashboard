@@ -196,8 +196,10 @@ function loadPage(page, route, storage = {}) {
     const document = makeDocument(html);
     const timers = makeTimers();
     const calls = [];
+    const requests = [];
     const fetch = (url, opts) => {
         calls.push(url);
+        requests.push({ url, method: (opts && opts.method) || 'GET', body: opts && opts.body });
         return new Promise((resolve, reject) => {
             const signal = opts && opts.signal;
             if (signal) {
@@ -230,7 +232,7 @@ function loadPage(page, route, storage = {}) {
         vm.runInContext(fs.readFileSync(path.join(STATIC_DIR, m[1]), 'utf8'), ctx, { filename: m[1] });
     }
     vm.runInContext(inline[1], ctx, { filename: page });
-    return { document, timers, calls, byId: (id) => document.getElementById(id) };
+    return { document, timers, calls, requests, byId: (id) => document.getElementById(id) };
 }
 
 // --- fixtures ---------------------------------------------------------------
@@ -620,4 +622,129 @@ test('dashboard flags a snapshot timestamped in the future', async () => {
     const line = page.byId('snapshot-line').textContent;
     assert.match(line, /in the future/i, 'future snapshot not flagged: ' + line);
     assert.doesNotMatch(line, /-\S*\s*ago/, 'negative age rendered as "ago": ' + line);
+});
+
+// --- /projects -------------------------------------------------------------
+
+function walk(node, fn) {
+    fn(node);
+    for (const c of node.childNodes || []) walk(c, fn);
+}
+
+function findAll(root, pred) {
+    const out = [];
+    walk(root, (n) => { if (pred(n)) out.push(n); });
+    return out;
+}
+
+function byProjectReport(nb) {
+    const buckets = [];
+    const cells = [];
+    const totals = [];
+    for (let i = 0; i < nb; i++) {
+        const s = new Date(Date.UTC(2026, 9, 4 + 7 * i));
+        buckets.push({ start: s.toISOString(), end: new Date(s.getTime() + 7 * 864e5).toISOString() });
+        cells.push([
+            { cost_usd: 10, estimated_usd: 0, events: 3, events_without_cost: 0 },
+            { cost_usd: 2, estimated_usd: 2, events: 1, events_without_cost: 0 },
+        ]);
+        totals.push({ cost_usd: 12, estimated_usd: 2, events: 4, events_without_cost: 0 });
+    }
+    return {
+        buckets,
+        projects: [{ id: 1, name: 'BNA' }, { id: null, name: 'Unassigned' }],
+        cells,
+        bucket_totals: totals,
+        project_totals: [
+            { cost_usd: 10 * nb, estimated_usd: 0, events: 3 * nb, events_without_cost: 0 },
+            { cost_usd: 2 * nb, estimated_usd: 2 * nb, events: nb, events_without_cost: 0 },
+        ],
+        total: { cost_usd: 12 * nb, estimated_usd: 2 * nb, events: 4 * nb, events_without_cost: 0 },
+    };
+}
+
+function projectsRoutes(overrides = {}) {
+    return (url) => {
+        const path = url.split('?')[0];
+        if (overrides[path]) return overrides[path](url);
+        if (path === '/api/usage/by-project') {
+            const nb = (url.match(/[?&]b=/g) || []).length - 1;
+            return jsonResponse(byProjectReport(nb));
+        }
+        if (path === '/api/projects') {
+            return jsonResponse({ projects: [{ id: 1, name: 'BNA', folders: ['C:\\OCIS2\\BNA'] }] });
+        }
+        if (path === '/api/folders') {
+            return jsonResponse({ folders: [
+                { folder: 'C:\\OCIS2\\BNA', events: 5, cost_usd: 30, estimated_usd: 0, last_seen: new Date().toISOString() },
+                { folder: 'C:\\OCIS2\\BNA\\app', events: 2, cost_usd: 5, estimated_usd: 0, last_seen: new Date().toISOString() },
+                { folder: 'C:\\Other', events: 1, cost_usd: 2, estimated_usd: 0, last_seen: new Date().toISOString() },
+            ] });
+        }
+        if (path === '/api/project-folders') return jsonResponse({ ok: true });
+        return textResponse(404);
+    };
+}
+
+test('projects page loads the weekly report and the folder tree', async () => {
+    const page = loadPage('projects.html', projectsRoutes());
+    await flush();
+
+    const report = page.calls.find((u) => u.startsWith('/api/usage/by-project?'));
+    assert.ok(report, 'no by-project request');
+    // Eight weeks by default: nine boundaries.
+    assert.strictEqual((report.match(/[?&]b=/g) || []).length, 9);
+    assert.strictEqual(page.byId('report-err').hidden, true);
+    assert.strictEqual(page.byId('unit-week').getAttribute('aria-pressed'), 'true');
+
+    const rows = findAll(page.byId('report-host'), (n) => n.tagName === 'tr');
+    assert.strictEqual(rows.length, 1 + 8 + 1, 'header, eight weeks, footer');
+    assert.match(page.byId('legend').textContent, /BNA.*Unassigned/);
+
+    const selects = findAll(page.byId('tree-host'), (n) => n.tagName === 'select');
+    assert.ok(selects.length >= 2, 'tree rendered no project pickers');
+    assert.match(page.byId('project-list').textContent, /BNA/);
+});
+
+test('projects page switches to days and remembers it', async () => {
+    const storage = {};
+    const page = loadPage('projects.html', projectsRoutes(), storage);
+    await flush();
+    page.byId('unit-day').dispatch('click');
+    await flush();
+    const last = page.calls.filter((u) => u.startsWith('/api/usage/by-project?')).pop();
+    assert.strictEqual((last.match(/[?&]b=/g) || []).length, 15, 'fourteen days by default');
+    assert.strictEqual(storage['cc-projects-unit'], 'day');
+});
+
+test('projects page reports a failed report request', async () => {
+    const page = loadPage('projects.html', projectsRoutes({
+        '/api/usage/by-project': () => jsonResponse({ error: 'invalid bucket boundaries' }, 400),
+    }));
+    await flush();
+    assert.strictEqual(page.byId('report-err').hidden, false);
+    assert.strictEqual(page.byId('report-err').textContent, 'invalid bucket boundaries');
+    assert.strictEqual(page.byId('report-host').textContent, '');
+});
+
+test('picking a project for a folder PUTs the assignment and reloads', async () => {
+    const page = loadPage('projects.html', projectsRoutes());
+    await flush();
+
+    // The C:\ root is expanded by default; C:\Other is the second of its rows.
+    const rows = findAll(page.byId('tree-host'), (n) => n.tagName === 'tr');
+    const other = rows.find((r) => /Other/.test(r.textContent));
+    assert.ok(other, 'C:\\Other row not rendered');
+    const sel = findAll(other, (n) => n.tagName === 'select')[0];
+    sel.value = '1';
+    sel.dispatch('change');
+    await flush();
+
+    const put = page.requests.find((r) => r.method === 'PUT');
+    assert.ok(put, 'no PUT sent');
+    assert.strictEqual(put.url, '/api/project-folders');
+    assert.deepStrictEqual(JSON.parse(put.body), { folder: 'C:\\Other', project_id: 1 });
+    const after = page.calls.slice(page.calls.indexOf('/api/project-folders') + 1);
+    assert.ok(after.includes('/api/folders'), 'folders not reloaded after assigning');
+    assert.ok(after.some((u) => u.startsWith('/api/usage/by-project?')), 'report not reloaded after assigning');
 });

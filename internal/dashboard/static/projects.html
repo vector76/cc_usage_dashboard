@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Projects — Claude Usage Dashboard</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 1rem; background: #fafafa; color: #222; }
+  h1 { margin: 0 0 0.25rem 0; font-size: 1.4rem; }
+  h2 { margin: 0 0 0.6rem 0; font-size: 1.1rem; }
+  .nav { margin: 0 0 1rem 0; font-size: 0.85rem; }
+  .nav a { color: #2563eb; }
+  section { background: #fff; border: 1px solid #ddd; padding: 1rem; margin-bottom: 1rem; border-radius: 4px; }
+  .muted { color: #888; }
+  .err { font-size: 0.85rem; color: #b91c1c; margin: 0.6rem 0 0 0; }
+  .note { font-size: 0.8rem; color: #888; margin: 0.6rem 0 0 0; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 0.8rem; }
+  .seg { display: inline-flex; }
+  .seg button { font: inherit; font-size: 0.85rem; padding: 0.25rem 0.7rem; cursor: pointer;
+                background: #fff; border: 1px solid #ccc; color: #333; margin-left: -1px; }
+  .seg button:first-child { border-radius: 3px 0 0 3px; margin-left: 0; }
+  .seg button:last-child { border-radius: 0 3px 3px 0; }
+  .seg button[aria-pressed="true"] { background: #2563eb; border-color: #2563eb; color: #fff; position: relative; }
+  select, input[type="text"] { font: inherit; font-size: 0.85rem; padding: 0.2rem 0.3rem;
+                               border: 1px solid #ccc; border-radius: 3px; background: #fff; }
+  button.act { font: inherit; font-size: 0.8rem; padding: 0.15rem 0.5rem; cursor: pointer;
+               background: #fff; border: 1px solid #ccc; border-radius: 3px; color: #333; }
+  button.act:hover { background: #f0f0f0; }
+  button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  button.primary:hover { background: #1d4ed8; }
+  .chart-wrap { width: 100%; max-width: 980px; }
+  #chart { width: 100%; height: auto; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 0.9rem; font-size: 0.8rem; color: #555; margin: 0.4rem 0 0.8rem 0; }
+  .swatch { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 2px; vertical-align: baseline; }
+  .table-scroll { overflow-x: auto; }
+  table.grid { border-collapse: collapse; font-size: 0.85rem; white-space: nowrap; }
+  table.grid th, table.grid td { text-align: right; padding: 0.3rem 0.6rem; border-bottom: 1px solid #eee; }
+  table.grid th { color: #666; font-weight: normal; border-bottom: 1px solid #ddd; }
+  table.grid th.l, table.grid td.l { text-align: left; }
+  table.grid td { font-variant-numeric: tabular-nums; }
+  table.grid tbody tr:hover { background: #fafafa; }
+  table.grid tfoot td { border-bottom: none; border-top: 1px solid #ddd; color: #444; }
+  table.grid td.total { font-weight: 600; }
+  td.zero { color: #ccc; }
+  td.est { color: #6b7280; }
+  .est-flag { color: #6b7280; font-size: 0.7rem; margin-left: 0.25rem; }
+  .tag { font-size: 0.75rem; color: #888; margin-left: 0.4rem; }
+  .plist { list-style: none; margin: 0 0 0.8rem 0; padding: 0; }
+  .plist li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; padding: 0.35rem 0; border-bottom: 1px solid #f0f0f0; }
+  .plist .pname { font-weight: 600; min-width: 10rem; }
+  .plist .pcost { font-variant-numeric: tabular-nums; min-width: 6rem; text-align: right; }
+  .plist .pfolders { font-size: 0.78rem; color: #888; flex-basis: 100%; padding-left: 15px; }
+  .plist .pactions { margin-left: auto; display: flex; gap: 0.3rem; }
+  .newp { display: flex; gap: 0.4rem; align-items: center; }
+  /* Folder names can be long (worktree paths); let them wrap so the cost and
+     project columns stay on screen. */
+  table.tree { width: 100%; }
+  table.tree td.l:first-child { white-space: normal; overflow-wrap: anywhere; min-width: 12rem; }
+  table.tree td:nth-child(4) { white-space: nowrap; }
+  .tog { display: inline-block; width: 1.1rem; cursor: pointer; color: #666; border: none; background: none;
+         font: inherit; padding: 0; text-align: center; }
+  .tog.none { cursor: default; }
+  .assigned { font-weight: 600; }
+  .inherit { color: #888; font-size: 0.78rem; margin-left: 0.4rem; }
+  .empty { color: #aaa; margin: 0; }
+</style>
+</head>
+<body>
+<h1>Projects</h1>
+<p class="nav"><a href="/dashboard">← Dashboard</a> · <a href="/report">Usage report by model</a></p>
+
+<section>
+  <h2>Cost by project</h2>
+  <div class="controls">
+    <span class="seg" id="unit-seg">
+      <button type="button" id="unit-day" data-unit="day">Days</button>
+      <button type="button" id="unit-week" data-unit="week">Weeks</button>
+    </span>
+    <label class="muted">Show last <select id="count"></select></label>
+  </div>
+  <div class="chart-wrap"><svg id="chart" viewBox="0 0 900 260" xmlns="http://www.w3.org/2000/svg"></svg></div>
+  <div class="legend" id="legend"></div>
+  <div id="report-host"></div>
+  <p class="err" id="report-err" hidden></p>
+  <p class="note" id="report-note"></p>
+</section>
+
+<section>
+  <h2>Projects</h2>
+  <ul class="plist" id="project-list"></ul>
+  <div class="newp">
+    <input type="text" id="new-name" maxlength="100" placeholder="New project name">
+    <button type="button" class="act primary" id="create">Add project</button>
+  </div>
+  <p class="err" id="manage-err" hidden></p>
+</section>
+
+<section>
+  <h2>Folders</h2>
+  <div class="controls">
+    <input type="text" id="filter" placeholder="Filter folders…">
+    <label class="muted"><input type="checkbox" id="hide-idle" checked> Hide folders idle for 90 days</label>
+  </div>
+  <div class="table-scroll" id="tree-host"></div>
+  <p class="note">A folder's project covers everything beneath it, unless a deeper folder is given a project of its own.
+    Assignments apply to all past usage. Costs are all-time.</p>
+</section>
+
+<script src="/calendar.js"></script>
+<script src="/projecttree.js"></script>
+<script>
+'use strict';
+
+const COUNTS = { day: [7, 14, 30, 90], week: [4, 8, 13, 26, 52] };
+const DEFAULT_COUNT = { day: 14, week: 8 };
+const IDLE_MS = 90 * 24 * 3600e3;
+const PALETTE = ["#2563eb", "#16a34a", "#d97706", "#9333ea", "#dc2626",
+                 "#0891b2", "#db2777", "#65a30d", "#7c3aed", "#ea580c"];
+const UNASSIGNED_COLOR = "#9ca3af";
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// Colour by project id, not by column position, so a project keeps its
+// colour when the range changes which projects appear.
+function projectColor(id) {
+  return id == null ? UNASSIGNED_COLOR : PALETTE[(Number(id) - 1) % PALETTE.length];
+}
+
+const state = {
+  unit: "week",
+  count: DEFAULT_COUNT.week,
+  projects: [],
+  folders: [],
+  expanded: new Set(),
+  expandedInit: false,
+  filter: "",
+  hideIdle: true,
+  renaming: null,
+};
+
+function load(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+function save(key, v) { try { localStorage.setItem(key, v); } catch (e) { /* storage off */ } }
+
+// --- formatting ------------------------------------------------------------
+
+function fmtUSD(v) {
+  if (typeof v !== "number" || !isFinite(v)) return "—";
+  const digits = v !== 0 && Math.abs(v) < 0.01 ? 4 : 2;
+  return "$" + v.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function fmtUSDShort(v) {
+  if (v >= 1000) return "$" + (v / 1000).toFixed(v >= 10000 ? 0 : 1) + "k";
+  return "$" + Math.round(v);
+}
+
+function fmtDate(d, opts) { return d.toLocaleDateString(undefined, opts); }
+
+function periodLabel(b, unit) {
+  const s = new Date(b.start);
+  if (unit === "day") return fmtDate(s, { weekday: "short", month: "short", day: "numeric" });
+  const last = addDays(new Date(b.end), -1);
+  return fmtDate(s, { month: "short", day: "numeric" }) + " – " + fmtDate(last, { month: "short", day: "numeric" });
+}
+
+function shortLabel(b, unit) {
+  const s = new Date(b.start);
+  return unit === "day" ? fmtDate(s, { month: "numeric", day: "numeric" }) : fmtDate(s, { month: "short", day: "numeric" });
+}
+
+function fmtAgo(ms) {
+  if (!ms) return "—";
+  const days = Math.floor((Date.now() - ms) / 86400e3);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 60) return days + " days ago";
+  return fmtDate(new Date(ms), { year: "numeric", month: "short", day: "numeric" });
+}
+
+// --- small DOM helpers -----------------------------------------------------
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+function svg(tag, attrs) {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  return n;
+}
+
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+function showErr(id, msg) {
+  const e = document.getElementById(id);
+  e.textContent = msg;
+  e.hidden = false;
+}
+
+function hideErr(id) { document.getElementById(id).hidden = true; }
+
+function projectName(id) {
+  const p = state.projects.find((x) => x.id === id);
+  return p ? p.name : "?";
+}
+
+// --- requests --------------------------------------------------------------
+
+// api resolves to the parsed JSON body (or null for 204) and rejects with an
+// Error whose message is fit to show.
+async function api(method, url, body) {
+  const opts = { method };
+  if (body !== undefined) {
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = JSON.stringify(body);
+  }
+  let resp;
+  try {
+    resp = await fetch(url, opts);
+  } catch (e) {
+    throw new Error("Could not reach the server.");
+  }
+  if (resp.status === 204) return null;
+  let data = null;
+  try { data = await resp.json(); } catch (e) { /* not JSON */ }
+  if (!resp.ok) {
+    throw new Error(data && data.error ? data.error : "Request failed (HTTP " + resp.status + ").");
+  }
+  if (!data) throw new Error("The server's response could not be read.");
+  return data;
+}
+
+// --- report ----------------------------------------------------------------
+
+let reportSeq = 0;
+
+async function loadReport() {
+  const seq = ++reportSeq;
+  hideErr("report-err");
+  const bounds = periodBoundaries(state.unit, state.count, new Date());
+  const qs = bounds.map((d) => "b=" + encodeURIComponent(d.toISOString())).join("&");
+  let rep;
+  try {
+    rep = await api("GET", "/api/usage/by-project?" + qs);
+  } catch (e) {
+    if (seq !== reportSeq) return;
+    clear(document.getElementById("chart"));
+    clear(document.getElementById("legend"));
+    clear(document.getElementById("report-host"));
+    showErr("report-err", e.message);
+    return;
+  }
+  if (seq !== reportSeq) return;
+  renderChart(rep);
+  renderReportTable(rep);
+}
+
+function renderChart(rep) {
+  const host = document.getElementById("chart");
+  clear(host);
+  const W = 900, H = 260, L = 56, R = 8, T = 10, B = 30;
+  const pw = W - L - R, ph = H - T - B;
+  const nb = rep.buckets.length;
+  const max = Math.max(0, ...rep.bucket_totals.map((c) => c.cost_usd));
+
+  // Round the axis top up to 1, 2 or 5 times a power of ten.
+  let top = 1;
+  if (max > 0) {
+    const mag = Math.pow(10, Math.floor(Math.log10(max)));
+    top = [1, 2, 5, 10].map((m) => m * mag).find((v) => v >= max);
+  }
+  for (let i = 0; i <= 4; i++) {
+    const v = top * i / 4, y = T + ph - ph * i / 4;
+    host.appendChild(svg("line", { x1: L, x2: W - R, y1: y, y2: y, stroke: i === 0 ? "#bbb" : "#eee", "stroke-width": 1 }));
+    const t = svg("text", { x: L - 6, y: y + 4, "text-anchor": "end", "font-size": 11, fill: "#888" });
+    t.textContent = fmtUSDShort(v);
+    host.appendChild(t);
+  }
+
+  const slot = pw / Math.max(nb, 1);
+  const bw = Math.max(2, Math.min(48, slot * 0.7));
+  const every = Math.ceil(nb / 14);
+  const now = Date.now();
+  for (let i = 0; i < nb; i++) {
+    const x = L + slot * i + (slot - bw) / 2;
+    let y = T + ph;
+    rep.projects.forEach((p, j) => {
+      const c = rep.cells[i][j];
+      if (!c || c.cost_usd <= 0) return;
+      const h = ph * c.cost_usd / top;
+      y -= h;
+      const r = svg("rect", { x, y, width: bw, height: Math.max(h, 0.5), fill: projectColor(p.id) });
+      if (new Date(rep.buckets[i].end) > now) r.setAttribute("fill-opacity", "0.55");
+      const tip = svg("title", {});
+      tip.textContent = periodLabel(rep.buckets[i], state.unit) + " · " + p.name + ": " + fmtUSD(c.cost_usd);
+      r.appendChild(tip);
+      host.appendChild(r);
+    });
+    if (i % every === 0) {
+      const t = svg("text", { x: x + bw / 2, y: H - 10, "text-anchor": "middle", "font-size": 11, fill: "#888" });
+      t.textContent = shortLabel(rep.buckets[i], state.unit);
+      host.appendChild(t);
+    }
+  }
+
+  const legend = document.getElementById("legend");
+  clear(legend);
+  for (const p of rep.projects) {
+    const item = el("span");
+    const sw = el("span", "swatch");
+    sw.style.background = projectColor(p.id);
+    item.appendChild(sw);
+    item.appendChild(document.createTextNode(p.name));
+    legend.appendChild(item);
+  }
+}
+
+function costCell(tr, c, cls) {
+  const td = el("td", cls || "");
+  if (!c || (c.cost_usd === 0 && c.events === 0)) {
+    td.textContent = "—";
+    td.classList.add("zero");
+  } else {
+    td.textContent = fmtUSD(c.cost_usd);
+    if (c.estimated_usd > 0) {
+      td.classList.add("est");
+      const f = el("span", "est-flag", "est.");
+      f.title = fmtUSD(c.estimated_usd) + " priced at the table ceiling (no rates for the model): an upper bound.";
+      td.appendChild(f);
+    }
+  }
+  tr.appendChild(td);
+}
+
+function renderReportTable(rep) {
+  const host = document.getElementById("report-host");
+  clear(host);
+  const unitWord = state.unit === "day" ? "Day" : "Week of";
+
+  const table = el("table", "grid");
+  const thead = el("thead");
+  const hr = el("tr");
+  hr.appendChild(el("th", "l", unitWord));
+  for (const p of rep.projects) {
+    const th = el("th");
+    const sw = el("span", "swatch");
+    sw.style.background = projectColor(p.id);
+    th.appendChild(sw);
+    th.appendChild(document.createTextNode(p.name));
+    hr.appendChild(th);
+  }
+  hr.appendChild(el("th", "", "Total"));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+
+  const tbody = el("tbody");
+  const now = Date.now();
+  for (let i = rep.buckets.length - 1; i >= 0; i--) {
+    const b = rep.buckets[i];
+    const tr = el("tr");
+    const label = el("td", "l", periodLabel(b, state.unit));
+    if (new Date(b.start) <= now && now < new Date(b.end)) label.appendChild(el("span", "tag", "in progress"));
+    tr.appendChild(label);
+    rep.projects.forEach((p, j) => costCell(tr, rep.cells[i][j]));
+    costCell(tr, rep.bucket_totals[i], "total");
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+
+  const tfoot = el("tfoot");
+  const fr = el("tr");
+  fr.appendChild(el("td", "l", "Total"));
+  rep.project_totals.forEach((c) => costCell(fr, c));
+  costCell(fr, rep.total, "total");
+  tfoot.appendChild(fr);
+  table.appendChild(tfoot);
+
+  const scroll = el("div", "table-scroll");
+  scroll.appendChild(table);
+  host.appendChild(scroll);
+
+  const notes = [];
+  if (rep.total.estimated_usd > 0) {
+    notes.push("Cells marked “est.” include dollars priced at the price table's ceiling for a model with no configured rates: an upper bound.");
+  }
+  if (rep.total.events_without_cost > 0) {
+    notes.push(rep.total.events_without_cost.toLocaleString() + " events in range had no cost and are not in the dollars.");
+  }
+  notes.push("Days run midnight to midnight local time; weeks run Sunday through Saturday.");
+  document.getElementById("report-note").textContent = notes.join(" ");
+}
+
+function renderControls() {
+  for (const unit of ["day", "week"]) {
+    document.getElementById("unit-" + unit).setAttribute("aria-pressed", String(unit === state.unit));
+  }
+  const sel = document.getElementById("count");
+  clear(sel);
+  for (const n of COUNTS[state.unit]) {
+    const o = el("option", "", n + (state.unit === "day" ? " days" : " weeks"));
+    o.value = String(n);
+    if (n === state.count) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.value = String(state.count);
+}
+
+function setUnit(unit) {
+  if (!COUNTS[unit]) return;
+  state.unit = unit;
+  const stored = Number(load("cc-projects-count-" + unit));
+  state.count = COUNTS[unit].includes(stored) ? stored : DEFAULT_COUNT[unit];
+  save("cc-projects-unit", unit);
+  renderControls();
+  loadReport();
+}
+
+// --- projects and folders --------------------------------------------------
+
+async function loadManage() {
+  hideErr("manage-err");
+  try {
+    const [p, f] = await Promise.all([api("GET", "/api/projects"), api("GET", "/api/folders")]);
+    state.projects = p.projects || [];
+    state.folders = f.folders || [];
+  } catch (e) {
+    showErr("manage-err", e.message);
+    return;
+  }
+  renderProjects();
+  renderTree();
+}
+
+function assignments() {
+  const out = [];
+  for (const p of state.projects) for (const folder of p.folders) out.push({ folder, project_id: p.id });
+  return out;
+}
+
+// mutate runs a change, then reloads everything it can affect: the lists and
+// the report's attribution.
+async function mutate(method, url, body) {
+  hideErr("manage-err");
+  try {
+    await api(method, url, body);
+  } catch (e) {
+    showErr("manage-err", e.message);
+    return false;
+  }
+  await loadManage();
+  loadReport();
+  return true;
+}
+
+function renderProjects() {
+  const list = document.getElementById("project-list");
+  clear(list);
+  const resolve = makeResolver(assignments());
+  const totals = new Map();
+  for (const f of state.folders) {
+    const hit = f.folder ? resolve(f.folder) : null;
+    const id = hit ? hit.project_id : null;
+    totals.set(id, (totals.get(id) || 0) + (f.cost_usd || 0));
+  }
+
+  for (const p of state.projects) {
+    const li = el("li");
+    const name = el("span", "pname");
+    const sw = el("span", "swatch");
+    sw.style.background = projectColor(p.id);
+    name.appendChild(sw);
+    if (state.renaming === p.id) {
+      const input = el("input");
+      input.type = "text";
+      input.maxLength = 100;
+      input.value = p.name;
+      input.id = "rename-input";
+      const commit = () => {
+        const v = input.value.trim();
+        state.renaming = null;
+        if (v && v !== p.name) mutate("PATCH", "/api/projects/" + p.id, { name: v });
+        else renderProjects();
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") { state.renaming = null; renderProjects(); }
+      });
+      input.addEventListener("blur", commit);
+      name.appendChild(input);
+      setTimeout(() => input.focus && input.focus(), 0);
+    } else {
+      name.appendChild(document.createTextNode(p.name));
+    }
+    li.appendChild(name);
+    li.appendChild(el("span", "pcost", fmtUSD(totals.get(p.id) || 0)));
+
+    const actions = el("span", "pactions");
+    const rn = el("button", "act", "Rename");
+    rn.type = "button";
+    rn.addEventListener("click", () => { state.renaming = p.id; renderProjects(); });
+    const del = el("button", "act", "Delete");
+    del.type = "button";
+    del.addEventListener("click", () => {
+      const msg = "Delete project “" + p.name + "”? Its " + p.folders.length +
+        " folder assignment(s) are removed and that usage counts as Unassigned. Usage data is not deleted.";
+      if (typeof confirm !== "function" || confirm(msg)) mutate("DELETE", "/api/projects/" + p.id);
+    });
+    actions.appendChild(rn);
+    actions.appendChild(del);
+    li.appendChild(actions);
+
+    li.appendChild(el("span", "pfolders",
+      p.folders.length ? p.folders.join("  ·  ") : "No folders yet. Pick this project for a folder below."));
+    list.appendChild(li);
+  }
+
+  const un = el("li");
+  const nm = el("span", "pname muted");
+  const sw = el("span", "swatch");
+  sw.style.background = UNASSIGNED_COLOR;
+  nm.appendChild(sw);
+  nm.appendChild(document.createTextNode("Unassigned"));
+  un.appendChild(nm);
+  un.appendChild(el("span", "pcost muted", fmtUSD(totals.get(null) || 0)));
+  list.appendChild(un);
+}
+
+async function createProject() {
+  const input = document.getElementById("new-name");
+  const name = input.value.trim();
+  if (!name) { showErr("manage-err", "Type a name for the project first."); return; }
+  if (await mutate("POST", "/api/projects", { name })) input.value = "";
+}
+
+function nodeMatches(n, q) {
+  return n.path.toLowerCase().includes(q) || n.label.toLowerCase().includes(q);
+}
+
+// visible decides what the tree shows: the idle filter hides a subtree whose
+// newest event is older than IDLE_MS (an assigned folder always stays, so an
+// assignment is never hidden), and a text filter keeps a node if it or a
+// descendant matches.
+function visible(n, q, cutoff) {
+  if (state.hideIdle && n.lastSeen < cutoff && n.assigned == null && !hasAssigned(n)) return false;
+  if (!q) return true;
+  return nodeMatches(n, q) || n.children.some((c) => visible(c, q, cutoff));
+}
+
+function hasAssigned(n) {
+  return n.children.some((c) => c.assigned != null || hasAssigned(c));
+}
+
+function projectSelect(n) {
+  const sel = el("select");
+  const blank = el("option", "", n.assigned == null && n.effective != null
+    ? "(inherits " + projectName(n.effective) + ")" : "—");
+  blank.value = "";
+  sel.appendChild(blank);
+  for (const p of state.projects) {
+    const o = el("option", "", p.name);
+    o.value = String(p.id);
+    sel.appendChild(o);
+  }
+  sel.value = n.assigned == null ? "" : String(n.assigned);
+  if (n.assigned != null) sel.classList.add("assigned");
+  sel.addEventListener("change", () => {
+    const v = sel.value;
+    mutate("PUT", "/api/project-folders", { folder: n.path, project_id: v === "" ? null : Number(v) });
+  });
+  return sel;
+}
+
+function renderTree() {
+  const host = document.getElementById("tree-host");
+  clear(host);
+  const { roots, loose } = buildFolderTree(state.folders, assignments());
+  if (!state.expandedInit) {
+    for (const r of roots) state.expanded.add(r.key);
+    state.expandedInit = true;
+  }
+  if (roots.length === 0 && loose.length === 0) {
+    host.appendChild(el("p", "empty", "No usage recorded yet."));
+    return;
+  }
+
+  const q = state.filter.trim().toLowerCase();
+  const cutoff = Date.now() - IDLE_MS;
+  const table = el("table", "grid tree");
+  const thead = el("thead");
+  const hr = el("tr");
+  for (const [t, c] of [["Folder", "l"], ["Cost", ""], ["Last used", ""], ["Project", "l"]]) hr.appendChild(el("th", c, t));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+
+  const addRow = (n, depth) => {
+    const tr = el("tr");
+    const name = el("td", "l");
+    name.style.paddingLeft = (0.6 + depth * 1.1) + "rem";
+    const open = q ? true : state.expanded.has(n.key);
+    const tog = el("button", n.children.length ? "tog" : "tog none", n.children.length ? (open ? "▾" : "▸") : "");
+    tog.type = "button";
+    if (n.children.length) {
+      tog.addEventListener("click", () => {
+        if (state.expanded.has(n.key)) state.expanded.delete(n.key); else state.expanded.add(n.key);
+        renderTree();
+      });
+    }
+    name.appendChild(tog);
+    name.appendChild(document.createTextNode(n.label));
+    if (n.children.length && !open) name.appendChild(el("span", "tag", "(" + n.children.length + ")"));
+    tr.appendChild(name);
+
+    const cost = el("td", n.estimated > 0 ? "est" : "", fmtUSD(n.cost));
+    tr.appendChild(cost);
+    tr.appendChild(el("td", "muted", fmtAgo(n.lastSeen)));
+
+    const pc = el("td", "l");
+    if (n.key === "") {
+      pc.appendChild(el("span", "muted", "Unassigned (no folder recorded)"));
+    } else {
+      pc.appendChild(projectSelect(n));
+      const below = n.projectsBelow.filter((x) => x != null);
+      if (n.assigned == null && n.effective == null && below.length > 0) {
+        pc.appendChild(el("span", "inherit", n.projectsBelow.length > 1
+          ? "mixed below" : projectName(below[0]) + " below"));
+      } else if (n.assigned == null && n.effective != null && n.via) {
+        pc.appendChild(el("span", "inherit", "via " + n.via));
+      }
+    }
+    tr.appendChild(pc);
+    tbody.appendChild(tr);
+
+    if (open) {
+      for (const c of n.children) if (visible(c, q, cutoff)) addRow(c, depth + 1);
+    }
+  };
+
+  for (const r of roots) if (visible(r, q, cutoff)) addRow(r, 0);
+  for (const n of loose) if (!q || nodeMatches(n, q)) addRow(n, 0);
+  table.appendChild(tbody);
+  host.appendChild(table);
+}
+
+// --- wiring ----------------------------------------------------------------
+
+for (const unit of ["day", "week"]) {
+  document.getElementById("unit-" + unit).addEventListener("click", () => setUnit(unit));
+}
+document.getElementById("count").addEventListener("change", (e) => {
+  const n = Number(e.target.value);
+  if (!COUNTS[state.unit].includes(n)) return;
+  state.count = n;
+  save("cc-projects-count-" + state.unit, String(n));
+  loadReport();
+});
+document.getElementById("create").addEventListener("click", createProject);
+document.getElementById("new-name").addEventListener("keydown", (e) => { if (e.key === "Enter") createProject(); });
+document.getElementById("filter").addEventListener("input", (e) => { state.filter = e.target.value; renderTree(); });
+document.getElementById("hide-idle").addEventListener("change", (e) => { state.hideIdle = e.target.checked; renderTree(); });
+
+{
+  const u = load("cc-projects-unit");
+  state.unit = COUNTS[u] ? u : "week";
+  const stored = Number(load("cc-projects-count-" + state.unit));
+  state.count = COUNTS[state.unit].includes(stored) ? stored : DEFAULT_COUNT[state.unit];
+}
+renderControls();
+loadReport();
+loadManage();
+</script>
+</body>
+</html>

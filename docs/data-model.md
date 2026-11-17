@@ -18,7 +18,10 @@ source granularity).
 | source                | TEXT         | `tailer` \| `cli` \| `hook`. Provenance.       |
 | session_id            | TEXT         | Claude Code session, if known.                 |
 | message_id            | TEXT         | Assistant message ID, if known. Used for dedup.|
-| project_path          | TEXT         | Decoded path the session ran in, if known.     |
+| project_path          | TEXT         | The turn's working directory (transcript `cwd`)|
+|                       |              | as a full path, if known. Older hook rows may  |
+|                       |              | hold Claude Code's encoded directory name; see |
+|                       |              | `docs/projects.md`. Backfilled by v11.         |
 | input_tokens          | INTEGER      | Required.                                      |
 | output_tokens         | INTEGER      | Required.                                      |
 | cache_creation_tokens | INTEGER      | Nullable. All cache writes, both TTLs.         |
@@ -45,6 +48,27 @@ Constraints:
 - Unique `(session_id, message_id)` where both non-null. Lets the tailer and a hook-driven
   POST coexist without double-counting.
 - Index on `occurred_at` for window queries.
+
+### `projects` and `project_folders`
+
+User-defined projects and the folders assigned to them, for per-project cost
+accounting (`docs/projects.md`). Added by migration v12 (`create_projects`).
+
+| `projects` column | Type      | Notes                                       |
+|-------------------|-----------|---------------------------------------------|
+| id                | INTEGER PK| Autoincrement.                              |
+| name              | TEXT      | Unique, case-insensitive (`COLLATE NOCASE`).|
+| created_at        | TIMESTAMP |                                             |
+
+| `project_folders` column | Type      | Notes                                       |
+|--------------------------|-----------|---------------------------------------------|
+| folder                   | TEXT PK   | As the user picked it. The store keeps one row per `folder.Key`, so a folder belongs to at most one project. |
+| project_id               | INTEGER   | → `projects.id`, `ON DELETE CASCADE`.       |
+| created_at               | TIMESTAMP |                                             |
+
+An event's project is the one whose assigned folder is the longest
+path-prefix of its `project_path`; nothing is stored per event, so an
+assignment applies to all history.
 
 ### `uplink_cursor`
 

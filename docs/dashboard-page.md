@@ -65,7 +65,8 @@ picker changes what is on this page, the link leaves it.
 
 The dashboard is the only thing that links to `/report` — the report links
 back, but nothing else advertises it — so `TestDashboardIndexHTML` asserts
-the link is still there.
+the link is still there. The same row links to `/projects` (cost by project,
+`docs/projects.md`), which `TestPagesLinkToProjects` guards.
 
 ## Snapshot freshness
 

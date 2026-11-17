@@ -189,6 +189,14 @@ func main() {
 		slog.Warn("cost backfill failed", "err", err)
 	}
 
+	// Map encoded project directory names (older hooks) back to real paths
+	// so project accounting can attribute them; see docs/projects.md.
+	if n, err := db.ResolveEncodedProjectPaths(); err != nil {
+		slog.Warn("project path repair failed", "err", err)
+	} else if n > 0 {
+		slog.Info("mapped encoded project directory names to folders", "events", n)
+	}
+
 	tailer := ingest.NewTailer(cfg.Claude.ProjectsDir, db, priceTable)
 	tailer.Start()
 	tailers := tailerGroup{tailer}

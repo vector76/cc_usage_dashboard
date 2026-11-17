@@ -123,7 +123,7 @@ Exit criteria: a fresh user can install in <10 minutes from the README alone.
 - **CLI offset file.** `clusage-cli log --from-hook` would consult an offset file in
   `$XDG_STATE_HOME/clusage` instead of re-POSTing the full transcript every turn.
   Saves bandwidth in long sessions; not needed for v1 since the server dedupes.
-- **Per-project breakdown.** Use `project_path` on events to chart cost per project.
+- ~~**Per-project breakdown.**~~ Done: `/projects`, see `docs/projects.md`.
 - **Export.** CSV/Parquet dump of `usage_events` for external analysis.
 - **Calibrated quota-cost model.** Regress `quota_snapshots` percent-deltas
   against the `usage_events` tokens (by model) that fell between each

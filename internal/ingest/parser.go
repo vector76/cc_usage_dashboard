@@ -158,6 +158,12 @@ func (p *Parser) parseLine(line []byte) (*ParsedEvent, error) {
 		event.Model = model
 	}
 
+	// The turn's working directory, which project accounting attributes its
+	// cost to (docs/projects.md).
+	if cwd, ok := msg["cwd"].(string); ok {
+		event.ProjectPath = cwd
+	}
+
 	if costStr, ok := msg["cost_usd"].(float64); ok {
 		if costStr < 0 || costStr > maxReportedCostUSD {
 			return nil, fmt.Errorf("invalid cost_usd: %v", costStr)

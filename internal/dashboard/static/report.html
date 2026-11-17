@@ -50,7 +50,7 @@
 </head>
 <body>
 <h1>Usage Report</h1>
-<p class="nav"><a href="/dashboard">← Back to dashboard</a></p>
+<p class="nav"><a href="/dashboard">← Back to dashboard</a> · <a href="/projects">Cost by project</a></p>
 
 <section>
   <h2>Time range</h2>
@@ -71,6 +71,7 @@
 </section>
 
 <script src="/grouping.js"></script>
+<script src="/calendar.js"></script>
 <script>
 'use strict';
 
@@ -99,15 +100,11 @@ function todayRange() {
   return { start: localMidnight(now), end: now };
 }
 
-// Week starts Monday. getDay() is 0 for Sunday, so Sunday walks back 6 days
-// rather than 0 — otherwise a Sunday session would report a one-day "week".
+// Weeks run Sunday through Saturday, the same weeks /projects reports in;
+// startOfWeek comes from the shared calendar.js.
 function thisWeekRange() {
   const now = new Date();
-  const dow = now.getDay();
-  const back = dow === 0 ? 6 : dow - 1;
-  const start = localMidnight(now);
-  start.setDate(start.getDate() - back);
-  return { start, end: now };
+  return { start: startOfWeek(now), end: now };
 }
 
 // --- formatting ----------------------------------------------------------

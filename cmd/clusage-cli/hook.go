@@ -129,8 +129,13 @@ func processHookInput(stdin io.Reader, hostURL string) error {
 			}
 		}
 
-		// Add project path if we can infer it
-		if projectPath := inferProjectPath(payload.TranscriptPath); projectPath != "" {
+		// The turn's real working directory is the project path. The encoded
+		// directory name is the fallback for a line without one: it is lossy
+		// (every non-alphanumeric became '-'), so the trayapp can only map it
+		// back to a path when it has seen that path elsewhere.
+		if cwd, ok := record["cwd"].(string); ok && cwd != "" {
+			eventPayload["project_path"] = cwd
+		} else if projectPath := inferProjectPath(payload.TranscriptPath); projectPath != "" {
 			eventPayload["project_path"] = projectPath
 		}
 

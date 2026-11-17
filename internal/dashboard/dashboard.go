@@ -154,6 +154,10 @@ type Handler struct {
 	reportHTML []byte
 	groupingJS []byte
 	summaryJS []byte
+	// The /projects page and the two scripts it shares with /report.
+	projectsHTML  []byte
+	calendarJS    []byte
+	projectTreeJS []byte
 }
 
 func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
@@ -173,7 +177,22 @@ func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dashboard: failed to load summary.js: %w", err)
 	}
+	projectsHTML, err := fs.ReadFile(staticFS, "static/projects.html")
+	if err != nil {
+		return nil, fmt.Errorf("dashboard: failed to load projects.html: %w", err)
+	}
+	calendarJS, err := fs.ReadFile(staticFS, "static/calendar.js")
+	if err != nil {
+		return nil, fmt.Errorf("dashboard: failed to load calendar.js: %w", err)
+	}
+	projectTreeJS, err := fs.ReadFile(staticFS, "static/projecttree.js")
+	if err != nil {
+		return nil, fmt.Errorf("dashboard: failed to load projecttree.js: %w", err)
+	}
 	return &Handler{
+		projectsHTML:  projectsHTML,
+		calendarJS:    calendarJS,
+		projectTreeJS: projectTreeJS,
 		store:      s,
 		slackCalc:  sc,
 		now:        func() time.Time { return time.Now().UTC() },
@@ -200,8 +219,21 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/dashboard/state", h.handleState)
 	mux.HandleFunc("GET /grouping.js", h.handleGroupingJS)
 	mux.HandleFunc("GET /summary.js", h.handleSummaryJS)
+	// Per-project cost and folder assignment (docs/projects.md). Like /report
+	// it fetches on demand and runs nothing on a timer.
+	mux.HandleFunc("GET /projects", serveBytes("text/html; charset=utf-8", h.projectsHTML))
+	mux.HandleFunc("GET /calendar.js", serveBytes("application/javascript; charset=utf-8", h.calendarJS))
+	mux.HandleFunc("GET /projecttree.js", serveBytes("application/javascript; charset=utf-8", h.projectTreeJS))
 	mux.HandleFunc("GET /favicon.png", h.handleFavicon)
 	mux.HandleFunc("GET /favicon.ico", h.handleFavicon)
+}
+
+func serveBytes(contentType string, body []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+	}
 }
 
 func (h *Handler) handleGroupingJS(w http.ResponseWriter, r *http.Request) {

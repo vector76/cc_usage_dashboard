@@ -239,6 +239,52 @@ WHERE (raw_json LIKE '%"content"%' OR raw_json LIKE '%"wireToolInputs"%')
 `,
 		Vacuum: true,
 	},
+	{
+		Version: 11,
+		Name:    "backfill_usage_events_project_path",
+		// The tailer never recorded project_path; the turn's working
+		// directory survived only as raw_json's top-level cwd (v10 kept it).
+		// Copy it across for every row that has no project_path yet, so
+		// project accounting (docs/projects.md) covers all of history. A row
+		// that already carries a value — the hook's encoded directory name —
+		// is left for store.ResolveEncodedProjectPaths, which maps those back
+		// to real paths. Same prefilter shape as v9/v10.
+		SQL: `
+UPDATE usage_events
+SET project_path = json_extract(raw_json, '$.cwd')
+WHERE COALESCE(project_path, '') = ''
+  AND raw_json LIKE '%"cwd"%'
+  AND json_valid(raw_json)
+  AND json_type(raw_json, '$.cwd') = 'text';
+`,
+	},
+	{
+		Version: 12,
+		Name:    "create_projects",
+		// User-defined projects and the folders assigned to them. An event
+		// belongs to the project whose assigned folder is the longest prefix
+		// of its project_path (internal/folder). folder is stored as the user
+		// picked it; the store keeps one row per folder.Key, so a folder
+		// belongs to at most one project. Deleting a project releases its
+		// folders (ON DELETE CASCADE; foreign_keys is on for every
+		// connection). Assignments are not time-bound: they apply to all
+		// history.
+		SQL: `
+CREATE TABLE projects (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+	created_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE project_folders (
+	folder TEXT PRIMARY KEY,
+	project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+	created_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX idx_project_folders_project ON project_folders (project_id);
+`,
+	},
 }
 
 // ApplyMigrations applies all pending migrations to the database.
