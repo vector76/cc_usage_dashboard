@@ -18,6 +18,24 @@
 # cache reads) is over the threshold pays those rates on every token kind.
 
 models:
+  # ---- Fable 5.2 / Mythos 5.2: successor to Fable 5.1 at a lower $8/$40.
+  # Cache writes follow the standard 1.25x / 2x input rule; cache reads keep
+  # Fable 5.1's 0.025x of input ($0.20/MTok). Mythos 5.2 is the same model
+  # for verified organizations, at the same rates. ----
+  claude-fable-5-2:
+    input_rate_usd_per_m: 8.00
+    output_rate_usd_per_m: 40.00
+    cache_creation_rate_usd_per_m: 10.00
+    cache_creation_1h_rate_usd_per_m: 16.00
+    cache_read_rate_usd_per_m: 0.20
+
+  claude-mythos-5-2:
+    input_rate_usd_per_m: 8.00
+    output_rate_usd_per_m: 40.00
+    cache_creation_rate_usd_per_m: 10.00
+    cache_creation_1h_rate_usd_per_m: 16.00
+    cache_read_rate_usd_per_m: 0.20
+
   # ---- Fable 5.1 / Mythos 5.1: same $10/$50 tier as Fable 5, but cache reads
   # are billed at 0.025x input ($0.25/MTok) rather than the standard 0.1x, so
   # these rows cannot share the Fable 5 numbers. ----

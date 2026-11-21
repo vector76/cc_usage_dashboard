@@ -125,9 +125,11 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1 -ExePath "$env:USERPROFIL
 Per-event cost is computed from a model price table that is **embedded in the binary**
 ([`prices.yaml`](prices.yaml)), so cost works out of the box with no setup. To override
 rates without rebuilding, drop your own `prices.yaml` next to `trayapp.exe` or in
-`%APPDATA%\usage_dashboard\`; to point at an arbitrary file, set `pricing.table_path` in
-`config.yaml`. See `docs/configuration.md` "Price table resolution" for the full
-precedence order.
+`%APPDATA%\usage_dashboard\`, listing just the models to change; to point at an
+arbitrary file, set `pricing.table_path` in `config.yaml`. When a model turns up that no
+table knows, the tray app fetches `prices.yaml` from this repository's `main` branch (at
+most once a day) and adds the models it lists. See `docs/configuration.md` "Price table
+resolution" for the full precedence order.
 
 ### Confirming it works
 

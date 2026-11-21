@@ -20,28 +20,38 @@ import (
 // several times; without this pass, editing prices.yaml would correct new
 // events while leaving all the historical ones inflated.
 //
-// Run once at startup, after the price table is resolved: the table is loaded
-// once per process, so a model that is unknown now stays unknown until the
-// next restart — re-running periodically with the same table can never fix
-// additional rows.
+// Run at startup, after the price table is resolved, and again whenever the
+// table changes (a price list fetched from GitHub). Re-running with the same
+// table can never fix additional rows.
 //
 // A successful backfill is logged at Warn rather than Info deliberately: the
 // feedback tee only copies warn+ records into the dashboard's feedback panel,
 // and a retroactive change to historical dollar totals is exactly the kind of
 // event a console-less tray user needs to see.
 func BackfillCosts(db *store.Store, priceTable PriceTable) (int, error) {
+	n, _, err := BackfillCostsUnpriced(db, priceTable)
+	return n, err
+}
+
+// BackfillCostsUnpriced is BackfillCosts that also returns, sorted, every
+// model whose stored events the table still cannot price (they keep or get a
+// ceiling estimate), whether or not this pass changed their rows. The trayapp
+// asks GitHub for a newer price list when it is non-empty. Claude Code's
+// "<synthetic>" placeholder is never returned: no price list will list it.
+func BackfillCostsUnpriced(db *store.Store, priceTable PriceTable) (int, []string, error) {
 	if len(priceTable) == 0 {
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	events, err := db.NullCostEvents()
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 
 	count := 0
 	models := make(map[string]int)
 	ceilingModels := make(map[string]int)
+	unpriced := make(map[string]int)
 	for _, e := range events {
 		cost, source := ResolveCost(nil, e.Model,
 			e.InputTokens, e.OutputTokens, e.CacheCreationTokens, e.CacheCreation1hTokens, e.CacheReadTokens,
@@ -49,9 +59,12 @@ func BackfillCosts(db *store.Store, priceTable PriceTable) (int, error) {
 		if cost == nil || source == "" {
 			continue // nothing to price against (no model name)
 		}
+		if source == "ceiling" && e.Model != syntheticModel {
+			unpriced[e.Model]++
+		}
 		updated, err := db.SetComputedCost(e.ID, *cost, source)
 		if err != nil {
-			return count, err
+			return count, sortedKeys(unpriced), err
 		}
 		if updated {
 			count++
@@ -77,7 +90,7 @@ func BackfillCosts(db *store.Store, priceTable PriceTable) (int, error) {
 		slog.Warn("priced unrecognized models at the price table ceiling; add them to prices.yaml for real rates",
 			"events", n, "models", strings.Join(sortedKeys(ceilingModels), ", "))
 	}
-	return count, nil
+	return count, sortedKeys(unpriced), nil
 }
 
 func sortedKeys(m map[string]int) []string {

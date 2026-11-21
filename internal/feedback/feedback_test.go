@@ -310,3 +310,33 @@ func TestConcurrentAccess(t *testing.T) {
 		t.Errorf("expected 2000 events, got %d", u.TotalEvents())
 	}
 }
+
+// OnRecord's hook sees every recorded model (empty names excluded), and is
+// called outside the aggregate's lock so it may read the aggregate back.
+func TestUnknownModelsOnRecord(t *testing.T) {
+	u := NewUnknownModels()
+	var seen []string
+	u.OnRecord(func(model string) {
+		seen = append(seen, model)
+		_ = u.Snapshot() // would deadlock if called under the lock
+	})
+	now := time.Now()
+	u.Record("a", now)
+	u.Record("", now)
+	u.Record("a", now)
+	if len(seen) != 2 || seen[0] != "a" || seen[1] != "a" {
+		t.Errorf("hook saw %v, want [a a]", seen)
+	}
+}
+
+func TestUnknownModelsForget(t *testing.T) {
+	u := NewUnknownModels()
+	now := time.Now()
+	u.Record("a", now)
+	u.Record("b", now)
+	u.Forget(func(model string) bool { return model == "a" })
+	snap := u.Snapshot()
+	if len(snap) != 1 || snap[0].Model != "b" {
+		t.Errorf("after Forget(a) snapshot = %+v, want only b", snap)
+	}
+}

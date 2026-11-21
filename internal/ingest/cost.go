@@ -70,13 +70,7 @@ func ResolveCost(
 
 	// Try to compute from price table
 	if model != "" && priceTable != nil {
-		prices := lookupPrices(priceTable, model)
-		if prices == nil {
-			if native := nativeModelID(model); native != model {
-				prices = lookupPrices(priceTable, native)
-			}
-		}
-		if prices != nil {
+		if prices := findPrices(priceTable, model); prices != nil {
 			cost := computeCost(inputTokens, outputTokens, cacheCreationTokens, cacheCreation1hTokens, cacheReadTokens, prices)
 			return &cost, "computed"
 		}
@@ -97,6 +91,42 @@ func ResolveCost(
 
 	// No model name, or no price table to draw a ceiling from.
 	return nil, ""
+}
+
+// findPrices is the lookup ResolveCost prices with: the id as given (exact,
+// dated snapshot, "-0" alias), then its native form if it is a Bedrock or
+// Vertex id. Returns nil when the table has no rates for model.
+func findPrices(t PriceTable, model string) *ModelPrices {
+	if prices := lookupPrices(t, model); prices != nil {
+		return prices
+	}
+	if native := nativeModelID(model); native != model {
+		return lookupPrices(t, native)
+	}
+	return nil
+}
+
+// HasPrice reports whether ResolveCost would price model from its own rates
+// rather than the table's ceiling.
+func HasPrice(t PriceTable, model string) bool {
+	return model != "" && t != nil && findPrices(t, model) != nil
+}
+
+// MergePriceTables layers tables per model: each model takes its rates from
+// the first table that lists it, so earlier tables win and later ones only
+// add models. Nil tables are skipped. The result is a new map; the inputs
+// are never modified, since the tailer and server hold them as shared
+// snapshots.
+func MergePriceTables(tables ...PriceTable) PriceTable {
+	merged := make(PriceTable)
+	for _, t := range tables {
+		for model, prices := range t {
+			if _, ok := merged[model]; !ok && prices != nil {
+				merged[model] = prices
+			}
+		}
+	}
+	return merged
 }
 
 // CeilingPrices returns the per-rate maximum across every entry in the table:
@@ -337,9 +367,33 @@ func ParsePriceTable(data []byte, source string) (PriceTable, error) {
 //     This always succeeds for a well-formed embed and is the guaranteed
 //     fallback.
 //
+// An override from (1) or (2) is layered over the embedded table per model
+// (MergePriceTables): it replaces the rates of the models it lists, and every
+// model it leaves out keeps its built-in rates rather than dropping to the
+// ceiling. So an override file can hold just the one or two models it means
+// to change.
+//
 // The returned string is a human-readable description of the chosen source
 // ("embedded default" or a file path) for logging.
 func ResolvePriceTable(explicitPath string, searchDirs []string, embedded []byte) (PriceTable, string, error) {
+	override, source, err := resolveOverride(explicitPath, searchDirs)
+	if err != nil {
+		return make(PriceTable), source, err
+	}
+	pt, err := ParsePriceTable(embedded, "embedded default")
+	if err != nil {
+		return pt, "embedded default", err
+	}
+	if override == nil {
+		return pt, "embedded default", nil
+	}
+	return MergePriceTables(override, pt), source, nil
+}
+
+// resolveOverride loads the override half of ResolvePriceTable: the explicit
+// path if it exists, else the first prices.yaml in searchDirs. A nil table
+// with a nil error means there is no override.
+func resolveOverride(explicitPath string, searchDirs []string) (PriceTable, string, error) {
 	if explicitPath != "" {
 		if _, err := os.Stat(explicitPath); err == nil {
 			pt, lerr := LoadPriceTable(explicitPath)
@@ -362,7 +416,5 @@ func ResolvePriceTable(explicitPath string, searchDirs []string, embedded []byte
 			return pt, candidate, lerr
 		}
 	}
-
-	pt, err := ParsePriceTable(embedded, "embedded default")
-	return pt, "embedded default", err
+	return nil, "", nil
 }

@@ -31,7 +31,8 @@ development; run the full suite before declaring done.
 |-------------------------------------|----------------------------------------------------|----------------------------------------------------------------------------------|
 | Persistence and migrations          | `go test ./internal/store/...`                     | Schema migration, UNIQUE on `(session_id, message_id)`, retention pruning        |
 | Config loader                       | `go test ./internal/config/...`                    | Defaults, YAML parsing, `%APPDATA%`/env-style expansion, slack threshold fields  |
-| Cost resolution                     | `go test ./internal/ingest/...`                    | Reported vs. computed cost, cache token rates, unknown-model fallthrough         |
+| Cost resolution                     | `go test ./internal/ingest/...`                    | Reported vs. computed cost, cache token rates, unknown-model fallthrough, per-model layering of override / embedded / GitHub tables |
+| GitHub price list                   | `go test ./internal/remoteprices/...`              | Fetch only on an unknown model, one attempt per day persisted across restarts, failures and bad responses keep the old cache, single fetch under concurrency |
 | Transcript parser                   | `go test ./internal/ingest/...`                    | Valid/invalid JSONL, missing fields, timestamp parsing, parse-error capture     |
 | Tailer                              | `go test ./internal/ingest/...`                    | `.jsonl` matching, offset persistence, advance past skipped lines                |
 | Windows engine                      | `go test ./internal/windows/...`                   | session and weekly derivation, baseline assignment, clock injection              |
@@ -138,8 +139,12 @@ once per release candidate.
       default table is used — verify a `computed` cost appears for a known
       model).
 - [ ] Dropping a `prices.yaml` next to `trayapp.exe` (or in
-      `%APPDATA%\usage_dashboard\`) overrides the embedded rates after a
-      restart.
+      `%APPDATA%\usage_dashboard\`) overrides the embedded rates of the
+      models it lists after a restart; other models keep their built-in rates.
+- [ ] An event for a model no table lists makes the tray app fetch
+      `prices.yaml` from GitHub once (`prices_remote.yaml` and
+      `prices_remote_state.json` appear in `%LOCALAPPDATA%\usage_dashboard\`),
+      and no second fetch happens within a day.
 - [ ] Re-running `install.ps1` is idempotent: the scheduled task is replaced
       cleanly.
 

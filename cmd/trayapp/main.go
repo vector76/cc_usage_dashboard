@@ -21,10 +21,11 @@ import (
 	"github.com/vector76/cc_usage_dashboard/internal/feedback"
 	"github.com/vector76/cc_usage_dashboard/internal/ingest"
 	"github.com/vector76/cc_usage_dashboard/internal/netbind"
+	"github.com/vector76/cc_usage_dashboard/internal/oauthusage"
+	"github.com/vector76/cc_usage_dashboard/internal/remoteprices"
 	"github.com/vector76/cc_usage_dashboard/internal/server"
 	"github.com/vector76/cc_usage_dashboard/internal/slack"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
-	"github.com/vector76/cc_usage_dashboard/internal/oauthusage"
 	"github.com/vector76/cc_usage_dashboard/internal/uplink"
 )
 
@@ -55,6 +56,13 @@ func (g tailerGroup) CaughtUp() bool {
 func (g tailerGroup) Stop() {
 	for _, t := range g {
 		t.Stop()
+	}
+}
+
+// SetPriceTable hands every tailer in the group the same new price table.
+func (g tailerGroup) SetPriceTable(pt ingest.PriceTable) {
+	for _, t := range g {
+		t.SetPriceTable(pt)
 	}
 }
 
@@ -169,23 +177,32 @@ func main() {
 	}
 	srv.SetAuth(tokens)
 
-	// Resolve the price table once (explicit config path -> local prices.yaml
-	// override -> embedded default) and share it between the server's cost
-	// handlers and the tailer, so a single table drives all cost computation.
-	priceTable, priceSource, err := ingest.ResolvePriceTable(
+	// Resolve the price table (a custom prices.yaml layered over the embedded
+	// default), then layer the last price list fetched from GitHub under it,
+	// and share the result between the server's cost handlers and the
+	// tailers, so a single table drives all cost computation. A broken custom
+	// file disables cost computation and the GitHub layer with it, so the
+	// error is not masked.
+	basePrices, priceSource, priceErr := ingest.ResolvePriceTable(
 		cfg.Pricing.TablePath, config.PriceTableSearchDirs(), ccusage.DefaultPriceTableYAML)
-	if err != nil {
-		slog.Warn("price table load failed; cost computation disabled", "err", err, "source", priceSource)
+	remotePrices := remoteprices.New(config.UserDataDir(), nil)
+	priceTable := basePrices
+	if priceErr != nil {
+		slog.Warn("price table load failed; cost computation disabled", "err", priceErr, "source", priceSource)
 	} else {
-		slog.Info("price table resolved", "source", priceSource, "models", len(priceTable))
+		priceTable = ingest.MergePriceTables(basePrices, remotePrices.Cached())
+		slog.Info("price table resolved", "source", priceSource, "models", len(priceTable),
+			"added_from_github", len(priceTable)-len(basePrices))
 	}
 	srv.SetPriceTable(priceTable)
 
 	// Repair rows the then-loaded price table could not price properly now that
 	// the current table may know them: costs left NULL, and ceiling estimates
 	// that real rates should supersede. Measured costs are untouched; a failure
-	// is diagnostic, not fatal.
-	if _, err := ingest.BackfillCosts(db, priceTable); err != nil {
+	// is diagnostic, not fatal. The models still unpriced afterwards are a
+	// reason to ask GitHub for a newer price list, once the tailers exist.
+	_, unpriced, err := ingest.BackfillCostsUnpriced(db, priceTable)
+	if err != nil {
 		slog.Warn("cost backfill failed", "err", err)
 	}
 
@@ -213,6 +230,21 @@ func main() {
 	}
 	srv.SetTailer(tailers)
 	srv.SetReimporter(tailers)
+
+	// Fetch the price list from GitHub when a model turns up that no table
+	// prices, at most once a day (remoteprices.DefaultInterval). A fetched
+	// list takes effect without a restart and re-prices the ceiling
+	// estimates of the models it adds.
+	if priceErr == nil {
+		unknownModels := feedback.DefaultUnknownModels()
+		remotePrices.OnUpdate = func(fetched ingest.PriceTable) {
+			applyFetchedPrices(basePrices, fetched, db, unknownModels, srv.SetPriceTable, tailers.SetPriceTable)
+		}
+		unknownModels.OnRecord(func(model string) { remotePrices.NoteUnknownModel(model) })
+		if len(unpriced) > 0 {
+			remotePrices.NoteUnknownModel(unpriced[0])
+		}
+	}
 
 	// Optional uplink: forward this machine's events to a peer trayapp so a
 	// VM's spend lands in the primary host's database. Empty (the default)
@@ -385,6 +417,8 @@ waitLoop:
 	bgDone := make(chan struct{})
 	go func() {
 		tailers.Stop()
+		// Before the database closes: a fetch that completes re-prices rows.
+		remotePrices.Close()
 		// Inside the same bounded goroutine as the tailers: an uplink tick
 		// blocked on an unreachable peer would otherwise hold up exit for
 		// the client timeout on top of everything else.

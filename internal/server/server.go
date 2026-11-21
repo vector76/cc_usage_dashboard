@@ -56,14 +56,16 @@ type Server struct {
 	mux   *http.ServeMux
 	store *store.Store
 	cfg   *config.Config
-	priceTable ingest.PriceTable
-	metrics *Metrics
-	slackCalc *slack.Calculator
-	windowsEngine *windows.Engine
+	// priceTable is swapped whole by SetPriceTable; each table it holds is
+	// never modified.
+	priceTable       atomic.Pointer[ingest.PriceTable]
+	metrics          *Metrics
+	slackCalc        *slack.Calculator
+	windowsEngine    *windows.Engine
 	dashboardHandler *dashboard.Handler
-	tailerStatus TailerStatus
-	reimporter   Reimporter
-	oauthStatus  OAuthStatusSource
+	tailerStatus     TailerStatus
+	reimporter       Reimporter
+	oauthStatus      OAuthStatusSource
 
 	// reimportInFlight guards against a second /admin/reimport request
 	// piling on while one is already running — the operation is already
@@ -129,11 +131,10 @@ func New(s *store.Store, cfg *config.Config) *Server {
 		slog.Warn("invalid slack.weekly_profile; using thresholds instead", "err", err)
 	}
 	srv := &Server{
-		mux:        http.NewServeMux(),
-		store:      s,
-		cfg:        cfg,
-		priceTable: priceTable,
-		metrics:    NewMetrics(),
+		mux:     http.NewServeMux(),
+		store:   s,
+		cfg:     cfg,
+		metrics: NewMetrics(),
 		slackCalc: slack.NewCalculator(s.DB(), slack.Config{
 			BaselineMaxAgeSeconds:    cfg.Slack.BaselineMaxAgeSeconds,
 			SessionSurplusThreshold:  cfg.Slack.SessionSurplusThreshold,
@@ -143,12 +144,14 @@ func New(s *store.Store, cfg *config.Config) *Server {
 			SessionProfile:           sessionProfile,
 			WeeklyProfile:            weeklyProfile,
 		}),
-		windowsEngine: windows.NewEngine(s.DB()),
-		now:           time.Now,
+		windowsEngine:        windows.NewEngine(s.DB()),
+		now:                  time.Now,
 		slowRequestThreshold: defaultSlowRequestThreshold,
-		feedbackBuffer: feedback.DefaultBuffer(),
-		unknownModels:  feedback.DefaultUnknownModels(),
+		feedbackBuffer:       feedback.DefaultBuffer(),
+		unknownModels:        feedback.DefaultUnknownModels(),
 	}
+
+	srv.SetPriceTable(priceTable)
 
 	dh, err := dashboard.NewHandler(s, srv.slackCalc)
 	if err != nil {
@@ -185,10 +188,11 @@ func New(s *store.Store, cfg *config.Config) *Server {
 // posted to the server. cmd/trayapp calls this with the table produced by
 // ingest.ResolvePriceTable so the server and the tailer share a single
 // resolved table (including the embedded default) instead of each re-loading
-// only from cfg.Pricing.TablePath. Must be called before the server starts
-// accepting traffic.
+// only from cfg.Pricing.TablePath. Safe to call while the server is serving,
+// which is how a price list fetched from GitHub takes effect; the caller must
+// not modify pt after.
 func (s *Server) SetPriceTable(pt ingest.PriceTable) {
-	s.priceTable = pt
+	s.priceTable.Store(&pt)
 }
 
 // ServeHTTP implements http.Handler. A request must pass the token gate
@@ -527,7 +531,7 @@ func (s *Server) handleLog(w http.ResponseWriter, r *http.Request) {
 		req.CacheCreationTokens,
 		req.CacheCreation1hTokens,
 		req.CacheReadTokens,
-		s.priceTable,
+		*s.priceTable.Load(),
 	)
 
 	// Default source if not provided

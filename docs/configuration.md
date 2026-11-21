@@ -176,10 +176,11 @@ database *there* and failed with `unable to open database file (14)`
 The model price table that computes `cost_usd_equivalent` (see
 `docs/data-model.md` "Cost source") is resolved at startup by
 `ingest.ResolvePriceTable`, which walks a precedence chain so a usable table
-is **always** available with zero configuration:
+is **always** available with zero configuration, and then layered over the
+copy fetched from GitHub:
 
 1. **Explicit `pricing.table_path`.** If set and the file **exists**, it is
-   loaded and wins. A malformed file here is fatal (the error is surfaced and
+   loaded and layered over the embedded default (see below). A malformed file here is fatal (the error is surfaced and
    cost computation is disabled) so a broken override is never silently
    masked. If the path is set but the file is **missing**, that is *not*
    fatal: a warning is logged and resolution falls through to steps 2–3. This
@@ -191,12 +192,60 @@ is **always** available with zero configuration:
    `%APPDATA%\usage_dashboard\`, then `~/.config/usage-dashboard/`. This is
    the no-rebuild override hook: drop a `prices.yaml` next to the exe to
    change rates.
-3. **Embedded default.** If nothing above matches, the canonical `prices.yaml`
-   embedded in the binary at build time (repo-root `prices.yaml`, wired in via
-   `prices_embed.go`) is parsed. This always succeeds.
+3. **Embedded default.** The canonical `prices.yaml` embedded in the binary at
+   build time (repo-root `prices.yaml`, wired in via `prices_embed.go`). This
+   always parses.
+4. **GitHub copy.** The last `prices.yaml` fetched from the official
+   repository's `main` branch, cached in `%LOCALAPPDATA%\usage_dashboard\`
+   (see "Fetching new models from GitHub" below).
+
+The layers combine **per model** (`ingest.MergePriceTables`): each model takes
+its rates from the first layer above that lists it. So an override file only
+needs the models it means to change, and every model it leaves out keeps its
+built-in rates. The GitHub copy only ever *adds* models the build does not
+know; it never changes a rate the build or an override already has, so a copy
+fetched months ago cannot override corrected rates in a newer build. (Before
+the GitHub layer, an override replaced the embedded table outright, and a
+model it did not list fell to the ceiling.)
 
 The search order is defined by `config.PriceTableSearchDirs`. To update the
 built-in rates, edit the repo-root `prices.yaml` and rebuild.
+
+### Fetching new models from GitHub
+
+A model released after the binary was built would otherwise be priced at the
+ceiling (see `docs/data-model.md` "Unrecognized models") until someone edits
+`prices.yaml` and rebuilds, even when all that changed upstream is one new
+entry in the price list. So when an event turns up whose model no layer
+prices, the tray app (`internal/remoteprices`) downloads `prices.yaml` from
+`remoteprices.DefaultURL`, the raw file on `main` of the official repository.
+The URL is built in, not configurable: the rates are trusted because they come
+from the project's own source.
+
+- **When.** Only for an unknown model: at startup if stored events are still
+  at the ceiling (`ingest.BackfillCostsUnpriced`), and whenever the tailer or
+  `POST /log` records one (the hook on `feedback.UnknownModels`). Known models
+  never cause a fetch, and neither does Claude Code's `<synthetic>`
+  placeholder.
+- **How often.** At most one attempt per 24 hours, failed ones included. The
+  attempt time is written to `prices_remote_state.json` *before* the request,
+  so restarts, crashes and hung requests do not cause extra attempts. An
+  attempt time in the future (the clock was set back) does not block.
+- **What is kept.** A response is accepted only if it is HTTP 200, at most
+  1 MB, parses as a price table, and lists at least one model. It replaces
+  `prices_remote.yaml` through a rename. Anything else leaves the previous
+  copy in place and logs a warning, which shows in the dashboard's feedback
+  panel.
+- **Effect.** The fetched table is layered under the local one and swapped
+  into the tailers and the server without a restart. The models it now prices
+  leave the unknown-model list, and `ingest.BackfillCosts` re-prices their
+  stored ceiling estimates. On later starts the cached copy is layered in from
+  the beginning, with no fetch.
+- **Still unknown.** If the fetched list lacks the model too, a warning says
+  so, and the next attempt is a day later.
+
+A broken override file disables cost computation and the GitHub layer with
+it, so the error is surfaced rather than masked by downloaded rates.
 
 ## Slack activation profiles
 

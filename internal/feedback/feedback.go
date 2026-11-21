@@ -115,8 +115,9 @@ type UnknownModel struct {
 // UnknownModels is a concurrency-safe per-model counter of usage events whose
 // model was absent from the price table.
 type UnknownModels struct {
-	mu sync.Mutex
-	m  map[string]*UnknownModel
+	mu       sync.Mutex
+	m        map[string]*UnknownModel
+	onRecord func(model string)
 }
 
 // NewUnknownModels returns an empty aggregate.
@@ -132,7 +133,39 @@ func (u *UnknownModels) Record(model string, t time.Time) {
 		return
 	}
 	u.mu.Lock()
+	hook := u.onRecord
+	u.record(model, t)
+	u.mu.Unlock()
+	// Outside the lock, so the hook may read the aggregate back.
+	if hook != nil {
+		hook(model)
+	}
+}
+
+// OnRecord registers fn to be called with the model of every Record, after
+// the aggregate is updated. The trayapp uses it to fetch the price list from
+// GitHub when a model turns up unpriced. fn must be cheap and must not block:
+// it runs on the ingest path, once per unpriced event.
+func (u *UnknownModels) OnRecord(fn func(model string)) {
+	u.mu.Lock()
 	defer u.mu.Unlock()
+	u.onRecord = fn
+}
+
+// Forget drops every model for which priced returns true, once a new price
+// table has rates for it, so the dashboard stops asking for it.
+func (u *UnknownModels) Forget(priced func(model string) bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	for model := range u.m {
+		if priced(model) {
+			delete(u.m, model)
+		}
+	}
+}
+
+// record updates the aggregate; u.mu must be held.
+func (u *UnknownModels) record(model string, t time.Time) {
 	e, ok := u.m[model]
 	if !ok {
 		u.m[model] = &UnknownModel{Model: model, Count: 1, FirstSeen: t, LastSeen: t}

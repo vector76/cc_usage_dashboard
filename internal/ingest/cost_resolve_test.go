@@ -48,6 +48,8 @@ func TestEmbeddedPriceTableParses(t *testing.T) {
 		input  float64
 		output float64
 	}{
+		{"claude-fable-5-2", 8.00, 40.00},
+		{"claude-mythos-5-2", 8.00, 40.00},
 		{"claude-opus-5-5", 4.00, 20.00},
 		{"claude-opus-4-8", 5.00, 25.00},
 		{"claude-sonnet-4-6", 3.00, 15.00},
@@ -64,6 +66,25 @@ func TestEmbeddedPriceTableParses(t *testing.T) {
 		if mp.InputRate != tc.input || mp.OutputRate != tc.output {
 			t.Errorf("%s: got input=%.2f output=%.2f, want %.2f/%.2f",
 				tc.model, mp.InputRate, mp.OutputRate, tc.input, tc.output)
+		}
+	}
+}
+
+// TestEmbeddedFable52CacheRates pins the cache rates that differ from the
+// standard 0.1x rule: Fable 5.2 and Mythos 5.2 read cache at 0.025x input.
+func TestEmbeddedFable52CacheRates(t *testing.T) {
+	pt, err := ParsePriceTable(ccusage.DefaultPriceTableYAML, "embedded default")
+	if err != nil {
+		t.Fatalf("ParsePriceTable(embedded): %v", err)
+	}
+	for _, model := range []string{"claude-fable-5-2", "claude-mythos-5-2"} {
+		mp := pt[model]
+		if mp == nil {
+			t.Fatalf("embedded table missing %s", model)
+		}
+		if mp.CacheCreationRate != 10.00 || mp.CacheCreation1hRate != 16.00 || mp.CacheReadRate != 0.20 {
+			t.Errorf("%s: cache rates = 5m %.2f / 1h %.2f / read %.2f, want 10.00 / 16.00 / 0.20",
+				model, mp.CacheCreationRate, mp.CacheCreation1hRate, mp.CacheReadRate)
 		}
 	}
 }
@@ -108,9 +129,74 @@ func TestResolvePriceTableLocalOverridesEmbedded(t *testing.T) {
 	if _, ok := pt["sentinel-local"]; !ok {
 		t.Errorf("expected local override loaded; got models %v", keys(pt))
 	}
-	// The embedded default's models must NOT leak through when an override wins.
-	if _, ok := pt["claude-opus-4-8"]; ok {
-		t.Error("embedded model present; local override should have replaced it entirely")
+	// The override is layered per model: models it doesn't list keep their
+	// built-in rates instead of dropping to the ceiling.
+	if _, ok := pt["claude-opus-4-8"]; !ok {
+		t.Error("embedded model missing; a local override should only replace the models it lists")
+	}
+}
+
+// TestResolvePriceTableOverrideWinsPerModel: a model listed in both the
+// override and the embedded default takes the override's rates.
+func TestResolvePriceTableOverrideWinsPerModel(t *testing.T) {
+	searchDir := t.TempDir()
+	writeFile(t, searchDir, "prices.yaml", sentinelYAML("claude-opus-4-8", 99))
+
+	pt, _, err := ResolvePriceTable("", []string{searchDir}, ccusage.DefaultPriceTableYAML)
+	if err != nil {
+		t.Fatalf("ResolvePriceTable: %v", err)
+	}
+	if got := pt["claude-opus-4-8"].InputRate; got != 99 {
+		t.Errorf("claude-opus-4-8 input rate = %v, want the override's 99", got)
+	}
+	if got := pt["claude-sonnet-4-6"].InputRate; got != 3.00 {
+		t.Errorf("claude-sonnet-4-6 input rate = %v, want the built-in 3.00", got)
+	}
+}
+
+// TestMergePriceTablesFirstLayerWins: earlier layers win per model, later
+// layers only add models, and nil layers are skipped.
+func TestMergePriceTablesFirstLayerWins(t *testing.T) {
+	first := PriceTable{"a": {InputRate: 1}}
+	second := PriceTable{"a": {InputRate: 2}, "b": {InputRate: 2}}
+	third := PriceTable{"b": {InputRate: 3}, "c": {InputRate: 3}}
+
+	got := MergePriceTables(first, nil, second, third)
+	want := map[string]float64{"a": 1, "b": 2, "c": 3}
+	if len(got) != len(want) {
+		t.Fatalf("merged models = %v, want %v", keys(got), want)
+	}
+	for model, rate := range want {
+		if got[model].InputRate != rate {
+			t.Errorf("%s input rate = %v, want %v", model, got[model].InputRate, rate)
+		}
+	}
+	// The merge must not write into its inputs: they are shared snapshots.
+	if len(first) != 1 || len(second) != 2 {
+		t.Error("MergePriceTables modified an input table")
+	}
+}
+
+// TestHasPrice covers the lookup forms ResolveCost accepts: exact, dated
+// snapshot, and Bedrock ids.
+func TestHasPrice(t *testing.T) {
+	pt := PriceTable{"claude-haiku-4-5": {InputRate: 1}}
+	for _, model := range []string{
+		"claude-haiku-4-5",
+		"claude-haiku-4-5-20251001",
+		"us.anthropic.claude-haiku-4-5-20251001-v1:0",
+	} {
+		if !HasPrice(pt, model) {
+			t.Errorf("HasPrice(%q) = false, want true", model)
+		}
+	}
+	for _, model := range []string{"", "claude-mystery-9"} {
+		if HasPrice(pt, model) {
+			t.Errorf("HasPrice(%q) = true, want false", model)
+		}
+	}
+	if HasPrice(nil, "claude-haiku-4-5") {
+		t.Error("HasPrice(nil table) = true, want false")
 	}
 }
 

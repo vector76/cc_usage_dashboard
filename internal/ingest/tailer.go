@@ -10,9 +10,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/vector76/cc_usage_dashboard/internal/feedback"
 	"github.com/vector76/cc_usage_dashboard/internal/store"
-	"github.com/fsnotify/fsnotify"
 )
 
 // syntheticModel is the model name Claude Code writes on zero-usage assistant
@@ -23,7 +23,9 @@ const syntheticModel = "<synthetic>"
 type Tailer struct {
 	projectsDir string
 	store       *store.Store
-	priceTable  PriceTable
+	// priceTable is swapped whole by SetPriceTable while the tailer runs;
+	// each table it holds is never modified.
+	priceTable atomic.Pointer[PriceTable]
 	// unknown aggregates usage events whose model is missing from the price
 	// table. Aggregated (not per-event logged) because one usage event per
 	// message would otherwise flood the feedback buffer with the exact model
@@ -42,16 +44,23 @@ type Tailer struct {
 
 // NewTailer creates a new tailer for the given projects directory.
 func NewTailer(projectsDir string, s *store.Store, pt PriceTable) *Tailer {
-	return &Tailer{
+	t := &Tailer{
 		projectsDir: projectsDir,
 		store:       s,
-		priceTable:  pt,
 		unknown:     feedback.DefaultUnknownModels(),
 		offsets:     make(map[string]int64),
 		stopChan:    make(chan struct{}),
 		doneChan:    make(chan struct{}),
 		openFile:    os.Open,
 	}
+	t.SetPriceTable(pt)
+	return t
+}
+
+// SetPriceTable replaces the table that prices events ingested from now on.
+// Safe to call while the tailer runs; the caller must not modify pt after.
+func (t *Tailer) SetPriceTable(pt PriceTable) {
+	t.priceTable.Store(&pt)
 }
 
 // Start begins watching for transcript changes (runs in a goroutine).
@@ -374,7 +383,7 @@ func (t *Tailer) processFile(filePath string) {
 			event.CacheCreationTokens,
 			event.CacheCreation1hTokens,
 			event.CacheReadTokens,
-			t.priceTable,
+			*t.priceTable.Load(),
 		)
 		// A non-empty model that is missing from the price table — whether it
 		// got a ceiling estimate or no cost at all — is aggregated so the

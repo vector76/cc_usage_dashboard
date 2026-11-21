@@ -322,9 +322,10 @@ they're seeing our estimate vs. Anthropic's.
 The canonical price table is the repo-root `prices.yaml`, **embedded into the binary**
 at build time (via `prices_embed.go`) so cost computation works with zero configuration.
 It is refreshed by hand when Anthropic updates rates: edit `prices.yaml` and rebuild. At
-runtime the table is selected by `ingest.ResolvePriceTable` following a precedence chain
-(explicit `pricing.table_path` → local `prices.yaml` override → embedded default); see
-`docs/configuration.md` "Price table resolution" for the full order and the rationale.
+runtime the table is built per model from layers (explicit `pricing.table_path` or a
+local `prices.yaml` override → embedded default → the copy fetched from GitHub when a
+model is unknown); see `docs/configuration.md` "Price table resolution" for the full
+order and the rationale.
 
 ### Unrecognized models: the ceiling estimate
 
@@ -358,8 +359,10 @@ maximum at 15/75/18.75/1.50), but cache reads outnumber output tokens by two
 orders of magnitude in real usage, so that rate must not be sampled from
 whichever model happened to win on output.
 
-The estimate is provisional. Adding the model to `prices.yaml` and restarting
-makes `ingest.BackfillCosts` replace every `ceiling` row with a `computed` one
+The estimate is provisional. Adding the model to `prices.yaml` and restarting, or
+the tray app fetching a price list from GitHub that lists it (see
+`docs/configuration.md` "Fetching new models from GitHub"), makes
+`ingest.BackfillCosts` replace every `ceiling` row with a `computed` one
 at the real rates, so historical dollars come back down rather than staying
 inflated forever. The guards on that update are narrow: `reported` and
 `computed` costs are immovable, and one ceiling estimate never replaces another
