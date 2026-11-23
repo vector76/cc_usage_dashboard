@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -25,15 +26,26 @@ type Credential struct {
 	// ExpiresAt is zero when the file did not state one. That is treated
 	// as "no local opinion", not as "expired" — see UsableAt.
 	ExpiresAt time.Time
+	// SubscriptionType is the plan Claude Code recorded at login ("pro",
+	// "max", "team", "enterprise"), or empty when the file states none.
+	SubscriptionType string
+}
+
+// IsEnterprise reports whether the account is on the enterprise plan, the
+// only trigger for enterprise mode. Enterprise accounts report no session
+// or weekly limit rows, so there is nothing for this source to read.
+func (c *Credential) IsEnterprise() bool {
+	return strings.EqualFold(strings.TrimSpace(c.SubscriptionType), "enterprise")
 }
 
 // credentialsFile mirrors the on-disk shape. Only the two fields below are
-// decoded; everything else in the file (refreshToken, scopes,
-// subscriptionType, rateLimitTier) is intentionally left alone.
+// decoded, plus subscriptionType; everything else (refreshToken, scopes,
+// rateLimitTier) is intentionally left alone.
 type credentialsFile struct {
 	ClaudeAIOAuth struct {
-		AccessToken string `json:"accessToken"`
-		ExpiresAtMs int64  `json:"expiresAt"`
+		AccessToken      string `json:"accessToken"`
+		ExpiresAtMs      int64  `json:"expiresAt"`
+		SubscriptionType string `json:"subscriptionType"`
 	} `json:"claudeAiOauth"`
 }
 
@@ -92,7 +104,7 @@ func LoadCredential(path string) (*Credential, error) {
 		return nil, fmt.Errorf("%w: no access token in %s", ErrCredentialStale, path)
 	}
 
-	cred := &Credential{AccessToken: f.ClaudeAIOAuth.AccessToken}
+	cred := &Credential{AccessToken: f.ClaudeAIOAuth.AccessToken, SubscriptionType: f.ClaudeAIOAuth.SubscriptionType}
 	if f.ClaudeAIOAuth.ExpiresAtMs > 0 {
 		cred.ExpiresAt = time.UnixMilli(f.ClaudeAIOAuth.ExpiresAtMs).UTC()
 	}

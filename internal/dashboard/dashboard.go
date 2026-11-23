@@ -51,6 +51,9 @@ type WindowState struct {
 	// history into Series and the matching cost buckets into Volume so the
 	// ghost lookback isn't blank; weekly has no analogous pre-window region.
 	Hypothetical bool `json:"hypothetical,omitempty"`
+	// Rolling is true in enterprise mode (see rolling.go): no quota window,
+	// just a fixed-grid trailing span. Series is empty; only Volume has data.
+	Rolling bool `json:"rolling,omitempty"`
 }
 
 // UsedSeriesPoint is one observation of % used at a point in time, sourced
@@ -114,6 +117,9 @@ type State struct {
 	// session row. The windows table is the single source of truth —
 	// this field is NOT read from quota_snapshots.session_active.
 	SessionActive bool `json:"session_active"`
+	// Enterprise is true when the account's plan is "enterprise"; Session and
+	// Weekly are then Rolling windows rather than quota windows.
+	Enterprise bool `json:"enterprise,omitempty"`
 	// SlackReleaseRecommended mirrors the /slack endpoint's
 	// release_recommended bit so the dashboard status panel can show
 	// "release: yes/no" without a separate HTTP poll. Null if the slack
@@ -150,7 +156,11 @@ type Handler struct {
 	store      *store.Store
 	slackCalc  *slack.Calculator
 	now        func() time.Time
-	indexHTML  []byte
+	// enterprise reports whether to show rolling windows; nil means no.
+	enterprise func() bool
+	// loc phases the rolling bar grid to the local clock; nil means time.Local.
+	loc       *time.Location
+	indexHTML []byte
 	reportHTML []byte
 	groupingJS []byte
 	summaryJS []byte
@@ -206,6 +216,12 @@ func NewHandler(s *store.Store, sc *slack.Calculator) (*Handler, error) {
 // SetNow injects a clock for tests.
 func (h *Handler) SetNow(fn func() time.Time) {
 	h.now = fn
+}
+
+// SetEnterprise supplies the predicate that switches the dashboard into
+// enterprise mode (see WindowState.Rolling).
+func (h *Handler) SetEnterprise(fn func() bool) {
+	h.enterprise = fn
 }
 
 // Register attaches dashboard routes to the given mux.
@@ -287,14 +303,20 @@ func (h *Handler) computeState() (*State, error) {
 
 	state := &State{Now: now}
 
-	session, err := h.loadActiveWindow(db, "session")
+	load := h.loadActiveWindow
+	if h.enterprise != nil && h.enterprise() {
+		state.Enterprise = true
+		load = h.loadRollingWindow
+	}
+
+	session, err := load(db, "session")
 	if err != nil {
 		return nil, fmt.Errorf("session window: %w", err)
 	}
 	state.Session = session
-	state.SessionActive = session != nil && !session.Hypothetical
+	state.SessionActive = session != nil && !session.Hypothetical && !session.Rolling
 
-	weekly, err := h.loadActiveWindow(db, "weekly")
+	weekly, err := load(db, "weekly")
 	if err != nil {
 		return nil, fmt.Errorf("weekly window: %w", err)
 	}
@@ -523,7 +545,16 @@ func (h *Handler) loadVolumeSeries(db *sql.DB, startedAt, endsAt time.Time, buck
 	if bucketSecs <= 0 {
 		return []SeriesBucket{}, nil
 	}
-	phase := bucketPhaseSecs(anchor, bucketSecs)
+	return h.loadVolumeSeriesPhased(db, startedAt, endsAt, bucketSecs, bucketPhaseSecs(anchor, bucketSecs))
+}
+
+// loadVolumeSeriesPhased is loadVolumeSeries with the grid phase given
+// directly: bucket starts are the instants whose Unix time is congruent to
+// phase modulo bucketSecs.
+func (h *Handler) loadVolumeSeriesPhased(db *sql.DB, startedAt, endsAt time.Time, bucketSecs int, phase int64) ([]SeriesBucket, error) {
+	if bucketSecs <= 0 {
+		return []SeriesBucket{}, nil
+	}
 	query := fmt.Sprintf(`
 		SELECT
 			((CAST(strftime('%%s', occurred_at) AS INTEGER) - %d) / %d) * %d + %d AS bucket_unix,

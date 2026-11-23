@@ -47,6 +47,11 @@ type OAuthStatusResponse struct {
 // concurrent calls are not supported.
 func (s *Server) SetOAuthStatus(src OAuthStatusSource) {
 	s.oauthStatus = src
+	// Enterprise mode is decided by the plan the poller read from the
+	// credentials file, and by nothing else.
+	if s.dashboardHandler != nil {
+		s.dashboardHandler.SetEnterprise(func() bool { return src.Status().Enterprise })
+	}
 }
 
 // handleOAuthStatus serves GET /api/oauth/status.

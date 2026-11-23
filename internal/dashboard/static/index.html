@@ -59,15 +59,15 @@
 <section>
   <div class="section-head">
     <h2>Burn-down</h2>
-    <span class="slack-flag">Slack release: <span id="slack-release" class="muted">—</span></span>
+    <span class="slack-flag" id="slack-flag">Slack release: <span id="slack-release" class="muted">—</span></span>
     <span class="stale-note" id="stale-note" role="status" hidden></span>
   </div>
   <div class="chart-block">
-    <h3>Session window (last 15h, current window in rightmost third)</h3>
+    <h3 id="h-session">Session window (last 15h, current window in rightmost third)</h3>
     <svg id="chart-session" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
   </div>
   <div class="chart-block">
-    <h3>Weekly window</h3>
+    <h3 id="h-weekly">Weekly window</h3>
     <svg id="chart-weekly" viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
   </div>
   <div class="chart-block" id="burn-legend"></div>
@@ -304,13 +304,73 @@ function drawUsedPolylines(svg, series, sx, syPct, color, width) {
   }
 }
 
+// rollingTicks lists the axis ticks for an enterprise-mode chart, in local
+// time. Session (15h): every even hour, labelled like "2 PM". Weekly (7d):
+// a tick at every local midnight, with "Mon 23" centred between ticks. Only ticks strictly inside
+// the domain are returned. Stepping uses Date's local-calendar setters so a
+// DST change shifts the clock, not the wall-clock labels.
+function rollingTicks(kind, domainStart, domainEnd) {
+  const out = [];
+  const d = new Date(domainStart);
+  if (kind === "weekly") {
+    // Ticks sit on local midnights; each label names the day *between* two
+    // ticks, so it is centred on that day's visible span. A partial day at
+    // either edge is labelled only when at least half of it is showing, so
+    // a sliver does not get a label wider than itself.
+    d.setHours(0, 0, 0, 0);
+    while (d.getTime() <= domainStart) d.setDate(d.getDate() + 1);
+    const firstTick = new Date(d);
+    firstTick.setDate(firstTick.getDate() - 1); // start of the day containing domainStart
+    for (; d.getTime() < domainEnd; d.setDate(d.getDate() + 1)) {
+      out.push({ ms: d.getTime(), label: "" });
+    }
+    const day = new Date(firstTick);
+    for (; day.getTime() < domainEnd; day.setDate(day.getDate() + 1)) {
+      const next = new Date(day);
+      next.setDate(next.getDate() + 1);
+      const lo = Math.max(day.getTime(), domainStart);
+      const hi = Math.min(next.getTime(), domainEnd);
+      if (hi - lo < (next.getTime() - day.getTime()) / 2) continue;
+      out.push({ ms: (lo + hi) / 2, tick: false,
+        label: day.toLocaleDateString([], { weekday: "short" }) + " " + day.getDate() });
+    }
+  } else {
+    d.setMinutes(0, 0, 0);
+    d.setHours(d.getHours() - (d.getHours() % 2));
+    while (d.getTime() <= domainStart) d.setHours(d.getHours() + 2);
+    for (; d.getTime() < domainEnd; d.setHours(d.getHours() + 2)) {
+      out.push({ ms: d.getTime(),
+        label: d.toLocaleTimeString([], { hour: "numeric" }) });
+    }
+  }
+  return out;
+}
+
+// weeklyDayTicks returns the local-midnight ticks strictly inside the domain
+// and a label for each whole day between consecutive ticks, centred on it.
+function weeklyDayTicks(domainStart, domainEnd) {
+  const ticks = [];
+  const d = new Date(domainStart);
+  d.setHours(0, 0, 0, 0);
+  while (d.getTime() <= domainStart) d.setDate(d.getDate() + 1);
+  for (; d.getTime() < domainEnd; d.setDate(d.getDate() + 1)) ticks.push(d.getTime());
+  const days = [];
+  for (let i = 0; i + 1 < ticks.length; i++) {
+    const day = new Date(ticks[i]);
+    days.push({ ms: (ticks[i] + ticks[i + 1]) / 2,
+      label: day.toLocaleDateString([], { weekday: "short" }) + " " + day.getDate() });
+  }
+  return { ticks, days };
+}
+
 function renderBurnDown(svgID, win, opts) {
   opts = opts || {};
   const svg = document.getElementById(svgID);
   while (svg.firstChild) svg.removeChild(svg.firstChild);
   const W = 800, H = 200, P = 40;
   const PCT_TOP = 8, PCT_BOTTOM = 132;
-  const VOL_TOP = 140, VOL_BOTTOM = 184;
+  let VOL_TOP = 140;
+  const VOL_BOTTOM = 184;
   const AXIS_Y = 196;
 
   if (!win) {
@@ -328,6 +388,14 @@ function renderBurnDown(svgID, win, opts) {
   // inert because the backend leaves in-window Series empty for the
   // hypothetical case.
   const hypothetical = win.hypothetical === true;
+  // Enterprise mode: a fixed-grid trailing span with cost bars only. There is
+  // no quota to plot, so the whole panel goes to the bars and the % axis,
+  // slack zone, pace line and lookback marker are all dropped.
+  const rolling = win.rolling === true;
+  if (rolling) {
+    VOL_TOP = 24;
+    opts = Object.assign({}, opts, { lookbackMs: 0, slackProfile: null });
+  }
   const start = new Date(win.started_at).getTime();
   const end = new Date(win.ends_at).getTime();
   if (!(end > start)) {
@@ -348,8 +416,10 @@ function renderBurnDown(svgID, win, opts) {
   const paceRemainingAt = (t) => 100 * (1 - (t - start) / (end - start));
 
   // Upper panel border (left + bottom)
-  svg.appendChild(el("line", { x1: P, y1: PCT_TOP, x2: P, y2: PCT_BOTTOM, stroke: "#444" }));
-  svg.appendChild(el("line", { x1: P, y1: PCT_BOTTOM, x2: W - P, y2: PCT_BOTTOM, stroke: "#444" }));
+  if (!rolling) {
+    svg.appendChild(el("line", { x1: P, y1: PCT_TOP, x2: P, y2: PCT_BOTTOM, stroke: "#444" }));
+    svg.appendChild(el("line", { x1: P, y1: PCT_BOTTOM, x2: W - P, y2: PCT_BOTTOM, stroke: "#444" }));
+  }
 
   // Vertical marker at the current window's left edge when the domain
   // extends back past it. Helps the eye separate "history" from "now".
@@ -401,7 +471,7 @@ function renderBurnDown(svgID, win, opts) {
   // Pace line: (start, 100% remaining) → (end, 0% remaining), in current window only.
   // Hypothetical → lighter stroke; same dash pattern as the live chart so
   // the slope reads identically, just ghosted.
-  svg.appendChild(el("line", {
+  if (!rolling) svg.appendChild(el("line", {
     x1: sx(start), y1: syPct(100), x2: sx(end), y2: syPct(0),
     stroke: hypothetical ? "#bbb" : "#888",
     "stroke-dasharray": "3 3"
@@ -469,7 +539,7 @@ function renderBurnDown(svgID, win, opts) {
       x: sx(now), y: by - PCT_TOP >= 14 ? by - 8 : by + 14,
       "font-size": "10", fill: "#06c", "text-anchor": "middle"
     }, fmt(remaining) + "%"));
-  } else if (!hypothetical) {
+  } else if (!hypothetical && !rolling) {
     svg.appendChild(el("text", {
       x: W / 2, y: (PCT_TOP + PCT_BOTTOM) / 2, "text-anchor": "middle", fill: "#888"
     }, "No data yet"));
@@ -646,6 +716,22 @@ function renderBurnDown(svgID, win, opts) {
   // Axis labels: leftmost = domainStart, rightmost = end. When the
   // domain is extended, also label the current window's left edge.
   const dur = domainEnd - domainStart;
+  if (rolling) {
+    // Enterprise mode: ticks on local wall-clock boundaries instead of the
+    // span's start/end times, which sit at arbitrary bucket edges.
+    // Session: every 2 hours. Weekly: every local midnight.
+    for (const t of rollingTicks(win.kind, domainStart, domainEnd)) {
+      const x = sx(t.ms);
+      if (t.tick !== false) {
+        svg.appendChild(el("line", { x1: x, y1: VOL_BOTTOM, x2: x, y2: VOL_BOTTOM + 5, stroke: "#444" }));
+      }
+      if (t.label) {
+        svg.appendChild(el("text", {
+          x: x, y: AXIS_Y, "font-size": "10", fill: "#444", "text-anchor": "middle"
+        }, t.label));
+      }
+    }
+  } else {
   svg.appendChild(el("text", { x: P, y: AXIS_Y, "font-size": "10", fill: "#444" }, fmtAxisTime(domainStart, dur)));
   // ends_at is muted/italic for hypothetical so it visually pairs with
   // the projection annotation rather than the concrete left-side ticks.
@@ -660,8 +746,38 @@ function renderBurnDown(svgID, win, opts) {
       x: sx(start), y: AXIS_Y, "font-size": "10", fill: "#444", "text-anchor": "middle"
     }, fmtAxisTime(start, dur)));
   }
-  svg.appendChild(el("text", { x: 4, y: PCT_TOP + 4, "font-size": "10", fill: "#444" }, "100%"));
-  svg.appendChild(el("text", { x: 4, y: PCT_BOTTOM, "font-size": "10", fill: "#444" }, "0"));
+  }
+
+  // Quota weekly chart: local-midnight ticks, with a day label centred
+  // between each pair of ticks. The partial days before the first tick and
+  // after the last are unlabelled, and the start/end time labels stay. The
+  // bar grid follows the window, not the calendar, so a tick can land
+  // mid-bar; that is intended. A day label is dropped rather than drawn over
+  // a start/end label.
+  if (!rolling && win.kind === "weekly") {
+    const edgeBoxes = Array.from(svg.querySelectorAll("text"))
+      .filter(t => t.getAttribute("y") === String(AXIS_Y))
+      .map(t => t.getBBox());
+    const wd = weeklyDayTicks(domainStart, domainEnd);
+    for (const ms of wd.ticks) {
+      const x = sx(ms);
+      svg.appendChild(el("line", { x1: x, y1: VOL_BOTTOM, x2: x, y2: VOL_BOTTOM + 5, stroke: "#444" }));
+    }
+    for (const day of wd.days) {
+      const t = el("text", {
+        x: sx(day.ms), y: AXIS_Y, "font-size": "10", fill: "#444", "text-anchor": "middle"
+      }, day.label);
+      svg.appendChild(t);
+      const b = t.getBBox();
+      if (edgeBoxes.some(e => b.x < e.x + e.width + 4 && b.x + b.width + 4 > e.x)) {
+        svg.removeChild(t);
+      }
+    }
+  }
+  if (!rolling) {
+    svg.appendChild(el("text", { x: 4, y: PCT_TOP + 4, "font-size": "10", fill: "#444" }, "100%"));
+    svg.appendChild(el("text", { x: 4, y: PCT_BOTTOM, "font-size": "10", fill: "#444" }, "0"));
+  }
 }
 
 // estimateMetric builds one "Est. full X allowance" pair. extrapolateAllowance
@@ -676,6 +792,11 @@ function estimateMetric(label, consumedUsd, pct) {
 
 // renderConsumption paints the two consumption lines for the selected period:
 // what was actually spent, then what that implies a full window costs.
+// enterpriseMode mirrors state.enterprise from the last good poll. Enterprise
+// accounts have no session or weekly allowance, so the percentage and
+// full-allowance figures have nothing to be a percentage of.
+let enterpriseMode = false;
+
 function renderConsumption(d) {
   const line = clear(document.getElementById("consumed-line"));
   const est = clear(document.getElementById("estimate-line"));
@@ -686,6 +807,7 @@ function renderConsumption(d) {
   const usd = d.consumed_usd_equivalent;
   const pctText = (p) => (p == null ? "—" : fmt(p, 0) + "%");
   line.appendChild(metric("Consumed", "$" + fmt(usd)));
+  if (enterpriseMode) return;
   line.appendChild(metric("Session", pctText(d.consumed_session_pct)));
   line.appendChild(metric("Weekly", pctText(d.consumed_weekly_pct)));
   est.appendChild(estimateMetric("Est. full session allowance", usd, d.consumed_session_pct));
@@ -963,6 +1085,22 @@ function renderStale(err) {
   note.hidden = false;
 }
 
+// renderEnterpriseChrome swaps the headings and hides the controls that only
+// mean something against a quota window (slack release, allowance snapshot).
+function renderEnterpriseChrome(on) {
+  const changed = on !== enterpriseMode;
+  enterpriseMode = on;
+  document.getElementById("slack-flag").hidden = on;
+  document.getElementById("snapshot-line").hidden = on;
+  document.getElementById("h-session").textContent = on
+    ? "Last 15 hours (15-minute bars)"
+    : "Session window (last 15h, current window in rightmost third)";
+  document.getElementById("h-weekly").textContent = on
+    ? "Last 7 days (6-hour bars)"
+    : "Weekly window";
+  if (changed) clear(document.getElementById("estimate-line"));
+}
+
 async function refreshState() {
   let s;
   try {
@@ -974,6 +1112,7 @@ async function refreshState() {
   }
   try {
     renderStale(null);
+    renderEnterpriseChrome(s.enterprise === true);
     renderSlackRelease(s);
     renderSnapshotLine(s);
     // Slack zones come from the server (state.slack_profiles), which

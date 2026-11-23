@@ -186,3 +186,31 @@ func TestResolveCredentialsPath(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadCredentialReadsSubscriptionType(t *testing.T) {
+	path := writeCredentials(t, `{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"enterprise"}}`)
+	cred, err := LoadCredential(path)
+	if err != nil {
+		t.Fatalf("LoadCredential: %v", err)
+	}
+	if cred.SubscriptionType != "enterprise" {
+		t.Errorf("SubscriptionType = %q, want enterprise", cred.SubscriptionType)
+	}
+	if !cred.IsEnterprise() {
+		t.Error("IsEnterprise = false, want true")
+	}
+}
+
+// Enterprise mode is keyed on the subscription type alone. Other plans, a
+// missing field, and lookalikes must not switch it on.
+func TestCredentialIsEnterprise(t *testing.T) {
+	cases := map[string]bool{
+		"enterprise": true, "Enterprise": true, " ENTERPRISE ": true,
+		"": false, "team": false, "max": false, "pro": false, "enterprise_trial": false,
+	}
+	for sub, want := range cases {
+		if got := (&Credential{SubscriptionType: sub}).IsEnterprise(); got != want {
+			t.Errorf("IsEnterprise(%q) = %v, want %v", sub, got, want)
+		}
+	}
+}

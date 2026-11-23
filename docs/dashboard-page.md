@@ -131,3 +131,27 @@ handling, superseded responses, the in-flight guard — is exercised by
 `internal/server/dashboard_test.go` asserts both are reachable as
 standalone routes, so a module that the tests cover can't quietly stop
 being the module the page runs.
+
+## Enterprise mode (rolling windows)
+
+Enterprise accounts report no session or weekly rows: `GET /api/oauth/usage`
+answers 200 with `limits: []` and null `five_hour`/`seven_day`. Enterprise mode
+is triggered **only** by `subscriptionType == "enterprise"` in Claude Code's
+credentials file (never by `spend`/`extra_usage` being present). The poller reads
+the plan before the token-expiry check, records it in `Status.Plan` /
+`Status.Enterprise`, and skips the usage request entirely, so nothing is logged
+as a failed poll.
+
+In this mode `/api/dashboard/state` sets `enterprise: true` and returns
+`session` and `weekly` as `rolling` windows (`internal/dashboard/rolling.go`):
+
+- Session view: trailing 15 h of 15-minute bars. Weekly view: trailing 7 d of
+  6-hour bars.
+- The bar grid is fixed and phased to the **local** wall clock (UTC offset mod
+  bucket width). `ends_at` is the first boundary after now, so the filling bar
+  is the rightmost one; the window only advances in whole buckets, so bars that
+  have scrolled into the past never change width or contents.
+- Only cost bars are drawn (the whole chart height goes to them): no %-used
+  curve, pace line or slack zone. The slack-release flag, allowance snapshot
+  line, session/weekly percentages and full-allowance estimates are hidden;
+  "Consumed $" remains. Cost by project is unchanged.

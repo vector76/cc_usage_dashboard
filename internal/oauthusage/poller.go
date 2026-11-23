@@ -36,6 +36,13 @@ type Status struct {
 	LastSuccess     time.Time
 	LastError       string
 
+	// Plan is the subscription type last read from the credentials file, and
+	// Enterprise is true when it is "enterprise". An enterprise account has
+	// no session or weekly rows, so the poller does not query the endpoint
+	// for it and the dashboard shows rolling windows instead.
+	Plan       string
+	Enterprise bool
+
 	// RefreshEnabled is true when a RefreshFunc is configured.
 	RefreshEnabled bool
 	// RefreshArmed is true when the next stale credential will trigger a
@@ -290,6 +297,21 @@ func (p *Poller) PollOnce(ctx context.Context) error {
 	if err != nil {
 		p.recordFailure(err)
 		return err
+	}
+	p.mu.Lock()
+	p.status.Plan = cred.SubscriptionType
+	p.status.Enterprise = cred.IsEnterprise()
+	p.mu.Unlock()
+	if cred.IsEnterprise() {
+		// Nothing to fetch: the endpoint answers 200 with empty limits, which
+		// would only be logged as a failure every interval. Checked before
+		// the expiry test so an idle host still reports its plan.
+		p.mu.Lock()
+		p.status.Available = false
+		p.status.CredentialStale = false
+		p.status.LastError = ""
+		p.mu.Unlock()
+		return nil
 	}
 	if !cred.UsableAt(now) {
 		err := errors.New("access token expired at " + cred.ExpiresAt.Format(time.RFC3339) +

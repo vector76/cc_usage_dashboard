@@ -329,3 +329,65 @@ func TestStopIsPromptAndIdempotent(t *testing.T) {
 		t.Fatal("Stop did not return within 5s")
 	}
 }
+
+// An enterprise account has no session or weekly rows, so the endpoint can
+// only answer "no usable limits". The poller must not ask, must not fail,
+// and must say which plan it saw so the dashboard can switch modes.
+func TestPollOnceEnterpriseSkipsRequestAndReportsPlan(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	h := newPollerHarness(t, func() time.Time { return now })
+	body := `{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"enterprise","expiresAt":` +
+		strconv.FormatInt(msSinceEpoch(now.Add(8*time.Hour)), 10) + `}}`
+	if err := os.WriteFile(h.credPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.poller.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if n := atomic.LoadInt64(h.requests); n != 0 {
+		t.Errorf("made %d HTTP requests, want 0", n)
+	}
+	if got := h.snapshots(); len(got) != 0 {
+		t.Errorf("recorded %d snapshots, want 0", len(got))
+	}
+	st := h.poller.Status()
+	if st.Plan != "enterprise" || !st.Enterprise {
+		t.Errorf("Status plan=%q enterprise=%v, want enterprise/true", st.Plan, st.Enterprise)
+	}
+	if st.LastError != "" || st.CredentialStale {
+		t.Errorf("Status reports a failure: %+v", st)
+	}
+}
+
+// The plan is read before the expiry check, so an idle host holding an
+// expired enterprise token still shows the enterprise dashboard.
+func TestPollOnceEnterpriseDetectedEvenWhenTokenExpired(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	h := newPollerHarness(t, func() time.Time { return now })
+	body := `{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"enterprise","expiresAt":` +
+		strconv.FormatInt(msSinceEpoch(now.Add(-time.Hour)), 10) + `}}`
+	if err := os.WriteFile(h.credPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_ = h.poller.PollOnce(context.Background())
+	if !h.poller.Status().Enterprise {
+		t.Error("Status.Enterprise = false for an expired enterprise token")
+	}
+}
+
+func TestPollOnceNonEnterprisePlanStillFetches(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	h := newPollerHarness(t, func() time.Time { return now })
+	body := `{"claudeAiOauth":{"accessToken":"tok","subscriptionType":"team","expiresAt":` +
+		strconv.FormatInt(msSinceEpoch(now.Add(8*time.Hour)), 10) + `}}`
+	if err := os.WriteFile(h.credPath, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.poller.PollOnce(context.Background()); err != nil {
+		t.Fatalf("PollOnce: %v", err)
+	}
+	if atomic.LoadInt64(h.requests) != 1 || h.poller.Status().Enterprise {
+		t.Errorf("team plan: requests=%d enterprise=%v", atomic.LoadInt64(h.requests), h.poller.Status().Enterprise)
+	}
+}
