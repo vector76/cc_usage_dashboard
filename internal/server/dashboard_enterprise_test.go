@@ -3,11 +3,10 @@ package server
 import (
 	"testing"
 	"time"
-
-	"github.com/vector76/cc_usage_dashboard/internal/oauthusage"
 )
 
-// Enterprise mode is decided by the poller's plan alone: the state carries
+// Enterprise mode is decided by the injected predicate alone (the credentials
+// plan, via cmd/trayapp), not by the OAuth poller: the state carries
 // rolling session/weekly windows instead of quota or hypothetical ones.
 func TestDashboardStateEnterpriseRollingWindows(t *testing.T) {
 	srv, testStore := createTestServer(t)
@@ -15,7 +14,7 @@ func TestDashboardStateEnterpriseRollingWindows(t *testing.T) {
 
 	now := time.Date(2026, 11, 23, 10, 7, 0, 0, time.UTC)
 	srv.dashboardHandler.SetNow(func() time.Time { return now })
-	srv.SetOAuthStatus(fakeOAuthStatus{oauthusage.Status{Plan: "enterprise", Enterprise: true}})
+	srv.SetEnterprise(func() bool { return true })
 
 	state := fetchDashboardState(t, srv)
 	if !state.Enterprise {
@@ -42,7 +41,7 @@ func TestDashboardStateNonEnterpriseUnchanged(t *testing.T) {
 	srv, testStore := createTestServer(t)
 	defer testStore.Close()
 
-	srv.SetOAuthStatus(fakeOAuthStatus{oauthusage.Status{Plan: "team"}})
+	srv.SetEnterprise(func() bool { return false })
 	state := fetchDashboardState(t, srv)
 	if state.Enterprise || (state.Session != nil && state.Session.Rolling) {
 		t.Errorf("non-enterprise plan switched on rolling mode: %+v", state)

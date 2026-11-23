@@ -160,3 +160,14 @@ slack:
 #   slack_samples_days: 90
 
 # enable_slack_sampling: false
+
+# How the dashboard treats quota windows. Enterprise accounts have no session
+# or weekly quota, so they get rolling cost charts (last 15h and last 7d)
+# instead.
+#   auto       (default) read subscriptionType from Claude Code's credentials
+#              file; "enterprise" switches to the rolling charts. No token and
+#              no network call, and independent of oauth_usage.
+#   enterprise force the rolling charts (e.g. the credentials file is absent
+#              because the login lives in a keychain).
+#   quota      force the normal quota charts.
+# plan: auto

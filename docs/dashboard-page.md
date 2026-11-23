@@ -137,10 +137,12 @@ being the module the page runs.
 Enterprise accounts report no session or weekly rows: `GET /api/oauth/usage`
 answers 200 with `limits: []` and null `five_hour`/`seven_day`. Enterprise mode
 is triggered **only** by `subscriptionType == "enterprise"` in Claude Code's
-credentials file (never by `spend`/`extra_usage` being present). The poller reads
-the plan before the token-expiry check, records it in `Status.Plan` /
-`Status.Enterprise`, and skips the usage request entirely, so nothing is logged
-as a failed poll.
+credentials file (never by `spend`/`extra_usage` being present), or by config
+`plan: enterprise` (see docs/configuration.md, "Plan mode"). The dashboard reads
+the plan straight from the file (`oauthusage.PlanDetector`), with no token and no
+network call, so it works with `oauth_usage` off. When the poller is on it also
+reads the plan, before the token-expiry check, and skips the usage request
+entirely, so nothing is logged as a failed poll.
 
 In this mode `/api/dashboard/state` sets `enterprise: true` and returns
 `session` and `weekly` as `rolling` windows (`internal/dashboard/rolling.go`):

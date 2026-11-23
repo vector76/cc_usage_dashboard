@@ -360,6 +360,25 @@ executable; empty means `claude` on `PATH`. The rules:
 `GET /api/oauth/status` reports `refresh_enabled`, `refresh_armed`,
 `last_refresh_attempt` and `last_refresh_error`.
 
+## Plan mode
+
+`plan` (default `auto`) chooses between the quota charts and the enterprise
+rolling charts (see [dashboard-page.md](dashboard-page.md#enterprise-mode-rolling-windows)).
+
+```yaml
+plan: auto   # auto | enterprise | quota
+```
+
+`auto` reads `subscriptionType` from Claude Code's credentials file
+(`oauth_usage.credentials_path`, else `$CLAUDE_CONFIG_DIR` or `~/.claude`). Only
+that one field is decoded: the access token is never read, nothing goes over the
+network, and the result does not depend on `oauth_usage.enabled` or on the token
+having expired. The file is re-checked when its modification time changes. If it
+cannot be read mid-rewrite the previous answer is kept; if it is gone, the plan
+reads as not enterprise. `enterprise` and `quota` force a mode without touching
+the file, for machines with no credentials file (a keychain-backed login) or for
+trying either view. Any other value is rejected at startup.
+
 ## Uplink
 
 `uplink.url` turns this trayapp into a *sending* instance: it forwards the

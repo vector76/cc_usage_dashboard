@@ -129,6 +129,15 @@ type Config struct {
 	} `yaml:"oauth_usage"`
 
 	EnableSlackSampling bool `yaml:"enable_slack_sampling"`
+
+	// Plan selects how the dashboard treats quota windows. "auto" (default)
+	// reads subscriptionType from Claude Code's credentials file and shows
+	// rolling cost charts for an enterprise account, which has no session or
+	// weekly quota. "enterprise" and "quota" force one mode, for machines
+	// where the credentials file is absent (e.g. a keychain-backed login) or
+	// to test either view. Independent of oauth_usage: the plan is read from
+	// the file without a token or any network call.
+	Plan string `yaml:"plan"`
 }
 
 // minOAuthPollIntervalSeconds is a floor, not a recommendation. It exists
@@ -179,6 +188,7 @@ func Load(path string) (*Config, error) {
 	cfg.OAuthUsage.RefreshWithClaude = false
 	cfg.OAuthUsage.ClaudePath = ""
 	cfg.EnableSlackSampling = false
+	cfg.Plan = "auto"
 
 	// If no path provided, return defaults
 	if path == "" {
@@ -203,6 +213,16 @@ func Load(path string) (*Config, error) {
 	cfg.Logging.File = expandPlaceholders(cfg.Logging.File)
 	cfg.OAuthUsage.CredentialsPath = expandPlaceholders(cfg.OAuthUsage.CredentialsPath)
 	cfg.OAuthUsage.ClaudePath = expandPlaceholders(cfg.OAuthUsage.ClaudePath)
+
+	cfg.Plan = strings.ToLower(strings.TrimSpace(cfg.Plan))
+	if cfg.Plan == "" {
+		cfg.Plan = "auto"
+	}
+	switch cfg.Plan {
+	case "auto", "enterprise", "quota":
+	default:
+		return nil, fmt.Errorf("config plan: %q is not one of auto, enterprise, quota", cfg.Plan)
+	}
 
 	// Reject malformed slack profiles at startup with the offending key in
 	// the message, rather than letting the gate misbehave silently later.

@@ -305,6 +305,14 @@ func main() {
 			"interval_seconds", cfg.OAuthUsage.PollIntervalSeconds)
 	}
 
+	// Enterprise mode (rolling cost charts instead of quota windows) follows
+	// the plan in Claude Code's credentials file, or config `plan` when it
+	// forces a mode. Read directly from the file, with no token and no network,
+	// so it works whether or not oauth_usage is enabled.
+	planDetector := oauthusage.NewPlanDetector(oauthusage.ResolveCredentialsPath(cfg.OAuthUsage.CredentialsPath))
+	srv.SetEnterprise(enterpriseDetector(cfg.Plan, planDetector.Enterprise))
+	slog.Info("dashboard plan mode", "plan", cfg.Plan)
+
 	// stop signals every background loop (retention pruner, windows ticker)
 	// to exit; wg lets shutdown wait for them. Each tailer has its own
 	// stopChan + doneChan and is stopped via tailers.Stop() so we don't

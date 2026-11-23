@@ -47,10 +47,14 @@ type OAuthStatusResponse struct {
 // concurrent calls are not supported.
 func (s *Server) SetOAuthStatus(src OAuthStatusSource) {
 	s.oauthStatus = src
-	// Enterprise mode is decided by the plan the poller read from the
-	// credentials file, and by nothing else.
+}
+
+// SetEnterprise supplies the predicate that switches the dashboard into
+// enterprise mode (rolling cost charts instead of quota windows). Independent
+// of the OAuth poller, so it works with oauth_usage off.
+func (s *Server) SetEnterprise(fn func() bool) {
 	if s.dashboardHandler != nil {
-		s.dashboardHandler.SetEnterprise(func() bool { return src.Status().Enterprise })
+		s.dashboardHandler.SetEnterprise(fn)
 	}
 }
 
